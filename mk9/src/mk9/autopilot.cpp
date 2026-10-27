@@ -6,7 +6,8 @@
 // steps of known length:
 //   main menu, cursor on FIGHT:  UP (the "1 PLAYER" header), RIGHT ("2 PLAYERS"), DOWN (VERSUS
 //   MODE), A: ONE VS ONE / TWO VS TWO / TEST YOUR LUCK, DOWN x n, A: the select screen
-//   CONTINUE?:  REMATCH, SELECT A NEW FIGHTER, QUIT TO THE MAIN MENU
+//   CONTINUE?:  REMATCH, SELECT A NEW FIGHTER, QUIT TO THE MAIN MENU (the loser's controller
+//               steers it, as at an arcade's continue)
 // and checks it got where it went before handing the controllers to the players.
 
 #include "mk9/autopilot.h"
@@ -44,6 +45,9 @@ input::Pad g_pad;     // what the autopilot presses now
 uint64_t g_frame = 0;
 bool g_over_reported = false;  // MatchOver said so for this match
 bool g_fought = false;         // a fight ran since the last start or rematch (its result can come)
+int g_loser = 1;               // the last match's loser (0 player 1, 1 player 2): the CONTINUE? menu's
+int g_steer_slot = 0;          // the slot whose autopilot steers online
+uint32_t g_pad_user = 0;       // offline, the user index the autopilot presses for
 Phase g_after_steps = Phase::Players;  // where Steer goes once its steps are done and it got there
 int32_t g_steer_to = game::kPhaseSelect;
 
@@ -69,8 +73,9 @@ void PlanSteps(const Plan& plan) {
   Push(input::kA, 8, 200);  // the select screen
 }
 
-// slot 0 steers online; offline the autopilot steers player 1
-bool Steering() { return !g_online || g_plan.slot == 0; }
+// online the steering slot's autopilot steers (slot 0, or the loser at the CONTINUE? menu);
+// offline the autopilot presses for g_pad_user
+bool Steering() { return !g_online || g_plan.slot == g_steer_slot; }
 
 void AtSelect(uint64_t frame) {
   const bool pick = g_plan.slot >= 0 && g_plan.slot < 4 && !g_plan.picks[g_plan.slot].empty();
@@ -84,6 +89,8 @@ void AtSelect(uint64_t frame) {
 
 // from the CONTINUE? menu (cursor on REMATCH): n times DOWN, then A
 void ContinueSteps(int downs, Phase after, int32_t to) {
+  g_steer_slot = g_loser;
+  g_pad_user = uint32_t(g_loser);
   g_steps.clear();
   Push(0, 1, 120);  // the menu takes presses once it has come in
   for (int i = 0; i < downs; i++) Push(input::kDpadDown, 8, 40);
@@ -98,7 +105,7 @@ void ContinueSteps(int downs, Phase after, int32_t to) {
 // controller reaches them either
 bool Override(uint32_t user, input::Pad& out) {
   if (net::InSync()) return false;  // netplay's inputs (the autopilot's presses go in as its player's)
-  if (user == 0) return LocalPad(out);
+  if (user == g_pad_user) return LocalPad(out);
   if (!g_launcher || g_phase == Phase::Players || g_phase == Phase::Off || g_phase == Phase::Lost) return false;
   out = input::Pad{};
   return true;
@@ -187,6 +194,7 @@ bool MatchOver(int& winner, int& p1, int& p2) {
   p1 = game::RoundsWon(0);
   p2 = game::RoundsWon(1);
   winner = p1 > p2 ? 1 : 2;
+  g_loser = winner == 1 ? 1 : 0;
   REXLOG_INFO("mk9 autopilot: the match is over, player {} won {}-{}", winner, p1, p2);
   return true;
 }
@@ -249,6 +257,8 @@ void OnFrame(uint64_t frame) {
       return;
     case Phase::Follow:
       if (phase == g_steer_to) {
+        g_steer_slot = 0;
+        g_pad_user = 0;
         if (g_after_steps == Phase::Players && g_steer_to == game::kPhaseSelect) AtSelect(frame);
         else Enter(g_after_steps);
       }
@@ -281,6 +291,8 @@ void OnFrame(uint64_t frame) {
         return;
       }
       if (phase == g_steer_to) {
+        g_steer_slot = 0;
+        g_pad_user = 0;
         if (g_after_steps == Phase::Players && g_steer_to == game::kPhaseSelect) {
           AtSelect(frame);
         } else {

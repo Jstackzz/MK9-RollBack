@@ -1,0 +1,26 @@
+# Codegen configuration for Mortal Kombat Komplete Edition (Xbox 360), default.xex
+# title 575207FD, media 6579DAFA, version 0.0.0.8, built 2011-12-05 (MK9Game-Retail.exe).
+# Every address below is for that executable only.
+
+# Leaf functions without .pdata entries that are only reached by tail branches (b), so the
+# scanner does not find them on its own.
+[functions]
+0x8240AA80 = { end = 0x8240AAAC }   # tail target of 0x8246FA88
+0x82AC5140 = { end = 0x82AC5148 }   # lwz r3,0x4C(r3); blr
+0x82780F40 = { end = 0x82780F48 }   # lwz r3,0x80(r3); blr
+0x82AE9130 = { end = 0x82AE91C4 }
+0x830179C0 = { end = 0x83017A3C }
+0x82F6A238 = { end = 0x82F6A2A8 }
+# property getters whose case blocks the scanner split into pieces
+0x82E54080 = { end = 0x82E54110 }
+0x82E6F378 = { end = 0x82E6F400 }
+0x82E6F490 = { end = 0x82E6F518 }
+
+# XAPI fibers: the game's latent-action scheduler (list head 0x834246BC, run by sub_829D06C8)
+# switches into fibers. The SDK implements these on host fibers.
+# 0x82BDC380 is SwitchToFiber's entry (a branch into the register save at 0x82BDCC80).
+[rexcrt]
+ConvertThreadToFiber = 0x82BDC240
+ConvertFiberToThread = 0x82BDC2D0
+DeleteFiber = 0x82BDC320
+SwitchToFiber = 0x82BDC380

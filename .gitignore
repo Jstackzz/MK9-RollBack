@@ -1,0 +1,26 @@
+# Game data and anything derived from it: never committed
+game/
+mk9/generated/
+mk9/out/
+mk9/*.log
+*.xex
+*.iso
+
+# Toolchains and SDKs (see docs/SETUP.md)
+external/
+
+# Builds and packages
+build/
+dist/
+launcher/build/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+server/*.sqlite*
+server/*.pem
+server/*.log
+
+# Reference snapshots of the MK3D project (the user's own code, copied read-only)
+reference/

@@ -30,6 +30,7 @@ class QueueEntry:
     public_ip: str | None = None
     server_rtt: int | None = None  # client's UDP round trip to the server, ms
     death_traps: bool = True  # the arenas' death traps the player wants (ranked never has them)
+    netcode: str = "lockstep"  # what the player's game plays with: a match is rollback only when both want it
 
     @property
     def traps(self) -> bool:

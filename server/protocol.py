@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 import re
 from typing import Any
 
 from . import __version__
 
 PROTO = 1
-SERVER_NAME = "mk3d-server"
+SERVER_NAME = "mk9-server"
 SERVER_VERSION = __version__
 
 MAX_LINE = 16 * 1024
@@ -19,10 +20,15 @@ MAX_RELAY_DATAGRAM = 1472  # what the relay passes on: a game packet, up to a wh
 
 # game id -> online modes (practice is offline and never reaches the server)
 GAMES: dict[str, tuple[str, ...]] = {
-    "mkda": ("kombat",),
-    "mkd": ("kombat", "chess", "puzzle"),
-    "mka": ("kombat", "motor"),
+    "mk9": ("versus", "tag", "tyl"),
 }
+# the online modes with ranked play (queue, Elo, leaderboard); Test Your Luck is Kasual only
+RANKED_MODES: dict[str, tuple[str, ...]] = {
+    "mk9": ("versus", "tag"),
+}
+# how two games keep a match in step: lockstep (the default) or rollback (experimental); a match plays rollback only
+# when both players asked for it
+NETCODES: tuple[str, ...] = ("lockstep", "rollback")
 REGIONS: tuple[str, ...] = ("na", "sa", "eu", "me", "af", "as", "oc")
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,16}$")
@@ -34,7 +40,8 @@ LOBBY_CODE_LEN = 5
 LOBBY_NAME_MAX = 32
 CHAT_MAX = 200
 ROUNDS_ALLOWED = (1, 3, 5)
-DELAY_MAX = 4
+DELAY_MAX = 6
+DELAY_AUTO = -1  # a player's "auto" input delay: from the match's measured round trip (auto_delay)
 
 
 class ProtocolError(Exception):
@@ -79,8 +86,9 @@ def version_at_least(version: str, minimum: str) -> bool:
     return a + (0,) * (width - len(a)) >= b + (0,) * (width - len(b))
 
 
-# where a launcher too old for the server is sent when no update file names a release
-RELEASES_PAGE = "https://github.com/Jstackzz/MK-3D-rollback/releases/latest"
+# where a launcher too old for the server is sent when no update file names a release: the project's releases page
+# once it publishes releases (empty: the message names no page)
+RELEASES_PAGE = ""
 
 
 def download_link(url: Any) -> bool:
@@ -94,7 +102,7 @@ def parse_update(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("not a JSON object")
     version, url, sha256, size = data.get("version"), data.get("url"), data.get("sha256"), data.get("size")
-    notes, page = data.get("notes", ""), data.get("page", RELEASES_PAGE)
+    notes, page = data.get("notes", ""), data.get("page", RELEASES_PAGE or url)
     if not isinstance(version, str) or not re.fullmatch(r"\d+(\.\d+)*", version):
         raise ValueError("version must look like 0.1.8")
     if not download_link(url):
@@ -159,14 +167,38 @@ def get_int(msg: dict, key: str, *, lo: int, hi: int, default: int | None = None
     return value
 
 
-def get_game_mode(msg: dict) -> tuple[str, str]:
+def get_game_mode(msg: dict, *, ranked: bool = False) -> tuple[str, str]:
     game = msg.get("game")
     if game not in GAMES:
         raise ProtocolError("bad_game", f"Unknown game {game!r}.")
     mode = msg.get("mode")
     if mode not in GAMES[game]:
         raise ProtocolError("bad_mode", f"Mode {mode!r} is not an online mode of {game}.")
+    if ranked and mode not in RANKED_MODES.get(game, ()):
+        raise ProtocolError("bad_mode", f"Mode {mode!r} of {game} has no ranked play (Kasual only).")
     return game, mode
+
+
+def get_delay(msg: dict, key: str = "delay", *, default: int = 2) -> int:
+    """A player's input delay: 0..DELAY_MAX frames, or "auto" (DELAY_AUTO)."""
+    if msg.get(key) == "auto":
+        return DELAY_AUTO
+    if msg.get(key, default) == DELAY_AUTO:
+        return DELAY_AUTO
+    return get_int(msg, key, lo=0, hi=DELAY_MAX, default=default)
+
+
+def auto_delay(rtt_ms: int) -> int:
+    """The input delay that covers the one-way latency of a round trip (half of it, plus 8 ms for the frame on its
+    way), in 60 Hz frames: 2 to 8. Lockstep waits at every frame whose input is still on its way."""
+    return min(8, max(2, math.ceil((rtt_ms / 2 + 8) / 16.67)))
+
+
+def get_netcode(msg: dict, key: str = "netcode", *, default: str = "lockstep") -> str:
+    value = msg.get(key, default)
+    if value not in NETCODES:
+        raise ProtocolError("bad_request", f"Field '{key}' must be lockstep or rollback.")
+    return value
 
 
 def get_region(msg: dict, key: str = "region") -> str:

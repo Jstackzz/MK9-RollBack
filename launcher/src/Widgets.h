@@ -21,7 +21,7 @@ public:
     QString gameId() const { return gameId_; }
 
 protected:
-    QString gameId_ = QStringLiteral("mkd");
+    QString gameId_ = QStringLiteral("mk9");
 };
 
 namespace ui {

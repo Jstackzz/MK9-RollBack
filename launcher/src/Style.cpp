@@ -196,13 +196,13 @@ QPixmap emblem(int size) {
     p.drawPath(blade);
 
     QFont f(QStringLiteral("Bahnschrift"));
-    f.setPixelSize(qMax(6, int(s * 0.40)));
+    f.setPixelSize(qMax(6, int(s * 0.52)));
     f.setWeight(QFont::Black);
     p.setFont(f);
     p.setPen(QColor(0, 0, 0, 160));
-    p.drawText(outer.translated(s * 0.02, s * 0.025), Qt::AlignCenter, QStringLiteral("3D"));
+    p.drawText(outer.translated(s * 0.02, s * 0.025), Qt::AlignCenter, QStringLiteral("9"));
     p.setPen(QColor(0xff, 0xf3, 0xe4));
-    p.drawText(outer, Qt::AlignCenter, QStringLiteral("3D"));
+    p.drawText(outer, Qt::AlignCenter, QStringLiteral("9"));
     return pm;
 }
 

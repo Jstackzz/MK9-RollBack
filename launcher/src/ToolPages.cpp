@@ -4,6 +4,7 @@
 #include <QCryptographicHash>
 #include <QComboBox>
 #include <QDir>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -13,14 +14,16 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QProcess>
 #include <QProgressBar>
 #include <QPushButton>
-#include <QRegularExpression>
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QStorageInfo>
 #include <QThread>
 #include <QVBoxLayout>
+
+#include <windows.h>
 
 #include "AppPaths.h"
 #include "GameData.h"
@@ -45,17 +48,6 @@ QWidget* pathRow(QLineEdit* edit, QPushButton* browse) {
     h->addWidget(browse);
     return w;
 }
-
-// the resolution box's text as the games read MK3D_RESOLUTION: "desktop" or WIDTHxHEIGHT; empty while it is neither
-QString gameResolution(const QString& text) {
-    const QString t = text.trimmed();
-    if (t.isEmpty() || t.compare(QLatin1String("desktop"), Qt::CaseInsensitive) == 0) return QStringLiteral("desktop");
-    static const QRegularExpression size(QStringLiteral("^(\\d{3,5})\\s*[xX\\x{00D7}*]\\s*(\\d{3,5})$"));
-    const QRegularExpressionMatch m = size.match(t);
-    const int w = m.captured(1).toInt(), h = m.captured(2).toInt();
-    if (!m.hasMatch() || w < 320 || h < 240 || w > 16384 || h > 16384) return {};
-    return QStringLiteral("%1x%2").arg(w).arg(h);
-}
 }  // namespace
 
 // --- BuildPage -------------------------------------------------------------------------------------
@@ -65,9 +57,9 @@ BuildPage::BuildPage(QWidget* parent) : Page(parent) {
     root->setContentsMargins(28, 20, 28, 16);
     root->setSpacing(14);
     root->addWidget(ui::pageHeader(tr("Build game"),
-                                   tr("The game is built on your PC from your own disc: the disc image is "
-                                      "extracted into the game's assets folder, then the first launch compiles "
-                                      "the game's code library. Nothing from the game is downloaded.")));
+                                   tr("The game is built on your PC from your own disc: the disc image is extracted "
+                                      "into the game's data folder, then the build compiles the game for this PC. "
+                                      "Nothing from the game is downloaded.")));
     auto* columns = new QHBoxLayout;
     columns->setSpacing(16);
     root->addLayout(columns);
@@ -76,21 +68,23 @@ BuildPage::BuildPage(QWidget* parent) : Page(parent) {
     columns->addWidget(ui::card(tr("Game"), &info), 1);
     gameTitle_ = ui::label(QString(), "Big");
     folderInfo_ = ui::label(QString(), "Muted");
-    assetsInfo_ = ui::label(QString(), "Muted");
+    dataInfo_ = ui::label(QString(), "Muted");
     exeInfo_ = ui::label(QString(), "Muted");
-    for (QLabel* l : {folderInfo_, assetsInfo_, exeInfo_}) {
+    scriptInfo_ = ui::label(QString(), "Muted");
+    for (QLabel* l : {folderInfo_, dataInfo_, exeInfo_, scriptInfo_}) {
         l->setWordWrap(true);
         l->setTextInteractionFlags(Qt::TextSelectableByMouse);
     }
     info->addWidget(gameTitle_);
     info->addWidget(folderInfo_);
-    info->addWidget(assetsInfo_);
+    info->addWidget(dataInfo_);
     info->addWidget(exeInfo_);
+    info->addWidget(scriptInfo_);
     info->addStretch();
 
     QVBoxLayout* steps = nullptr;
     columns->addWidget(ui::card(tr("Steps"), &steps), 1);
-    steps->addWidget(ui::label(tr("1. Your disc image (.iso or .xiso.iso)"), "Muted"));
+    steps->addWidget(ui::label(tr("1. Your Xbox 360 disc image (.iso)"), "Muted"));
     image_ = new QLineEdit;
     image_->setPlaceholderText(tr("path to your disc image"));
     browse_ = new QPushButton(tr("Browse..."));
@@ -98,12 +92,12 @@ BuildPage::BuildPage(QWidget* parent) : Page(parent) {
     extract_ = new QPushButton(tr("EXTRACT AND BUILD"));
     extract_->setObjectName(QStringLiteral("Primary"));
     steps->addWidget(extract_);
-    auto* compileNote = ui::label(tr("2. The game then starts once and prepares its code for this PC (a few "
-                                     "minutes). When it says the game is ready, choose Exit. Again, by hand:"), "Muted");
-    compileNote->setWordWrap(true);
-    steps->addWidget(compileNote);
-    compile_ = new QPushButton(tr("Launch once to compile"));
-    steps->addWidget(compile_);
+    auto* buildNote = ui::label(tr("2. Then the build compiles the game for this PC; its output shows below. Again, "
+                                   "by hand:"), "Muted");
+    buildNote->setWordWrap(true);
+    steps->addWidget(buildNote);
+    build_ = new QPushButton(tr("Build the game"));
+    steps->addWidget(build_);
     cancel_ = new QPushButton(tr("Cancel"));
     cancel_->setEnabled(false);
     steps->addWidget(cancel_, 0, Qt::AlignRight);
@@ -115,21 +109,27 @@ BuildPage::BuildPage(QWidget* parent) : Page(parent) {
     progress_->setFormat(QStringLiteral("%p%"));
     root->addWidget(progress_);
     log_ = new LogView;
+    log_->setMaximumBlockCount(5000);  // a build says a lot
     root->addWidget(log_, 1);
 
     connect(browse_, &QPushButton::clicked, this, [this] {
         const QString f = QFileDialog::getOpenFileName(this, tr("Disc image"), image_->text(),
-                                                       tr("Xbox disc images (*.iso *.xiso);;All files (*)"));
+                                                       tr("Xbox 360 disc images (*.iso);;All files (*)"));
         if (!f.isEmpty()) {
             image_->setText(native(f));
             cfg::set(QStringLiteral("games/%1/image").arg(gameId_), f);
         }
     });
     connect(extract_, &QPushButton::clicked, this, &BuildPage::startExtract);
-    connect(compile_, &QPushButton::clicked, this, &BuildPage::compileFirstLaunch);
+    connect(build_, &QPushButton::clicked, this, &BuildPage::runBuild);
     connect(cancel_, &QPushButton::clicked, this, [this] {
         stop_ = true;
-        if (firstRun_) firstRun_->kill();
+        if (builder_ && builder_->state() != QProcess::NotRunning) {
+            // the script's own programs too (cmd, cmake, ninja, the compiler): the whole tree
+            QProcess::execute(QStringLiteral("taskkill"),
+                              {QStringLiteral("/T"), QStringLiteral("/F"), QStringLiteral("/PID"),
+                               QString::number(builder_->processId())});
+        }
     });
     progressTimer_.setInterval(500);
     connect(&progressTimer_, &QTimer::timeout, this, &BuildPage::updateProgress);
@@ -138,6 +138,7 @@ BuildPage::BuildPage(QWidget* parent) : Page(parent) {
 BuildPage::~BuildPage() {
     stop_ = true;
     if (worker_) worker_->wait();
+    if (builder_ && builder_->state() != QProcess::NotRunning) builder_->kill();
 }
 
 void BuildPage::extractImage(const QString& path) {
@@ -156,25 +157,36 @@ void BuildPage::refreshInfo() {
     const Game* g = GameData::instance().game(gameId_);
     if (!g) return;
     gameTitle_->setText(g->title);
-    const QString folder = cfg::gameFolder(gameId_);
-    const QString assets = QDir(folder).filePath(QStringLiteral("assets"));
-    folderInfo_->setText(tr("%1 (%2), title ID %3\nGame folder: %4").arg(g->title, g->edition, g->titleId, native(folder)));
-    if (QFileInfo::exists(QDir(assets).filePath(QStringLiteral("default.xbe"))))
-        assetsInfo_->setText(tr("Assets: %1 (default.xbe present)").arg(native(assets)));
-    else
-        assetsInfo_->setText(tr("Assets: %1 (not extracted yet)").arg(native(assets)));
-    const QFileInfo exe(cfg::gameExe(gameId_));
-    const bool built = QFileInfo::exists(exe.dir().filePath(exe.completeBaseName() + QStringLiteral(".dll")));
-    if (!exe.exists())
-        exeInfo_->setText(tr("Executable: %1 (missing)").arg(native(exe.filePath())));
-    else
-        exeInfo_->setText(tr("Executable: %1\nGame code: %2").arg(native(exe.filePath()),
-                                                                built ? tr("built") : tr("not built yet (the first start builds it)")));
+    folderInfo_->setText(tr("%1 (%2), title ID %3").arg(g->title, g->edition, g->titleId));
+    const QString disc = cfg::gameDataRoot(gameId_);
+    dataInfo_->setText(GameProcess::hasGameFiles(disc) ? tr("Disc files: %1 (default.xex present)").arg(native(disc))
+                                                       : tr("Disc files: %1 (not extracted yet)").arg(native(disc)));
+    const QString exe = cfg::gameExe(gameId_);
+    exeInfo_->setText(QFileInfo::exists(exe) ? tr("Game: %1").arg(native(exe))
+                                             : tr("Game: %1 (not built yet)").arg(native(exe)));
+    const QString script = cfg::buildScript(gameId_);
+    const QString args = cfg::buildArgs(gameId_);
+    const QString line = args.isEmpty() ? native(script) : native(script) + QLatin1Char(' ') + args;
+    scriptInfo_->setText(QFileInfo::exists(script) ? tr("Build: %1").arg(line)
+                                                   : tr("Build: %1 (not there yet)").arg(line));
+}
+
+bool BuildPage::needsRebuild(const QString& gameId) {
+    const QDir folder(cfg::gameFolder(gameId));
+    QFile want(folder.filePath(QStringLiteral("project/VERSION")));
+    if (!QFileInfo::exists(cfg::gameExe(gameId)) || !want.open(QIODevice::ReadOnly)) return false;
+    QFile built(folder.filePath(QStringLiteral("built.txt")));
+    const QByteArray w = want.readAll().trimmed();
+    return !built.open(QIODevice::ReadOnly) || built.readAll().trimmed() != w;
+}
+
+void BuildPage::rebuild() {
+    if (step_ == Step::Idle) runBuild();
 }
 
 void BuildPage::setBusy(bool busy) {
     extract_->setEnabled(!busy);
-    compile_->setEnabled(!busy);
+    build_->setEnabled(!busy);
     browse_->setEnabled(!busy);
     image_->setEnabled(!busy);
     cancel_->setEnabled(busy);
@@ -205,7 +217,7 @@ void BuildPage::startExtract() {
         return;
     }
     cfg::set(QStringLiteral("games/%1/image").arg(gameId_), imagePath_);
-    outDir_ = QDir(cfg::gameFolder(gameId_)).filePath(QStringLiteral("assets"));
+    outDir_ = cfg::gameDataRoot(gameId_);
     progress_->setValue(0);
     progress_->setFormat(QStringLiteral("%p%"));
     log_->line(tr("Reading the disc's file table: %1").arg(native(imagePath_)));
@@ -218,13 +230,15 @@ void BuildPage::startExtract() {
     runWorker(
         [disc, result, path = imagePath_] {
             if (!disc->open(path, &result->error)) return;
-            const xiso::Entry* xbe = disc->find(QStringLiteral("default.xbe"));
-            if (!xbe) {
-                result->error = tr("The disc has no default.xbe: this is not a game disc.");
+            const xiso::Entry* xex = disc->find(QStringLiteral("default.xex"));
+            if (!xex) {
+                result->error = disc->find(QStringLiteral("default.xbe"))
+                                    ? tr("This is an original Xbox disc (default.xbe), not the Xbox 360 game.")
+                                    : tr("The disc has no default.xex: this is not an Xbox 360 game disc.");
                 return;
             }
             QByteArray data;
-            if (!disc->read(*xbe, &data, &result->error)) return;
+            if (!disc->read(*xex, &data, &result->error)) return;
             result->sha1 = QString::fromLatin1(QCryptographicHash::hash(data, QCryptographicHash::Sha1).toHex());
             result->ok = true;
         },
@@ -240,12 +254,17 @@ void BuildPage::onDiscRead(const std::shared_ptr<xiso::Image>& disc, const WorkR
     }
     totalBytes_ = disc->totalBytes();
     totalFiles_ = disc->fileCount();
-    log_->line(tr("%1 files, %2; default.xbe SHA-1 %3.").arg(totalFiles_).arg(humanBytes(totalBytes_), r.sha1));
+    log_->line(tr("Xbox game file system at offset 0x%1 (%2); %3 files, %4; default.xex SHA-1 %5.")
+                   .arg(QString::number(disc->base(), 16).toUpper(), disc->layout())
+                   .arg(totalFiles_).arg(humanBytes(totalBytes_), r.sha1));
+    applog::write(QStringLiteral("build %1: file system at 0x%2 (%3), %4 files, %5 bytes, default.xex SHA-1 %6")
+                      .arg(gameId_, QString::number(disc->base(), 16).toUpper(), disc->layout())
+                      .arg(totalFiles_).arg(totalBytes_).arg(r.sha1));
     const Game* g = GameData::instance().game(gameId_);
-    if (g && !g->xbeSha1.isEmpty() && r.sha1.compare(g->xbeSha1, Qt::CaseInsensitive) != 0) {
-        log_->line(tr("This is not the release this build is made for (%1, %2: default.xbe SHA-1 %3).")
-                       .arg(g->title, g->edition, g->xbeSha1));
-        applog::write(QStringLiteral("build %1: another release, default.xbe SHA-1 %2").arg(gameId_, r.sha1));
+    if (g && !g->discSha1.isEmpty() && r.sha1.compare(g->discSha1, Qt::CaseInsensitive) != 0) {
+        log_->line(tr("This is not the release this build is made for (%1, %2: default.xex SHA-1 %3).")
+                       .arg(g->title, g->edition, g->discSha1));
+        applog::write(QStringLiteral("build %1: another release, default.xex SHA-1 %2").arg(gameId_, r.sha1));
         const auto answer = QMessageBox::warning(
             this, tr("Different release"),
             tr("This disc is not %1 (%2), the release this build of the game is made for. The game will most "
@@ -258,13 +277,13 @@ void BuildPage::onDiscRead(const std::shared_ptr<xiso::Image>& disc, const WorkR
     }
     QDir().mkpath(outDir_);
     const qint64 freeBytes = QStorageInfo(outDir_).bytesAvailable();
-    const qint64 needed = totalBytes_ + (qint64(1) << 30);  // the files, and the game code the first start builds
+    const qint64 needed = totalBytes_ + (qint64(512) << 20);  // the files, and a margin for saves and caches
     if (freeBytes >= 0 && freeBytes < needed) {
         log_->line(tr("Not enough free space on that drive: %1 needed, %2 free.").arg(humanBytes(needed), humanBytes(freeBytes)));
         finishStep();
         return;
     }
-    log_->line(tr("Extracting into %1 ...").arg(native(outDir_)));
+    log_->line(tr("Extracting into %1 ... (files already there in full are kept)").arg(native(outDir_)));
     step_ = Step::Extracting;
     bytesDone_ = 0;
     filesDone_ = 0;
@@ -285,11 +304,11 @@ void BuildPage::onExtracted(const WorkResult& r) {
         return;
     }
     progress_->setValue(1000);
-    progress_->setFormat(tr("Done  -  %1 files, %2").arg(totalFiles_).arg(humanBytes(totalBytes_)));
+    progress_->setFormat(tr("Extracted  -  %1 files, %2").arg(totalFiles_).arg(humanBytes(totalBytes_)));
     log_->line(tr("Extraction finished."));
     applog::write(QStringLiteral("build %1: extracted %2 files into %3").arg(gameId_).arg(totalFiles_).arg(native(outDir_)));
     refreshInfo();
-    compileFirstLaunch();
+    runBuild();
 }
 
 void BuildPage::updateProgress() {
@@ -300,32 +319,71 @@ void BuildPage::updateProgress() {
                              .arg(humanBytes(done), humanBytes(totalBytes_)));
 }
 
-void BuildPage::compileFirstLaunch() {
-    if (firstRun_ || step_ != Step::Idle) return;
-    const QString exe = cfg::gameExe(gameId_);
-    if (!QFileInfo::exists(QDir(cfg::gameFolder(gameId_)).filePath(QStringLiteral("assets/default.xbe"))))
-        log_->line(tr("Warning: assets/default.xbe is missing; extract the disc first."));
-    firstRun_ = new GameProcess(gameId_, 1, this);
-    connect(firstRun_, &GameProcess::outputLine, log_, &LogView::line);
-    connect(firstRun_, &GameProcess::exited, this, [this](int code, bool crashed) {
-        log_->line(crashed ? tr("The game crashed (code %1).").arg(code) : tr("The game exited (code %1).").arg(code));
-        applog::write(QStringLiteral("build %1: first launch exited with code %2%3").arg(gameId_).arg(code).arg(crashed ? " (crash)" : ""));
-        firstRun_->deleteLater();
-        firstRun_ = nullptr;
+void BuildPage::runBuild() {
+    if (builder_ || step_ != Step::Idle) return;
+    const QString script = cfg::buildScript(gameId_);
+    const QString args = cfg::buildArgs(gameId_);
+    if (!QFileInfo::exists(script)) {
+        const QString text =
+            paths::isPackage()
+                ? tr("The build script %1 is not in this package yet: a later release of the player package brings "
+                     "it. The disc is extracted; the game itself comes with that release.").arg(native(script))
+                : tr("The build script %1 is not there. Set it in Settings (Game, Build script).").arg(native(script));
+        log_->line(text);
+        applog::write(QStringLiteral("build %1: no build script %2").arg(gameId_, native(script)));
+        refreshInfo();
+        return;
+    }
+    if (!GameProcess::hasGameFiles(cfg::gameDataRoot(gameId_)))
+        log_->line(tr("Warning: the disc is not extracted yet (no default.xex in %1).").arg(native(cfg::gameDataRoot(gameId_))));
+    auto* p = new QProcess(this);
+    builder_ = p;
+    buildOut_.clear();
+    p->setWorkingDirectory(QFileInfo(script).absolutePath());
+    p->setProcessChannelMode(QProcess::MergedChannels);
+    p->setProgram(QStringLiteral("cmd.exe"));
+    // cmd /s /c ""<script>" <args>": the outer quotes go, the script's stay (a path with spaces)
+    p->setNativeArguments(QStringLiteral("/d /s /c \"\"%1\" %2\"").arg(native(script), args));
+    p->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* a) { a->flags |= CREATE_NO_WINDOW; });
+    connect(p, &QProcess::readyRead, this, [this, p] {
+        buildOut_.append(p->readAll());
+        qsizetype nl;
+        while ((nl = buildOut_.indexOf('\n')) >= 0) {
+            const QString line = QString::fromLocal8Bit(buildOut_.left(nl)).trimmed();
+            buildOut_.remove(0, nl + 1);
+            if (!line.isEmpty()) log_->line(line);
+        }
+    });
+    connect(p, &QProcess::finished, this, [this, p](int code, QProcess::ExitStatus st) {
+        if (!buildOut_.trimmed().isEmpty()) log_->line(QString::fromLocal8Bit(buildOut_).trimmed());
+        buildOut_.clear();
+        const bool ok = st == QProcess::NormalExit && code == 0;
+        log_->line(stop_ ? tr("Build cancelled.")
+                         : ok ? tr("Build finished: the game is ready (Single player, or search for a match).")
+                              : tr("The build failed (exit code %1): the lines above say why.").arg(code));
+        applog::write(QStringLiteral("build %1: script exited with code %2").arg(gameId_).arg(code));
+        progress_->setRange(0, 1000);
+        progress_->setValue(ok ? 1000 : 0);
+        progress_->setFormat(ok ? tr("Built") : tr("Not built"));
+        p->deleteLater();
+        builder_ = nullptr;
         finishStep();
         refreshInfo();
     });
-    QString err;
-    if (!firstRun_->start(exe, &err, false)) {
-        log_->line(err);
-        delete firstRun_;
-        firstRun_ = nullptr;
-        return;
-    }
-    step_ = Step::Compiling;
+    stop_ = false;
+    step_ = Step::Building;
     setBusy(true);
-    log_->line(tr("Started %1. The first start prepares the game's code for this PC, a few minutes; when it says "
-                  "the game is ready, choose Exit (or Start to try it).").arg(native(exe)));
+    progress_->setRange(0, 0);  // busy, no measure
+    log_->line(tr("Building: %1 %2").arg(native(script), args));
+    applog::write(QStringLiteral("build %1: running %2 %3").arg(gameId_, native(script), args));
+    p->start();
+    if (!p->waitForStarted(10000)) {
+        log_->line(tr("Could not run %1: %2").arg(native(script), p->errorString()));
+        p->deleteLater();
+        builder_ = nullptr;
+        progress_->setRange(0, 1000);
+        finishStep();
+    }
 }
 
 // --- SettingsPage ----------------------------------------------------------------------------------
@@ -386,10 +444,21 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     ui::fillRegions(region, cfg::region());
     auto* maxPing = new QComboBox;
     ui::fillMaxPing(maxPing, cfg::maxPing());
-    auto* delay = new QSpinBox;
-    delay->setRange(0, 4);
-    delay->setValue(cfg::inputDelay());
-    delay->setSuffix(tr(" frames"));
+    auto* delay = new QComboBox;
+    delay->addItem(tr("Auto (from the ping, default)"), QStringLiteral("auto"));
+    for (int f = 0; f <= 6; ++f) delay->addItem(tr("%n frame(s)", nullptr, f), f);
+    delay->setCurrentIndex(cfg::inputDelay() < 0 ? 0 : qMax(0, delay->findData(cfg::inputDelay())));
+    delay->setToolTip(tr("Frames between a press and the game using it. Lockstep waits at every frame whose input is "
+                         "still on its way, so the delay has to cover the one-way latency: Auto takes it from the ping "
+                         "measured when the match connects, (ping / 2 + 8 ms) / 16.7 ms, 2 to 8 frames. A match "
+                         "takes the larger delay of the two players."));
+    auto* netcode = new QComboBox;
+    netcode->addItem(tr("Lockstep (default)"), QStringLiteral("lockstep"));
+    netcode->addItem(tr("Rollback (experimental)"), QStringLiteral("rollback"));
+    netcode->setCurrentIndex(qMax(0, netcode->findData(cfg::netcode())));
+    netcode->setToolTip(tr("Lockstep waits for the other player's input before each frame. Rollback runs ahead on a "
+                           "guess and corrects it: smoother over a long distance, still experimental. A match plays "
+                           "rollback only when both players chose it."));
     auto* port = new QSpinBox;
     port->setRange(1024, 65535);
     port->setValue(cfg::gamePort());
@@ -402,12 +471,14 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     of->addRow(tr("Region"), region);
     of->addRow(tr("Max ping"), maxPing);
     of->addRow(tr("Input delay"), delay);
+    of->addRow(tr("Netcode"), netcode);
     of->addRow(tr("Game UDP port"), port);
     of->addRow(QString(), strict);
     of->addRow(QString(), upnp);
     of->addRow(tr("Router"), routerState_);
-    auto* delayNote = ui::label(tr("Ranked uses at least 1 frame. Players who cannot reach each other directly "
-                                   "play through the server, with a little more delay."), "Muted");
+    auto* delayNote = ui::label(tr("A match takes the larger delay of the two players (Auto: from the ping, 2 to 8 "
+                                   "frames; Ranked at least 1). Players who cannot reach each other directly play "
+                                   "through the server, with a little more delay."), "Muted");
     delayNote->setWordWrap(true);
     of->addRow(QString(), delayNote);
     grid->addWidget(onlineBox, 1, 0);
@@ -415,61 +486,61 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     // display
     auto* displayBox = new QGroupBox(tr("DISPLAY"));
     auto* df = new QFormLayout(displayBox);
-    auto* mode = new QComboBox;
-    mode->addItem(tr("Windowed"), QStringLiteral("windowed"));
-    mode->addItem(tr("Borderless"), QStringLiteral("borderless"));
-    mode->addItem(tr("Fullscreen"), QStringLiteral("fullscreen"));
-    mode->setCurrentIndex(qMax(0, mode->findData(cfg::displayMode())));
-    auto* res = new QComboBox;
-    res->setEditable(true);
-    res->addItem(tr("Desktop"), QStringLiteral("desktop"));
-    for (const char* size : {"1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160"})
-        res->addItem(QLatin1String(size), QLatin1String(size));
-    if (const int at = res->findData(cfg::resolution()); at >= 0) res->setCurrentIndex(at);
-    else res->setCurrentText(cfg::resolution());
-    auto* vsync = new QCheckBox(tr("V-sync"));
-    vsync->setChecked(cfg::vsync());
-    df->addRow(tr("Window"), mode);
-    df->addRow(tr("Resolution"), res);
-    df->addRow(QString(), vsync);
-    auto* displayNote = ui::label(tr("A game takes these when it starts. Desktop is your monitor's own resolution (a "
-                                     "window opens at 1280x720 then); type any other size as 1600x1200."), "Muted");
+    auto* window = new QComboBox;
+    window->addItem(tr("Fullscreen"), true);
+    window->addItem(tr("Window"), false);
+    window->setCurrentIndex(cfg::fullscreen() ? 0 : 1);
+    df->addRow(tr("Game window"), window);
+    auto* displayNote = ui::label(tr("The game takes it when it starts (its --fullscreen / --no-fullscreen). The two "
+                                     "games of a local test always open in windows."), "Muted");
     displayNote->setWordWrap(true);
     df->addRow(QString(), displayNote);
     grid->addWidget(displayBox, 1, 1);
 
-    // games
-    auto* gamesBox = new QGroupBox(tr("GAME FOLDERS"));
+    // the game's files
+    auto* gamesBox = new QGroupBox(tr("GAME"));
     auto* gf = new QFormLayout(gamesBox);
     for (const Game& g : GameData::instance().games()) {
         const QString id = g.id;
-        auto* folder = new QLineEdit(native(cfg::gameFolder(id)));
-        auto* folderBrowse = new QPushButton(tr("..."));
-        auto* exe = new QLineEdit(native(cfg::gameExe(id)));
-        auto* exeBrowse = new QPushButton(tr("..."));
-        gf->addRow(ui::label(g.title, "CardTitle"));
-        gf->addRow(tr("Folder"), pathRow(folder, folderBrowse));
-        gf->addRow(tr("Executable"), pathRow(exe, exeBrowse));
-        connect(folder, &QLineEdit::editingFinished, this, [id, folder] {
-            cfg::set(QStringLiteral("games/%1/folder").arg(id), QDir::fromNativeSeparators(folder->text().trimmed()));
-        });
-        connect(exe, &QLineEdit::editingFinished, this, [id, exe] {
-            cfg::set(QStringLiteral("games/%1/exe").arg(id), QDir::fromNativeSeparators(exe->text().trimmed()));
-        });
-        connect(folderBrowse, &QPushButton::clicked, this, [this, id, folder] {
-            const QString d = QFileDialog::getExistingDirectory(this, tr("Game folder"), folder->text());
-            if (d.isEmpty()) return;
-            folder->setText(native(d));
-            cfg::set(QStringLiteral("games/%1/folder").arg(id), d);
-        });
-        connect(exeBrowse, &QPushButton::clicked, this, [this, id, exe] {
-            const QString f = QFileDialog::getOpenFileName(this, tr("Game executable"), exe->text(),
-                                                           tr("Programs (*.exe *.py);;All files (*)"));
-            if (f.isEmpty()) return;
-            exe->setText(native(f));
-            cfg::set(QStringLiteral("games/%1/exe").arg(id), f);
-        });
+        struct PathSetting {
+            QString key, label, value;
+            bool folder;
+        };
+        const QList<PathSetting> rows = {
+            {QStringLiteral("exe"), tr("Executable"), cfg::gameExe(id), false},
+            {QStringLiteral("data"), tr("Disc files"), cfg::gameDataRoot(id), true},
+            {QStringLiteral("save"), tr("Save folder"), cfg::saveFolder(id), true},
+            {QStringLiteral("build_script"), tr("Build script"), cfg::buildScript(id), false},
+        };
+        gf->addRow(ui::label(QStringLiteral("%1 (%2)").arg(g.title, g.edition), "CardTitle"));
+        for (const PathSetting& r : rows) {
+            auto* edit = new QLineEdit(native(r.value));
+            auto* browse = new QPushButton(tr("..."));
+            gf->addRow(r.label, pathRow(edit, browse));
+            const QString key = QStringLiteral("games/%1/%2").arg(id, r.key);
+            connect(edit, &QLineEdit::editingFinished, this, [key, edit] {
+                cfg::set(key, QDir::fromNativeSeparators(edit->text().trimmed()));
+            });
+            connect(browse, &QPushButton::clicked, this, [this, key, edit, r] {
+                const QString f = r.folder ? QFileDialog::getExistingDirectory(this, r.label, edit->text())
+                                           : QFileDialog::getOpenFileName(this, r.label, edit->text(),
+                                                                          tr("Programs (*.exe *.cmd *.bat *.py);;All files (*)"));
+                if (f.isEmpty()) return;
+                edit->setText(native(f));
+                cfg::set(key, f);
+            });
+        }
+        auto* args = new QLineEdit(cfg::buildArgs(id));
+        args->setPlaceholderText(tr("its arguments, for example release"));
+        gf->addRow(tr("Build arguments"), args);
+        connect(args, &QLineEdit::editingFinished, this,
+                [id, args] { cfg::set(QStringLiteral("games/%1/build_args").arg(id), args->text().trimmed()); });
     }
+    auto* gamesNote = ui::label(tr("Single player plays with the save folder; every online match gets a fresh save of "
+                                   "its own in its session folder (the menus the launcher steers are a fresh save's)."),
+                                "Muted");
+    gamesNote->setWordWrap(true);
+    gf->addRow(QString(), gamesNote);
     grid->addWidget(gamesBox, 2, 0, 1, 2);
 
     // tools and development
@@ -500,7 +571,9 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
 
     connect(region, &QComboBox::currentIndexChanged, this, [region] { cfg::set(QStringLiteral("online/region"), region->currentData()); });
     connect(maxPing, &QComboBox::currentIndexChanged, this, [maxPing] { cfg::set(QStringLiteral("online/max_ping"), maxPing->currentData()); });
-    connect(delay, &QSpinBox::valueChanged, this, [](int v) { cfg::set(QStringLiteral("online/delay"), v); });
+    connect(delay, &QComboBox::currentIndexChanged, this, [delay] { cfg::set(QStringLiteral("online/delay"), delay->currentData()); });
+    connect(netcode, &QComboBox::currentIndexChanged, this,
+            [netcode] { cfg::set(QStringLiteral("online/netcode"), netcode->currentData()); });
     connect(port, &QSpinBox::valueChanged, this, [this](int v) {
         cfg::set(QStringLiteral("online/game_port"), v);
         if (upnp_ && cfg::upnp()) upnp_->map(static_cast<quint16>(v));
@@ -510,11 +583,8 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
         if (on && upnp_) upnp_->map(static_cast<quint16>(cfg::gamePort()));
     });
     connect(strict, &QCheckBox::toggled, this, [](bool on) { cfg::set(QStringLiteral("online/strict"), on); });
-    connect(mode, &QComboBox::currentIndexChanged, this, [mode] { cfg::set(QStringLiteral("display/mode"), mode->currentData()); });
-    connect(res, &QComboBox::currentTextChanged, this, [](const QString& t) {
-        if (const QString size = gameResolution(t); !size.isEmpty()) cfg::set(QStringLiteral("display/resolution"), size);
-    });
-    connect(vsync, &QCheckBox::toggled, this, [](bool on) { cfg::set(QStringLiteral("display/vsync"), on); });
+    connect(window, &QComboBox::currentIndexChanged, this,
+            [window] { cfg::set(QStringLiteral("display/fullscreen"), window->currentData()); });
     connect(python, &QLineEdit::editingFinished, this, [python] { cfg::set(QStringLiteral("tools/python"), python->text().trimmed()); });
     connect(repo, &QLineEdit::editingFinished, this, [repo] {
         cfg::set(QStringLiteral("tools/repo_root"), QDir::fromNativeSeparators(repo->text().trimmed()));

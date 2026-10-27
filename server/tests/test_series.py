@@ -50,7 +50,7 @@ async def next_match(server, sides, series_id, choices=(None, None)):
 
 async def ranked_stats(conn, name):
     prof = await conn.request({"type": "profile", "name": name})
-    return prof["stats"]["mkd"]["kombat"]["ranked"]
+    return prof["stats"]["mk9"]["versus"]["ranked"]
 
 
 async def test_ranked_set_ends_at_two_wins_with_one_elo_change(server, connect, udp_peers):
@@ -124,7 +124,7 @@ async def test_leaving_before_anything_counted_changes_no_rating(server, connect
     await c2.request({"type": "series_ready", "series": s1["series"], "ready": False})
     over = await c1.expect("series", state="over")
     assert over["outcome"] == "void" and over["winner"] is None and "elo" not in over
-    assert server.db.rating(server.db.account_by_name("Kabal")["id"], "mkd", "kombat")["elo"] == 1500
+    assert server.db.rating(server.db.account_by_name("Kabal")["id"], "mk9", "versus")["elo"] == 1500
 
 
 async def test_casual_rematch_while_both_want_one(server, connect, udp_peers):
@@ -152,7 +152,7 @@ async def test_casual_rematch_while_both_want_one(server, connect, udp_peers):
     over = await c1.expect("series", state="over")
     assert over["outcome"] == "left" and over["left"] == p2 and "elo" not in over
     prof = await c1.request({"type": "profile", "name": p1})
-    assert prof["stats"] == {"mkd": {"kombat": {"casual": {"wins": 1, "losses": 1}}}}
+    assert prof["stats"] == {"mk9": {"versus": {"casual": {"wins": 1, "losses": 1}}}}
 
 
 async def test_casual_rematch_keeps_the_fighters_and_select_picks_again(server, connect, udp_peers):

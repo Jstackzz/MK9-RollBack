@@ -14,7 +14,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
-log = logging.getLogger("mk3d.upnp")
+log = logging.getLogger("mk9.upnp")
 
 SSDP = ("239.255.255.250", 1900)
 SEARCH_TARGETS = (
@@ -146,7 +146,7 @@ def behind_another_nat(address: str) -> bool:
     return any(ip in net for net in NOT_PUBLIC)
 
 
-def add_mapping(gateway: Gateway, port: int, protocol: str, description: str = "MK3D Online server") -> None:
+def add_mapping(gateway: Gateway, port: int, protocol: str, description: str = "MK9 Online server") -> None:
     """Forwards external `port` to this machine's same port; a router that only keeps permanent mappings gets one."""
     for lease in (LEASE_SECONDS, 0):
         args = (f"<NewRemoteHost></NewRemoteHost><NewExternalPort>{port}</NewExternalPort>"

@@ -111,12 +111,13 @@ public:
     QString mode() const;
     QString password() const;
     int rounds() const;
-    bool deathTraps() const;
+    // up to eight players in line: the winner stays and the next in line fights them
+    bool kingOfTheHill() const;
 
 private:
     QLineEdit* name_;
     QComboBox* mode_;
     QLineEdit* password_;
     QComboBox* rounds_;
-    QCheckBox* deathTraps_;
+    QCheckBox* koth_;
 };

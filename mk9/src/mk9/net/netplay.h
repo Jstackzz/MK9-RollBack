@@ -52,7 +52,7 @@ struct Settings {
   bool watch = false;  // a spectator (slot and peers unused: every player comes from the feed)
 };
 
-enum class Status { Off, Connecting, Barrier, InSync, Desynced, Disconnected };
+enum class Status { Off, Connecting, Barrier, InSync, Desynced, Disconnected, Mismatch };
 
 // read MK9_NET_* and configure when they are there (tests); at start
 void InitFromEnvironment();
@@ -74,8 +74,9 @@ struct Agreement {
   std::vector<uint32_t> words[kMaxSlots];
 };
 bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agreed);
-// the launcher's start: meet the others at the top of a frame once connected (the hold point)
-void RequestMeet();
+// the launcher's start: meet the others at the top of a frame once connected (the hold point), with
+// the match's seed (slot 0's is the one everybody takes)
+void RequestMeet(uint32_t seed);
 
 // the frame's inputs for the game's pads: installed as mk9::input's source while in sync
 bool FrameInput(uint32_t user, input::Pad& out);

@@ -17,62 +17,76 @@ namespace {
 struct ControlInfo {
     const char* id;
     const char* label;
+    const char* use;  // in MK9 by default (the game's own controller settings may change it)
 };
 const ControlInfo kControls[Count] = {
-    {"up", "D-pad up"},           {"down", "D-pad down"},       {"left", "D-pad left"},     {"right", "D-pad right"},
-    {"a", "A"},                   {"b", "B"},                   {"x", "X"},                 {"y", "Y"},
-    {"black", "Black"},           {"white", "White"},           {"left_trigger", "Left trigger"},
-    {"right_trigger", "Right trigger"},                         {"start", "Start"},         {"back", "Back"},
-    {"left_thumb", "Left stick click"},                         {"right_thumb", "Right stick click"},
+    {"up", "D-pad up", "up, jump"},
+    {"down", "D-pad down", "down, crouch"},
+    {"left", "D-pad left", "left"},
+    {"right", "D-pad right", "right"},
+    {"a", "A", "3: front kick"},
+    {"b", "B", "4: back kick"},
+    {"x", "X", "1: front punch"},
+    {"y", "Y", "2: back punch"},
+    {"lb", "LB (left bumper)", "tag"},
+    {"rb", "RB (right bumper)", "throw"},
+    {"lt", "LT (left trigger)", "flip stance"},
+    {"rt", "RT (right trigger)", "block"},
+    {"start", "Start", "pause"},
+    {"back", "Back", ""},
+    {"ls", "Left stick click", ""},
+    {"rs", "Right stick click", ""},
 };
 
-// The runtime's key names (core/input.cpp kKeyNames) with what the page shows; no label: the sign the keyboard's
-// layout puts on that key. Letters, digits, F1-F24 and Num0-Num9 are named by pattern.
+// The game's key names (mk9/src/mk9/controls.cpp KeyFromName), with what the page shows; no name: the file writes the
+// key as 0x.. (the game reads that too); no label: the sign the keyboard's layout puts on that key. Letters, digits,
+// F1-F24 and Num0-Num9 go by pattern. `alias`: another name taken on reading.
 struct KeyInfo {
     int vk;
     const char* name;
     const char* label;
+    const char* alias;
 };
 const KeyInfo kKeys[] = {
-    {VK_UP, "Up", "Up arrow"},
-    {VK_DOWN, "Down", "Down arrow"},
-    {VK_LEFT, "Left", "Left arrow"},
-    {VK_RIGHT, "Right", "Right arrow"},
-    {VK_SPACE, "Space", "Space"},
-    {VK_RETURN, "Enter", "Enter"},
-    {VK_BACK, "Backspace", "Backspace"},
-    {VK_TAB, "Tab", "Tab"},
-    {VK_CAPITAL, "CapsLock", "Caps Lock"},
-    {VK_SHIFT, "Shift", "Shift"},
-    {VK_LSHIFT, "LShift", "Left Shift"},
-    {VK_RSHIFT, "RShift", "Right Shift"},
-    {VK_CONTROL, "Ctrl", "Ctrl"},
-    {VK_LCONTROL, "LCtrl", "Left Ctrl"},
-    {VK_RCONTROL, "RCtrl", "Right Ctrl"},
-    {VK_INSERT, "Insert", "Insert"},
-    {VK_DELETE, "Delete", "Delete"},
-    {VK_HOME, "Home", "Home"},
-    {VK_END, "End", "End"},
-    {VK_PRIOR, "PageUp", "Page Up"},
-    {VK_NEXT, "PageDown", "Page Down"},
-    {VK_MULTIPLY, "NumMultiply", "Num *"},
-    {VK_ADD, "NumAdd", "Num +"},
-    {VK_SUBTRACT, "NumSubtract", "Num -"},
-    {VK_DECIMAL, "NumDecimal", "Num ."},
-    {VK_DIVIDE, "NumDivide", "Num /"},
-    {VK_OEM_1, "Semicolon", nullptr},
-    {VK_OEM_PLUS, "Equals", nullptr},
-    {VK_OEM_COMMA, "Comma", nullptr},
-    {VK_OEM_MINUS, "Minus", nullptr},
-    {VK_OEM_PERIOD, "Period", nullptr},
-    {VK_OEM_2, "Slash", nullptr},
-    {VK_OEM_3, "Grave", nullptr},
-    {VK_OEM_4, "LBracket", nullptr},
-    {VK_OEM_5, "Backslash", nullptr},
-    {VK_OEM_6, "RBracket", nullptr},
-    {VK_OEM_7, "Apostrophe", nullptr},
-    {VK_OEM_8, "Oem8", nullptr},
-    {VK_OEM_102, "Oem102", nullptr},
+    {VK_UP, "Up", "Up arrow", nullptr},
+    {VK_DOWN, "Down", "Down arrow", nullptr},
+    {VK_LEFT, "Left", "Left arrow", nullptr},
+    {VK_RIGHT, "Right", "Right arrow", nullptr},
+    {VK_SPACE, "Space", "Space", nullptr},
+    {VK_RETURN, "Return", "Enter", "Enter"},
+    {VK_BACK, "Backspace", "Backspace", nullptr},
+    {VK_TAB, "Tab", "Tab", nullptr},
+    {VK_CAPITAL, nullptr, "Caps Lock", "CapsLock"},
+    {VK_SHIFT, "Shift", "Shift", nullptr},
+    {VK_LSHIFT, "LShift", "Left Shift", nullptr},
+    {VK_RSHIFT, "RShift", "Right Shift", nullptr},
+    {VK_CONTROL, "Ctrl", "Ctrl", nullptr},
+    {VK_LCONTROL, "LCtrl", "Left Ctrl", nullptr},
+    {VK_RCONTROL, "RCtrl", "Right Ctrl", nullptr},
+    {VK_INSERT, "Insert", "Insert", nullptr},
+    {VK_DELETE, "Delete", "Delete", nullptr},
+    {VK_HOME, "Home", "Home", nullptr},
+    {VK_END, "End", "End", nullptr},
+    {VK_PRIOR, "PageUp", "Page Up", nullptr},
+    {VK_NEXT, "PageDown", "Page Down", nullptr},
+    {VK_MULTIPLY, "NumMul", "Num *", "NumMultiply"},
+    {VK_ADD, "NumAdd", "Num +", nullptr},
+    {VK_SUBTRACT, "NumSub", "Num -", "NumSubtract"},
+    {VK_DECIMAL, "NumDot", "Num .", "NumDecimal"},
+    {VK_DIVIDE, "NumDiv", "Num /", "NumDivide"},
+    {VK_OEM_1, "Semicolon", nullptr, nullptr},
+    {VK_OEM_PLUS, "Equals", nullptr, nullptr},
+    {VK_OEM_COMMA, "Comma", nullptr, nullptr},
+    {VK_OEM_MINUS, "Minus", nullptr, nullptr},
+    {VK_OEM_PERIOD, "Period", nullptr, nullptr},
+    {VK_OEM_2, "Slash", nullptr, nullptr},
+    {VK_OEM_3, "Grave", nullptr, nullptr},
+    {VK_OEM_4, "LBracket", nullptr, nullptr},
+    {VK_OEM_5, "Backslash", nullptr, nullptr},
+    {VK_OEM_6, "RBracket", nullptr, nullptr},
+    {VK_OEM_7, "Quote", nullptr, "Apostrophe"},
+    {VK_OEM_8, nullptr, nullptr, "Oem8"},
+    {VK_OEM_102, nullptr, nullptr, "Oem102"},
 };
 
 const KeyInfo* keyInfo(int vk) {
@@ -82,6 +96,8 @@ const KeyInfo* keyInfo(int vk) {
 }
 
 bool letterOrDigit(int vk) { return (vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9'); }
+
+QString hexName(int vk) { return QStringLiteral("0x") + QStringLiteral("%1").arg(vk, 2, 16, QLatin1Char('0')).toUpper(); }
 
 int sourceFromId(const QString& id) {
     const QList<Source>& all = sources();
@@ -118,12 +134,18 @@ QString controlLabel(int control) {
     return control >= 0 && control < Count ? QLatin1String(kControls[control].label) : QString();
 }
 
+QString controlUse(int control) {
+    return control >= 0 && control < Count ? QLatin1String(kControls[control].use) : QString();
+}
+
 int controlFromId(const QString& id) {
     for (int c = 0; c < Count; ++c)
         if (id.compare(QLatin1String(kControls[c].id), Qt::CaseInsensitive) == 0) return c;
     return -1;
 }
 
+// the buttons the game knows (mk9/src/mk9/controls.cpp kSources): a PC controller's, as the SDK reports them in Xbox
+// 360 positions
 const QList<Source>& sources() {
     static const QList<Source> all = {
         {QStringLiteral("south"), QStringLiteral("Bottom face button (A / Cross)"),
@@ -134,55 +156,44 @@ const QList<Source>& sources() {
          QStringLiteral("Xbox X, PlayStation square, Switch Y"), X},
         {QStringLiteral("north"), QStringLiteral("Top face button (Y / Triangle)"),
          QStringLiteral("Xbox Y, PlayStation triangle, Switch X"), Y},
-        {QStringLiteral("right_shoulder"), QStringLiteral("Right bumper (RB / R1)"),
-         QStringLiteral("Xbox RB, PlayStation R1, Switch R"), Black},
         {QStringLiteral("left_shoulder"), QStringLiteral("Left bumper (LB / L1)"),
-         QStringLiteral("Xbox LB, PlayStation L1, Switch L"), White},
-        {QStringLiteral("right_trigger"), QStringLiteral("Right trigger (RT / R2)"),
-         QStringLiteral("Xbox RT, PlayStation R2, Switch ZR"), RightTrigger},
+         QStringLiteral("Xbox LB, PlayStation L1, Switch L"), LB},
+        {QStringLiteral("right_shoulder"), QStringLiteral("Right bumper (RB / R1)"),
+         QStringLiteral("Xbox RB, PlayStation R1, Switch R"), RB},
         {QStringLiteral("left_trigger"), QStringLiteral("Left trigger (LT / L2)"),
-         QStringLiteral("Xbox LT, PlayStation L2, Switch ZL"), LeftTrigger},
+         QStringLiteral("Xbox LT, PlayStation L2, Switch ZL"), LT},
+        {QStringLiteral("right_trigger"), QStringLiteral("Right trigger (RT / R2)"),
+         QStringLiteral("Xbox RT, PlayStation R2, Switch ZR"), RT},
         {QStringLiteral("dpad_up"), QStringLiteral("D-pad up"), QString(), Up},
         {QStringLiteral("dpad_down"), QStringLiteral("D-pad down"), QString(), Down},
         {QStringLiteral("dpad_left"), QStringLiteral("D-pad left"), QString(), Left},
         {QStringLiteral("dpad_right"), QStringLiteral("D-pad right"), QString(), Right},
-        {QStringLiteral("start"), QStringLiteral("Menu / Start / Options"),
-         QStringLiteral("Xbox Menu (Start on a 360 pad), PlayStation Options, Switch +"), Start},
-        {QStringLiteral("back"), QStringLiteral("View / Back / Share"),
-         QStringLiteral("Xbox View (Back on a 360 pad), PlayStation Share or Create, Switch -"), Back},
-        {QStringLiteral("left_stick"), QStringLiteral("Left stick click (L3)"), QString(), LeftThumb},
-        {QStringLiteral("right_stick"), QStringLiteral("Right stick click (R3)"), QString(), RightThumb},
-        {QStringLiteral("misc"), QStringLiteral("Extra middle button"),
-         QStringLiteral("Xbox Series Share, PlayStation 5 mic, Switch Capture"), -1},
-        {QStringLiteral("paddle1"), QStringLiteral("Back paddle P1 (upper right)"),
-         QStringLiteral("Xbox Elite P1, DualSense Edge right back button"), -1},
-        {QStringLiteral("paddle2"), QStringLiteral("Back paddle P2 (lower right)"),
-         QStringLiteral("Xbox Elite P2, DualSense Edge right Fn"), -1},
-        {QStringLiteral("paddle3"), QStringLiteral("Back paddle P3 (upper left)"),
-         QStringLiteral("Xbox Elite P3, DualSense Edge left back button"), -1},
-        {QStringLiteral("paddle4"), QStringLiteral("Back paddle P4 (lower left)"),
-         QStringLiteral("Xbox Elite P4, DualSense Edge left Fn"), -1},
-        {QStringLiteral("touchpad"), QStringLiteral("Touchpad click"), QStringLiteral("PlayStation"), -1},
+        {QStringLiteral("start"), QStringLiteral("Start / Menu / Options"),
+         QStringLiteral("Xbox 360 Start, Xbox Menu, PlayStation Options, Switch +"), Start},
+        {QStringLiteral("back"), QStringLiteral("Back / View / Share"),
+         QStringLiteral("Xbox 360 Back, Xbox View, PlayStation Share or Create, Switch -"), Back},
+        {QStringLiteral("left_stick"), QStringLiteral("Left stick click (L3)"), QString(), LS},
+        {QStringLiteral("right_stick"), QStringLiteral("Right stick click (R3)"), QString(), RS},
     };
     return all;
 }
 
-// as the games had them before the file: arrows or WASD move, J I K L are X Y A B, Space the right trigger, O the
-// left trigger, U and P white and black, Enter Start, Backspace Back
+// as the game has them without the file: arrows or WASD move, J I K L are X Y A B (1 2 3 4), Space RT (block), O RB
+// (throw), U LB (tag), P LT (flip stance), Enter Start, Backspace Back
 Map defaults() {
     Map m;
     m.keys[Up] = {VK_UP, 'W'};
     m.keys[Down] = {VK_DOWN, 'S'};
     m.keys[Left] = {VK_LEFT, 'A'};
     m.keys[Right] = {VK_RIGHT, 'D'};
-    m.keys[A] = {'K'};
-    m.keys[B] = {'L'};
     m.keys[X] = {'J'};
     m.keys[Y] = {'I'};
-    m.keys[Black] = {'P'};
-    m.keys[White] = {'U'};
-    m.keys[LeftTrigger] = {'O'};
-    m.keys[RightTrigger] = {VK_SPACE};
+    m.keys[A] = {'K'};
+    m.keys[B] = {'L'};
+    m.keys[RT] = {VK_SPACE};
+    m.keys[RB] = {'O'};
+    m.keys[LB] = {'U'};
+    m.keys[LT] = {'P'};
     m.keys[Start] = {VK_RETURN};
     m.keys[Back] = {VK_BACK};
     for (const Source& s : sources()) m.presses << s.control;
@@ -210,7 +221,7 @@ Map load() {
         if (eq <= 0) continue;
         const QString key = line.left(eq).trimmed();
         const QString value = line.mid(eq + 1).trimmed();
-        if (section.isEmpty() && key == QLatin1String("keyboard")) {
+        if (section == QLatin1String("keyboard") && key == QLatin1String("enabled")) {
             m.keyboard = value != QLatin1String("false");
         } else if (section == QLatin1String("keys")) {
             const int c = controlFromId(key);
@@ -232,13 +243,15 @@ Map load() {
 
 bool save(const Map& m, QString* error) {
     QString text = QStringLiteral(
-        "# MK3D Online controls. The launcher's Controls page writes this file; a game that is running reads it again\n"
-        "# within a second of a change. The buttons are the original Xbox controller's: up down left right (the\n"
-        "# d-pad), a b x y black white, left_trigger right_trigger, start back, left_thumb right_thumb (stick clicks).\n"
+        "# MK9 Online controls. The launcher's Controls page writes this file and hands it to the game (MK9_CONTROLS);\n"
+        "# a game that is running reads it again within a second of a change. The buttons are the Xbox 360\n"
+        "# controller's: up down left right (the d-pad), a b x y, lb rb (the bumpers), lt rt (the triggers), start back,\n"
+        "# ls rs (the stick clicks).\n"
         "\n"
-        "# The keyboard plays as player 1 while the game's window is in front.\n");
-    text += QStringLiteral("keyboard = %1\n\n").arg(m.keyboard ? QStringLiteral("true") : QStringLiteral("false"));
-    text += QStringLiteral("# The keys that press each button.\n[keys]\n");
+        "[keyboard]\n"
+        "# the keyboard plays as player 1 while the game's window is in front\n");
+    text += QStringLiteral("enabled = %1\n\n").arg(m.keyboard ? QStringLiteral("true") : QStringLiteral("false"));
+    text += QStringLiteral("# The keys that press each button (Windows key names, at most two each).\n[keys]\n");
     for (int c = 0; c < Count; ++c) {
         QStringList names;
         for (int vk : m.keys[c]) names << QLatin1Char('"') + keyName(vk) + QLatin1Char('"');
@@ -259,17 +272,19 @@ bool save(const Map& m, QString* error) {
 
 QString keyName(int vk) {
     if (letterOrDigit(vk)) return QString(QLatin1Char(char(vk)));
-    if (const KeyInfo* k = keyInfo(vk)) return QLatin1String(k->name);
+    if (const KeyInfo* k = keyInfo(vk)) return k->name ? QLatin1String(k->name) : hexName(vk);
     if (vk >= VK_F1 && vk <= VK_F24) return QStringLiteral("F%1").arg(vk - VK_F1 + 1);
     if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) return QStringLiteral("Num%1").arg(vk - VK_NUMPAD0);
-    return QStringLiteral("0x") + QStringLiteral("%1").arg(vk, 2, 16, QLatin1Char('0')).toUpper();
+    return hexName(vk);
 }
 
 int keyFromName(const QString& name) {
     const QString s = name.trimmed();
     if (s.size() == 1 && s[0].isLetterOrNumber() && s[0].unicode() < 128) return s[0].toUpper().unicode();
-    for (const KeyInfo& k : kKeys)
-        if (s.compare(QLatin1String(k.name), Qt::CaseInsensitive) == 0) return k.vk;
+    for (const KeyInfo& k : kKeys) {
+        if (k.name && s.compare(QLatin1String(k.name), Qt::CaseInsensitive) == 0) return k.vk;
+        if (k.alias && s.compare(QLatin1String(k.alias), Qt::CaseInsensitive) == 0) return k.vk;
+    }
     bool ok = false;
     if (s.size() >= 2 && s[0].toUpper() == QLatin1Char('F')) {
         const int n = s.mid(1).toInt(&ok);
@@ -309,7 +324,6 @@ int keyFromEvent(const QKeyEvent* event) {
         case VK_LMENU:
         case VK_RMENU:
         case VK_F10:
-        case VK_F3:
         case VK_LWIN:
         case VK_RWIN:
         case VK_APPS:

@@ -24,6 +24,7 @@
 #include "GameData.h"
 #include "GamepadNav.h"
 #include "GameProcess.h"
+#include "GitHubUpdates.h"
 #include "LobbyPage.h"
 #include "MatchController.h"
 #include "PlayPages.h"
@@ -41,7 +42,7 @@ const char* kPageNames[] = {"ranked", "casual", "lobby", "single", "leaderboard"
 
 MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     : QMainWindow(parent), opts_(opts), server_(new ServerClient(this)), controller_(new MatchController(server_, this)) {
-    setWindowTitle(tr("MK3D Online"));
+    setWindowTitle(tr("MK9 Online"));
     setWindowIcon(style::appIcon());
     setMinimumSize(1120, 720);
     resize(1320, 820);
@@ -49,10 +50,11 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     if (!opts_.server.isEmpty()) cfg::set(QStringLiteral("server/address"), opts_.server);
     if (!opts_.fingerprint.isEmpty())
         cfg::set(QStringLiteral("server/fingerprint"), ServerClient::normalizeFingerprint(opts_.fingerprint));
-    if (!opts_.practice.isEmpty())
-        cfg::set(QStringLiteral("online/practice_while_waiting"), opts_.practice != QLatin1String("off"));
-    if (!opts_.deathTraps.isEmpty())
-        cfg::set(QStringLiteral("online/death_traps"), opts_.deathTraps != QLatin1String("off"));
+    if (!opts_.soloWait.isEmpty())
+        cfg::set(QStringLiteral("online/solo_while_waiting"), opts_.soloWait != QLatin1String("off"));
+    if (!opts_.netcode.isEmpty())
+        cfg::set(QStringLiteral("online/netcode"),
+                 opts_.netcode == QLatin1String("rollback") ? QStringLiteral("rollback") : QStringLiteral("lockstep"));
 
     auto* root = new QWidget;
     root->setObjectName(QStringLiteral("Root"));
@@ -120,8 +122,7 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
         }
         if (!winutil::bringProcessToFront(solo->pid())) return;  // no window yet
         soloFrontTimer_.stop();
-        applog::write(QStringLiteral("popup: %1 in front").arg(controller_->soloIsPractice() ? QStringLiteral("practice")
-                                                                                            : QStringLiteral("single player")));
+        applog::write(QStringLiteral("popup: single player in front"));
     });
     connect(server_, &ServerClient::stateChanged, this, [this](ServerClient::State st) {
         updateFooter();
@@ -144,8 +145,8 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     connect(updater_, &Updater::readyToInstall, this, &MainWindow::installUpdateWhenFree);
     connect(updater_, &Updater::installed, this, [this](const QString& version, bool started) {
         if (!started)
-            QMessageBox::information(this, tr("MK3D Online %1").arg(version),
-                                     tr("MK3D Online is now %1: start it again.").arg(version));
+            QMessageBox::information(this, tr("MK9 Online %1").arg(version),
+                                     tr("MK9 Online is now %1: start it again.").arg(version));
         close();
     });
     auto whenFree = [this] {
@@ -161,6 +162,19 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     connect(controller_, &MatchController::phaseChanged, this, whenFree);
     connect(controller_, &MatchController::gameStatusChanged, this, whenFree);
     connect(build_, &BuildPage::busyChanged, this, whenFree);
+    // releases on GitHub (a player package): offered like the server's, the game built again when one changed it
+    github_ = new GitHubUpdates(this);
+    connect(github_, &GitHubUpdates::found, this, [this](const QJsonObject& release) { offerUpdate(release, false); });
+    if (paths::isPackage()) QTimer::singleShot(4000, github_, &GitHubUpdates::check);
+    QTimer::singleShot(1500, this, [this] {
+        if (!paths::isPackage() || !BuildPage::needsRebuild(gameId_)) return;
+        showNotice(tr("This update changed the game itself: it is being built again on Build game (about 15 "
+                      "minutes, once). Online matches need it."),
+                   false);
+        for (int i = 0; i < pages_.size(); i++)
+            if (pages_[i] == build_) selectPage(i);
+        build_->rebuild();
+    });
     Updater::cleanUp();  // what an update set aside, once free; the old launcher may still be closing:
     if (!opts_.updatedFrom.isEmpty())
         for (int s : {2, 5, 10, 20}) QTimer::singleShot(s * 1000, this, [] { Updater::cleanUp(); });
@@ -201,6 +215,7 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     connect(controller_, &MatchController::matchFound, this, &MainWindow::onMatchFound);
     connect(controller_, &MatchController::phaseChanged, this, [this](MatchController::Phase p, const QString& text) {
         phaseText_->setText(text);
+        leaveMatch_->setVisible(controller_->canLeaveMatch());
         if (p != MatchController::Phase::Found && matchDialog_) matchDialog_->done(2);
         if (p == MatchController::Phase::Starting) QApplication::alert(this);
         // --lobby: the next match's ready waited for the game to finish the last one
@@ -229,6 +244,13 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     connect(controller_, &MatchController::gameStatusChanged, this, [this](const QString& s) {
         gameText_->setText(tr("Game: %1").arg(s));
     });
+    connect(controller_, &MatchController::notice, this, [this](const QString& text) { showNotice(text, false); });
+    // the series' next match from the games' CONTINUE? menu comes without a match found: back to the game for it
+    connect(controller_, &MatchController::matchStarted, this, [this](const QJsonObject& go) {
+        if (go.value(QStringLiteral("rematch")).toString().isEmpty() || !rematchDialog_) return;
+        rematchDialog_->close();
+        focusGame();
+    });
     connect(controller_, &MatchController::matchCancelled, this, [this](const QString& reason, bool requeued) {
         if (!requeued && reason != QLatin1String("declined")) showNotice(tr("Match cancelled (%1).").arg(reason), false);
     });
@@ -236,8 +258,8 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     noticeTimer_.setSingleShot(true);
     connect(&noticeTimer_, &QTimer::timeout, notice_, &QWidget::hide);
 
-    QString startGame = opts_.game.isEmpty() ? cfg::get(QStringLiteral("ui/game"), QStringLiteral("mkd")).toString() : opts_.game;
-    if (!GameData::instance().game(startGame)) startGame = QStringLiteral("mkd");
+    QString startGame = opts_.game.isEmpty() ? cfg::get(QStringLiteral("ui/game")).toString() : opts_.game;
+    if (!GameData::instance().game(startGame)) startGame = GameData::instance().defaultGame();
     selectGame(startGame);
     int startPage = kRanked;
     const QString pageName = opts_.page.isEmpty() ? cfg::get(QStringLiteral("ui/page"), QStringLiteral("ranked")).toString() : opts_.page;
@@ -252,8 +274,8 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     if (opts_.localTest)
         QTimer::singleShot(500, this, [this] {
             QString err;
-            if (!controller_->startLocalTest(gameId_, QStringLiteral("kombat"), QStringLiteral("Scorpion"),
-                                             QStringLiteral("SubZero"), &err))
+            const QString mode = opts_.mode.isEmpty() ? QStringLiteral("versus") : opts_.mode;
+            if (!controller_->startLocalTest(gameId_, mode, QStringLiteral("-"), QStringLiteral("-"), &err))
                 applog::write(QStringLiteral("cli: local test failed: %1").arg(err));
         });
     if (!opts_.extractImage.isEmpty())
@@ -268,10 +290,8 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     applog::write(QStringLiteral("Smart App Control: %1").arg(winutil::smartAppControl()));
     if (winutil::smartAppControl() == 1) QTimer::singleShot(400, this, &MainWindow::warnSmartAppControl);
     if (!opts_.updatedFrom.isEmpty()) {
-        applog::write(QStringLiteral("update: now %1, from %2").arg(QStringLiteral(MK3D_LAUNCHER_VERSION), opts_.updatedFrom));
-        showNotice(tr("MK3D Online is now %1 (it was %2). Each game prepares its code again on its next start: a "
-                      "minute or two, then press Start.")
-                       .arg(QStringLiteral(MK3D_LAUNCHER_VERSION), opts_.updatedFrom),
+        applog::write(QStringLiteral("update: now %1, from %2").arg(QStringLiteral(MK9_LAUNCHER_VERSION), opts_.updatedFrom));
+        showNotice(tr("MK9 Online is now %1 (it was %2).").arg(QStringLiteral(MK9_LAUNCHER_VERSION), opts_.updatedFrom),
                    false);
     }
 }
@@ -300,7 +320,7 @@ QWidget* MainWindow::buildHeader() {
     titles->setSpacing(0);
     auto* titleRow = new QHBoxLayout;
     titleRow->setSpacing(12);
-    auto* main = ui::label(QStringLiteral("MK3D"), "TitleMain");
+    auto* main = ui::label(QStringLiteral("MK9"), "TitleMain");
     auto* sub = ui::label(QStringLiteral("ONLINE"), "TitleSub");
     ui::letterSpacing(main, 3);
     ui::letterSpacing(sub, 8);
@@ -342,7 +362,20 @@ QWidget* MainWindow::buildHeader() {
     connect(gameGroup_, &QButtonGroup::buttonClicked, this, [this](QAbstractButton* b) {
         selectGame(b->property("gameId").toString());
     });
-    right->addLayout(games);
+    // one game: its name instead of a selector
+    if (GameData::instance().games().size() > 1) {
+        right->addLayout(games);
+    } else {
+        for (QAbstractButton* b : gameGroup_->buttons()) b->hide();
+        delete games;
+        if (!GameData::instance().games().isEmpty()) {
+            const Game& g = GameData::instance().games().first();
+            auto* name = ui::label(QStringLiteral("%1  ·  %2").arg(g.title.toUpper(), g.edition.toUpper()), "Tagline");
+            name->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            ui::letterSpacing(name, 2);
+            right->addWidget(name);
+        }
+    }
     h->addLayout(right);
     return header;
 }
@@ -385,7 +418,20 @@ QWidget* MainWindow::buildFooter() {
     onlineText_ = new QLabel;
     phaseText_ = new QLabel;
     gameText_ = new QLabel(tr("Game: not running"));
-    auto* version = new QLabel(QStringLiteral("v" MK3D_LAUNCHER_VERSION));
+    auto* version = new QLabel(QStringLiteral("v" MK9_LAUNCHER_VERSION));
+    leaveMatch_ = new QPushButton(tr("LEAVE MATCH"));
+    leaveMatch_->setProperty("compact", true);
+    leaveMatch_->setToolTip(tr("End the online match that runs (Kasual and lobby: it does not count; Ranked: as "
+                               "closing the game)"));
+    leaveMatch_->hide();
+    connect(leaveMatch_, &QPushButton::clicked, this, [this] {
+        if (controller_->leavingCosts() &&
+            QMessageBox::question(this, tr("Leave the ranked match?"),
+                                  tr("Leaving a ranked match counts as leaving the set: you lose it if one of its "
+                                     "matches has counted. Leave anyway?")) != QMessageBox::Yes)
+            return;
+        controller_->leaveMatch();
+    });
     updateButton_ = new QPushButton;
     updateButton_->setObjectName(QStringLiteral("Primary"));
     updateButton_->setProperty("compact", true);
@@ -396,6 +442,7 @@ QWidget* MainWindow::buildFooter() {
     h->addWidget(onlineText_);
     h->addStretch();
     h->addWidget(phaseText_);
+    h->addWidget(leaveMatch_);
     h->addWidget(gameText_);
     h->addWidget(updateButton_);
     h->addWidget(version);
@@ -416,7 +463,7 @@ void MainWindow::selectGame(const QString& id) {
     for (QAbstractButton* b : gameGroup_->buttons()) b->setChecked(b->property("gameId").toString() == id);
     for (Page* p : pages_) p->setGame(id);
     const Game* g = GameData::instance().game(id);
-    setWindowTitle(g ? tr("MK3D Online - %1").arg(g->title) : tr("MK3D Online"));
+    setWindowTitle(g ? tr("MK9 Online - %1").arg(g->title) : tr("MK9 Online"));
 }
 
 void MainWindow::selectPage(int index) {
@@ -760,9 +807,10 @@ void MainWindow::cliLobby() {
     cliLobbyBegun_ = true;
     selectPage(kLobby);
     const QString name = opts_.lobbyName.isEmpty() ? QStringLiteral("e2e lobby") : opts_.lobbyName;
-    const QString mode = opts_.mode.isEmpty() ? QStringLiteral("kombat") : opts_.mode;
+    const QString mode = opts_.mode.isEmpty() ? QStringLiteral("versus") : opts_.mode;
     if (opts_.lobby == QLatin1String("host")) {
-        applog::write(QStringLiteral("cli: creating lobby \"%1\" for %2 %3").arg(name, gameId_, mode));
+        applog::write(QStringLiteral("cli: creating lobby \"%1\" for %2 %3%4").arg(name, gameId_, mode,
+                                                                                opts_.koth ? QStringLiteral(" (king of the hill)") : QString()));
         server_->send({{QStringLiteral("type"), QStringLiteral("lobby_create")},
                        {QStringLiteral("name"), name},
                        {QStringLiteral("game"), gameId_},
@@ -771,7 +819,7 @@ void MainWindow::cliLobby() {
                        {QStringLiteral("rounds"), 3},
                        {QStringLiteral("region"), cfg::region()},
                        {QStringLiteral("character"), opts_.character},
-                       {QStringLiteral("death_traps"), cfg::deathTraps()}});
+                       {QStringLiteral("koth"), opts_.koth}});
         return;
     }
     applog::write(QStringLiteral("cli: looking for lobby \"%1\"").arg(name));
@@ -833,7 +881,8 @@ void MainWindow::cliLobbyMessage(const QJsonObject& msg) {
         cliLobbyReadyFor_ = cliLobbyDone_;
         applog::write(QStringLiteral("cli: ready in lobby %1").arg(lobby.value(QStringLiteral("id")).toString()));
         server_->send({{QStringLiteral("type"), QStringLiteral("lobby_ready")}, {QStringLiteral("ready"), true},
-                       {QStringLiteral("delay"), cfg::inputDelay()}});
+                       {QStringLiteral("delay"), cfg::inputDelayValue(cfg::inputDelay())},
+                       {QStringLiteral("netcode"), cfg::netcode()}});
     }
     if (opts_.lobby == QLatin1String("host") && all_ready && cliLobbyStarts_ == cliLobbyDone_) {
         cliLobbyStarts_++;

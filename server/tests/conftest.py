@@ -76,7 +76,7 @@ async def udp_peers() -> AsyncIterator[Callable[[], Awaitable[UdpPeer]]]:
         peer.close()
 
 
-def queue_msg(game: str = "mkd", mode: str = "kombat", *, ranked: bool = False, region: str = "eu",
+def queue_msg(game: str = "mk9", mode: str = "versus", *, ranked: bool = False, region: str = "eu",
               max_ping: int = 0, strict: bool = False, character: str = "Scorpion", delay: int = 2) -> dict:
     return {"type": "queue_join", "game": game, "mode": mode, "ranked": ranked, "region": region,
             "max_ping": max_ping, "strict": strict, "character": character, "delay": delay}

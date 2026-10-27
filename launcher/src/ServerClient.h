@@ -1,5 +1,5 @@
 #pragma once
-// One TLS connection to the MK3D server (docs/PROTOCOL.md section 1): NDJSON framing, pinned
+// One TLS connection to the MK9 server (docs/mk3d-reference/PROTOCOL.md section 1): NDJSON framing, pinned
 // SHA-256 certificate fingerprint, hello/welcome, token resume, keepalive and reconnect.
 
 #include <QHostAddress>

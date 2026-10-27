@@ -23,5 +23,8 @@ server/*.sqlite*
 server/*.pem
 server/*.log
 
-# Reference snapshots of the MK3D project (the user's own code, copied read-only)
+# Reference snapshots of the MK3D project (the user's own code, copied read-only; kept local:
+# they describe that project's own server)
 reference/
+docs/mk3d-reference/HOSTING.md
+tools/mk3d-*

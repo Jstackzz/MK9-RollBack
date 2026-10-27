@@ -1,4 +1,4 @@
-# Assembles the player package in dist\MK9Online (no game data, no game code: each player builds
+# Assembles the player package in dist\MK9-Online (no game data, no game code: each player builds
 # their own copy from their own disc, see tools\player\build-game.cmd):
 #   MK9Launcher.exe + Qt          the launcher (build\launcher, after launcher\build.cmd)
 #   toolchain\                    clang, clang++, lld-link and clang's own headers from external\llvm
@@ -6,12 +6,15 @@
 #   games\mk9\project\            the game's project: CMake files, src, config, manifest
 #   games\mk9\sdk\                the prebuilt ReXGlue runtime and codegen tool (dist\sdk)
 #   docs\                         PLAYING.md, GAME.md
-# Usage: . tools\package.ps1; New-PlayerPackage [-Out dist\MK9Online] [-NoLauncher]
+# The folder is named MK9-Online with VERSION.txt ("MK9-Online <version>, packaged <date>"): what the
+# launcher's updater checks in a release zip (launcher/src/Updater.cpp).
+# Usage: . tools\package.ps1; New-PlayerPackage [-Out dist\MK9-Online] [-NoLauncher]
 function New-PlayerPackage {
     param([string]$Out = "", [switch]$NoLauncher)
     $root = Split-Path $PSScriptRoot -Parent
     if (-not $root) { $root = "C:\Users\Owner\source\repos\mk9-rollback" }
-    if (-not $Out) { $Out = Join-Path $root "dist\MK9Online" }
+    if (-not $Out) { $Out = Join-Path $root "dist\MK9-Online" }
+    $version = (Get-Content (Join-Path $root "VERSION") -TotalCount 1).Trim()
     $sdk = Join-Path $root "dist\sdk"
     if (-not (Test-Path (Join-Path $sdk "bin\rexglue.exe"))) { throw "no SDK in ${sdk}: build and install it first (see docs\GAME.md)" }
     New-Item -ItemType Directory -Force $Out | Out-Null
@@ -21,6 +24,7 @@ function New-PlayerPackage {
 
     # the game's project, with the manifest pointing at games\mk9\game (where the disc is extracted)
     foreach ($f in "CMakeLists.txt", "CMakePresets.json") { Copy-Item -Force (Join-Path $root "mk9\$f") $proj }
+    Copy-Item -Force (Join-Path $root "VERSION") $proj
     robocopy (Join-Path $root "mk9\src") (Join-Path $proj "src") /MIR /NFL /NDL /NJH /NJS | Out-Null
     robocopy (Join-Path $root "mk9\config") (Join-Path $proj "config") /MIR /NFL /NDL /NJH /NJS | Out-Null
     New-Item -ItemType Directory -Force (Join-Path $proj "generated") | Out-Null
@@ -58,6 +62,8 @@ function New-PlayerPackage {
         $p = Join-Path $root "docs\$d"
         if (Test-Path $p) { Copy-Item -Force $p (Join-Path $Out "docs") }
     }
+    [System.IO.File]::WriteAllText((Join-Path $Out "VERSION.txt"),
+        "MK9-Online $version, packaged $(Get-Date -Format 'yyyy-MM-dd HH:mm')`r`n")
     $size = (Get-ChildItem $Out -Recurse -File | Measure-Object -Property Length -Sum).Sum
     "package in $Out ({0:N0} MB)" -f ($size / 1MB)
 }

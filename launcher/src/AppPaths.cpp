@@ -8,6 +8,8 @@
 #include <QMutex>
 #include <QStandardPaths>
 
+#include <cmath>
+
 #include "GameData.h"
 
 namespace {
@@ -25,6 +27,15 @@ bool writableDir(const QString& dir) {
     probe.remove();
     return true;
 }
+
+QString exeDir() { return QCoreApplication::applicationDirPath(); }
+
+// a setting, or what it is by default where the launcher runs: in a player package, in a source checkout
+QString pathSetting(const QString& key, const QString& packaged, const QString& source) {
+    const QString v = cfg::get(key).toString();
+    if (!v.isEmpty()) return v;
+    return paths::isPackage() ? packaged : source;
+}
 }  // namespace
 
 namespace paths {
@@ -33,42 +44,42 @@ void init(const QString& configOverride) {
     if (!configOverride.isEmpty()) {
         g_config = QFileInfo(configOverride).absoluteFilePath();
     } else {
-        const QString exeDir = QCoreApplication::applicationDirPath();
-        const QString dir = writableDir(exeDir)
-                                ? exeDir
-                                : QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-        g_config = QDir(dir).filePath(QStringLiteral("mk3d-launcher.ini"));
+        // beside the exe, or %LOCALAPPDATA%\MK9\MK9 Online when that folder is read-only
+        const QString dir = writableDir(exeDir()) ? exeDir()
+                                                  : QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+        g_config = QDir(dir).filePath(QStringLiteral("mk9-launcher.ini"));
     }
     g_dataDir = QFileInfo(g_config).absolutePath();
     QDir().mkpath(g_dataDir);
     QDir().mkpath(sessionsDir());
     g_settings = new QSettings(g_config, QSettings::IniFormat);
-    const QString defaults = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("defaults.ini"));
+    const QString defaults = QDir(exeDir()).filePath(QStringLiteral("defaults.ini"));
     if (QFileInfo::exists(defaults)) g_defaults = new QSettings(defaults, QSettings::IniFormat);
 }
 
 QString configFile() { return g_config; }
 QString dataDir() { return g_dataDir; }
 QString sessionsDir() { return QDir(g_dataDir).filePath(QStringLiteral("sessions")); }
-QString logFile() { return QDir(g_dataDir).filePath(QStringLiteral("mk3d-launcher.log")); }
+QString cacheDir() { return QDir(g_dataDir).filePath(QStringLiteral("cache")); }
+QString logFile() { return QDir(g_dataDir).filePath(QStringLiteral("mk9-launcher.log")); }
 
 QString detectedRepoRoot() {
-    QDir dir(QCoreApplication::applicationDirPath());
+    QDir dir(exeDir());
     for (int i = 0; i < 8; ++i) {
-        if (QFileInfo::exists(dir.filePath(QStringLiteral("tools/py/xiso.py")))) return dir.absolutePath();
+        if (QFileInfo::exists(dir.filePath(QStringLiteral("mk9/mk9_manifest.toml"))) &&
+            QFileInfo::exists(dir.filePath(QStringLiteral("launcher/CMakeLists.txt"))))
+            return dir.absolutePath();
         if (!dir.cdUp()) break;
     }
-    return QCoreApplication::applicationDirPath();
+    return exeDir();
 }
 
-bool isPackage() { return QFileInfo(QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("games"))).isDir(); }
+bool isPackage() { return QFileInfo(QDir(exeDir()).filePath(QStringLiteral("games"))).isDir(); }
 
 QString packagedGameFolder(const QString& gameId) {
-    const QString dir = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("games/") + gameId);
+    const QString dir = QDir(exeDir()).filePath(QStringLiteral("games/") + gameId);
     return QFileInfo(dir).isDir() ? dir : QString();
 }
-
-QString toolchainDir() { return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("toolchain")); }
 
 }  // namespace paths
 
@@ -97,32 +108,64 @@ QString gameFolder(const QString& gameId) {
     const QString v = get(QStringLiteral("games/%1/folder").arg(gameId)).toString();
     if (!v.isEmpty()) return v;
     const QString packaged = paths::packagedGameFolder(gameId);
-    return packaged.isEmpty() ? QDir(repoRoot()).filePath(QStringLiteral("recomp/%1").arg(gameId)) : packaged;
+    return packaged.isEmpty() ? QDir(repoRoot()).filePath(gameId) : packaged;
 }
 
 QString gameExe(const QString& gameId) {
     const QString v = get(QStringLiteral("games/%1/exe").arg(gameId)).toString();
     if (!v.isEmpty()) return v;
     const Game* g = GameData::instance().game(gameId);
-    const QString exe = g && !g->defaultExe.isEmpty() ? g->defaultExe : gameId.toUpper() + QStringLiteral(".exe");
+    const QString exe = g && !g->defaultExe.isEmpty() ? g->defaultExe : gameId + QStringLiteral(".exe");
     // a package keeps the executable in the game folder, a source checkout in its build output
     const QDir folder(gameFolder(gameId));
     if (QFileInfo::exists(folder.filePath(exe))) return folder.filePath(exe);
-    return folder.filePath(QStringLiteral("out/build/release/") + exe);
+    return folder.filePath(QStringLiteral("out/build/win-amd64-release/") + exe);
+}
+
+QString gameDataRoot(const QString& gameId) {
+    return pathSetting(QStringLiteral("games/%1/data").arg(gameId), QDir(gameFolder(gameId)).filePath(QStringLiteral("game")),
+                       QDir(repoRoot()).filePath(QStringLiteral("game/disc")));
+}
+
+QString saveFolder(const QString& gameId) {
+    return pathSetting(QStringLiteral("games/%1/save").arg(gameId), QDir(gameFolder(gameId)).filePath(QStringLiteral("user")),
+                       QDir(repoRoot()).filePath(QStringLiteral("game/user")));
+}
+
+QString buildScript(const QString& gameId) {
+    return pathSetting(QStringLiteral("games/%1/build_script").arg(gameId),
+                       QDir(gameFolder(gameId)).filePath(QStringLiteral("build-game.cmd")),
+                       QDir(gameFolder(gameId)).filePath(QStringLiteral("build.cmd")));
+}
+
+QString buildArgs(const QString& gameId) {
+    const QVariant v = get(QStringLiteral("games/%1/build_args").arg(gameId));
+    if (v.isValid()) return v.toString();
+    return paths::isPackage() ? QString() : QStringLiteral("release");
 }
 
 QString region() { return get(QStringLiteral("online/region"), QStringLiteral("eu")).toString(); }
 int maxPing() { return get(QStringLiteral("online/max_ping"), 150).toInt(); }
 bool strict() { return get(QStringLiteral("online/strict"), false).toBool(); }
 bool pickInGame() { return get(QStringLiteral("online/pick_in_game"), true).toBool(); }
-bool practiceWhileWaiting() { return get(QStringLiteral("online/practice_while_waiting"), true).toBool(); }
-bool deathTraps() { return get(QStringLiteral("online/death_traps"), true).toBool(); }
-int inputDelay() { return qBound(0, get(QStringLiteral("online/delay"), 2).toInt(), 4); }
+bool soloWhileWaiting() { return get(QStringLiteral("online/solo_while_waiting"), false).toBool(); }
+int inputDelay() {
+    const QVariant v = get(QStringLiteral("online/delay"), QStringLiteral("auto"));
+    bool number = false;
+    const int d = v.toInt(&number);
+    return number ? qBound(0, d, 6) : kAutoDelay;
+}
+QJsonValue inputDelayValue(int delay) { return delay < 0 ? QJsonValue(QStringLiteral("auto")) : QJsonValue(delay); }
+QString inputDelayText(int delay) {
+    return delay < 0 ? QStringLiteral("auto (from the ping)") : QStringLiteral("%1 frame(s)").arg(delay);
+}
+int autoDelay(int rttMs) { return qBound(2, int(std::ceil((rttMs / 2.0 + 8.0) / 16.67)), 8); }
+QString netcode() {
+    return get(QStringLiteral("online/netcode")).toString() == QLatin1String("rollback") ? QStringLiteral("rollback")
+                                                                                         : QStringLiteral("lockstep");
+}
 int gamePort() { return get(QStringLiteral("online/game_port"), 7001).toInt(); }
-// as a game the launcher does not start: borderless at the monitor's own resolution
-QString displayMode() { return get(QStringLiteral("display/mode"), QStringLiteral("borderless")).toString(); }
-QString resolution() { return get(QStringLiteral("display/resolution"), QStringLiteral("desktop")).toString(); }
-bool vsync() { return get(QStringLiteral("display/vsync"), true).toBool(); }
+bool fullscreen() { return get(QStringLiteral("display/fullscreen"), true).toBool(); }
 bool udpLoopback() { return get(QStringLiteral("dev/udp_loopback"), false).toBool(); }
 bool upnp() { return get(QStringLiteral("online/upnp"), true).toBool(); }
 int localTestPort(int instance) {

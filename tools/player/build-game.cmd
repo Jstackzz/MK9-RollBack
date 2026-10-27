@@ -29,9 +29,10 @@ set "PATH=%TOOLCHAIN%\bin;%VSDIR%\Common7\IDE\CommonExtensions\Microsoft\CMake\C
 where cmake >nul 2>nul || (echo CMake not found: add "C++ CMake tools for Windows" in the Visual Studio Installer. & exit /b 1)
 where clang++ >nul 2>nul || (echo clang not found in %TOOLCHAIN%\bin. & exit /b 1)
 
-rem AVX2 PCs get the faster code; older ones the SSE4 build
-set "MARCH=x86-64-v3"
-powershell -NoProfile -Command "if (-not [System.Runtime.Intrinsics.X86.Avx2]::IsSupported) { exit 1 }" >nul 2>nul || set "MARCH=x86-64-v2"
+rem AVX2 PCs get the faster code, older ones the SSE4 build (clang knows this PC's CPU); both
+rem compute the same results (the project builds without contracted multiply-adds)
+set "MARCH=x86-64-v2"
+echo.| clang -march=native -dM -E -x c - 2>nul | findstr /C:"__AVX2__" >nul && set "MARCH=x86-64-v3"
 
 echo [1/3] Translating the game's code (codegen)...
 pushd "%HERE%project"
@@ -48,7 +49,9 @@ cmake --build "%HERE%build" || (echo compile failed & exit /b 1)
 echo [3/3] Installing...
 copy /y "%HERE%build\mk9.exe" "%HERE%mk9.exe" >nul || exit /b 1
 for %%f in ("%HERE%sdk\bin\*.dll") do copy /y "%%f" "%HERE%" >nul
-echo BUILD OK
+rem the release this build was made from: the launcher builds again after an update changes it
+if exist "%HERE%project\VERSION" copy /y "%HERE%project\VERSION" "%HERE%built.txt" >nul
+echo BUILD OK (%MARCH%)
 exit /b 0
 
 :novs

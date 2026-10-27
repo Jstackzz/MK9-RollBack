@@ -31,7 +31,7 @@ constexpr int kStickOn = 20000, kStickOff = 12000;       // the left stick as di
 // in the background, and the launcher must not act on what a player does in a game)
 bool LauncherInFront() {
     if (!QApplication::activeWindow()) return false;
-    static const bool anyWindow = qEnvironmentVariableIsSet("MK3D_PAD_ANY_WINDOW");  // tests on Qt's offscreen platform
+    static const bool anyWindow = qEnvironmentVariableIsSet("MK9_PAD_ANY_WINDOW");  // tests on Qt's offscreen platform
     if (anyWindow) return true;
     HWND fg = GetForegroundWindow();
     DWORD pid = 0;
@@ -58,8 +58,8 @@ QRect InWindow(QWidget* w, QWidget* window) { return QRect(w->mapTo(window, QPoi
 }  // namespace
 
 GamepadNav::GamepadNav(QObject* parent) : QObject(parent) {
-    // the games' settings (runtime core/input.cpp): XInput devices as gamepads, PlayStation and Switch pads through
-    // HIDAPI, the rest through Windows.Gaming.Input, read in the background as well
+    // XInput devices as gamepads, PlayStation and Switch pads through HIDAPI, the rest through Windows.Gaming.Input,
+    // read in the background as well (the game reads its controllers through the same SDL3)
     SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_WGI, "1");

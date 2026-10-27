@@ -118,10 +118,17 @@ first restore crashes the game. What was found (`tools/synctest.ps1`, `MK9_RB_TR
 3. `-ONETHREAD` rendering (no rendering thread) crashes at boot: other threads queue render work.
 
 What a working rollback needs, in order: the fight's allocations from a heap of their own that
-only the simulation threads touch (MK9's MK MemoryManager, `sub_829AFB28` and its pools, routes
-by thread), FMOD's memory left alone and its event starts muted while frames run again, and the
-rendering thread's memory restored with the rest (it is idle at frame tops). Until then,
-lockstep is the netcode to use.
+only the simulation threads touch, FMOD's memory left alone and its event starts muted while
+frames run again, and the rendering thread's memory restored with the rest (it is idle at frame
+tops). Until then, lockstep is the netcode to use.
+
+The allocator to route: UE3's `GMalloc` is the object pointer at `0x833D9074` (MK9's MK
+MemoryManager behind it; `sub_829AFB28` is its out-of-memory path). The game calls it through
+its vtable: `+8` Malloc (1,808 call sites), `+12` Realloc (418), `+16` Free (1,798), `+24` (33).
+The plan: from the VS screen on (the fight's objects are created on the main thread while it
+loads), the main and rendering threads' Malloc/Realloc go to a simulation heap in a guest region
+of its own whose bookkeeping lives in that region (so a restore puts it back consistently); their
+frees of older blocks wait until the fight is over; other threads keep the original allocator.
 
 ## Known gaps
 

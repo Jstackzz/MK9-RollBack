@@ -25,7 +25,7 @@ QString installDir() { return QCoreApplication::applicationDirPath(); }
 QString workDir() { return QDir(installDir()).filePath(QStringLiteral("update")); }
 QString stageDir() { return QDir(workDir()).filePath(QStringLiteral("stage")); }
 QString oldList() { return QDir(workDir()).filePath(QStringLiteral("old-files.txt")); }
-const QString kOldSuffix = QStringLiteral(".mk3d-old");
+const QString kOldSuffix = QStringLiteral(".mk9-old");
 
 // a newer than b, part by part (0.1.10 after 0.1.9)
 bool newer(const QString& a, const QString& b) {
@@ -58,7 +58,7 @@ QString winError(DWORD code) {
     return s;
 }
 
-// every file under `from` into its place under `to`, the installed one (if any) renamed to <name>.mk3d-old first (a
+// every file under `from` into its place under `to`, the installed one (if any) renamed to <name>.mk9-old first (a
 // running program's file can be renamed, not replaced); the old names go into `olds`. A failure puts back every file
 // moved so far and says which file it was.
 bool swapIn(const QString& from, const QString& to, QStringList* olds, QString* error) {
@@ -113,7 +113,7 @@ QJsonObject Updater::usable(const QJsonValue& value) {
     static const QRegularExpression version(QStringLiteral("^\\d+(\\.\\d+)*$")), sha(QStringLiteral("^[0-9a-f]{64}$"));
     const QString v = r.value(QStringLiteral("version")).toString();
     const double size = r.value(QStringLiteral("size")).toDouble();
-    if (!version.match(v).hasMatch() || !newer(v, QStringLiteral(MK3D_LAUNCHER_VERSION))) return {};
+    if (!version.match(v).hasMatch() || !newer(v, QStringLiteral(MK9_LAUNCHER_VERSION))) return {};
     if (!downloadLink(r.value(QStringLiteral("url")).toString())) return {};
     if (!sha.match(r.value(QStringLiteral("sha256")).toString()).hasMatch() || size <= 0 || size > 1 << 30) return {};
     return r;
@@ -123,7 +123,7 @@ QString Updater::blocker() {
     if (!paths::isPackage()) return tr("A source build updates with git, not here.");
     QFile probe(QDir(installDir()).filePath(QStringLiteral("update-write-test.tmp")));
     if (!probe.open(QIODevice::WriteOnly)) {
-        return tr("The launcher cannot write to its folder (%1). Move the MK3D-Online folder somewhere you can write "
+        return tr("The launcher cannot write to its folder (%1). Move the MK9-Online folder somewhere you can write "
                   "to, such as Documents, or update by hand.")
             .arg(QDir::toNativeSeparators(installDir()));
     }
@@ -169,13 +169,13 @@ void Updater::start(const QJsonObject& release) {
     hash_.reset();
     QDir(stageDir()).removeRecursively();
     QDir().mkpath(workDir());
-    file_.setFileName(QDir(workDir()).filePath(QStringLiteral("MK3D-Online-%1.zip.part").arg(version())));
+    file_.setFileName(QDir(workDir()).filePath(QStringLiteral("MK9-Online-%1.zip.part").arg(version())));
     if (!file_.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         fail(tr("Could not write %1.").arg(QDir::toNativeSeparators(file_.fileName())));
         return;
     }
     QNetworkRequest req{QUrl(release_.value(QStringLiteral("url")).toString())};
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MK3D-Online/" MK3D_LAUNCHER_VERSION));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MK9-Online/" MK9_LAUNCHER_VERSION));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     req.setTransferTimeout(60000);  // a stall, not the whole download
     applog::write(QStringLiteral("update: downloading %1 from %2").arg(version(), req.url().toString()));
@@ -265,13 +265,13 @@ void Updater::onUnpacked(bool powershell, int exitCode) {
     if (unzip_) unzip_->deleteLater();
     unzip_ = nullptr;
     if (!busy_) return;  // cancelled
-    // the release named: its launcher there, and VERSION.txt's first line "MK3D-Online <version>, packaged ..."
-    const QDir root(QDir(stageDir()).filePath(QStringLiteral("MK3D-Online")));
+    // the release named: its launcher there, and VERSION.txt's first line "MK9-Online <version>, packaged ..."
+    const QDir root(QDir(stageDir()).filePath(QStringLiteral("MK9-Online")));
     QFile stamp(root.filePath(QStringLiteral("VERSION.txt")));
-    const bool whole = exitCode == 0 && QFileInfo::exists(root.filePath(QStringLiteral("MK3DLauncher.exe"))) &&
+    const bool whole = exitCode == 0 && QFileInfo::exists(root.filePath(QStringLiteral("MK9Launcher.exe"))) &&
                        stamp.open(QIODevice::ReadOnly | QIODevice::Text) &&
                        QString::fromUtf8(stamp.readLine()).remove(QChar(0xFEFF)).startsWith(
-                           QStringLiteral("MK3D-Online %1,").arg(version()));
+                           QStringLiteral("MK9-Online %1,").arg(version()));
     stamp.close();
     if (!whole) {
         applog::write(QStringLiteral("update: unpacking with %1 failed (exit %2)")
@@ -293,7 +293,7 @@ void Updater::install() {
     emit progress(tr("Installing %1...").arg(version()), -1);
     QStringList olds;
     QString error;
-    const QString from = QDir(stageDir()).filePath(QStringLiteral("MK3D-Online"));
+    const QString from = QDir(stageDir()).filePath(QStringLiteral("MK9-Online"));
     if (!swapIn(from, installDir(), &olds, &error)) {
         applog::write(QStringLiteral("update: installing failed at %1; every file put back").arg(error));
         fail(tr("Could not replace %1. Nothing was changed: try again once nothing uses that file (a game, an "
@@ -306,9 +306,9 @@ void Updater::install() {
     QDir(stageDir()).removeRecursively();
     QFile::remove(file_.fileName());
     applog::write(QStringLiteral("update: %1 installed (%2 files replaced), starting it").arg(version()).arg(olds.size()));
-    const QString exe = QDir(installDir()).filePath(QStringLiteral("MK3DLauncher.exe"));
+    const QString exe = QDir(installDir()).filePath(QStringLiteral("MK9Launcher.exe"));
     const bool started = QProcess::startDetached(
-        exe, {QStringLiteral("--updated"), QStringLiteral(MK3D_LAUNCHER_VERSION), QStringLiteral("--config"), paths::configFile()},
+        exe, {QStringLiteral("--updated"), QStringLiteral(MK9_LAUNCHER_VERSION), QStringLiteral("--config"), paths::configFile()},
         installDir());
     if (!started) applog::write(QStringLiteral("update: the new launcher did not start"));
     busy_ = false;

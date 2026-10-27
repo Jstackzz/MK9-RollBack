@@ -9,7 +9,7 @@
 
 namespace {
 constexpr int kMaxLine = 64 * 1024;
-const char* kClientName = "mk3d-launcher";
+const char* kClientName = "mk9-launcher";
 
 QHostAddress plainV4(const QHostAddress& a) {
     bool ok = false;
@@ -151,7 +151,7 @@ void ServerClient::sendHello() {
     QJsonObject hello{{QStringLiteral("type"), QStringLiteral("hello")},
                       {QStringLiteral("proto"), 1},
                       {QStringLiteral("client"), QLatin1String(kClientName)},
-                      {QStringLiteral("version"), QStringLiteral(MK3D_LAUNCHER_VERSION)},
+                      {QStringLiteral("version"), QStringLiteral(MK9_LAUNCHER_VERSION)},
                       {QStringLiteral("os"), QStringLiteral("windows")}};
     send(hello);
 }

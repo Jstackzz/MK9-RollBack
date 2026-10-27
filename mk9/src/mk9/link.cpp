@@ -48,6 +48,7 @@ std::string g_match = "none";
 bool g_in_match = false;  // a start was taken and not parked
 bool g_online = false;
 bool g_reported = false;  // result / desync / disconnected written for this match
+bool g_error_shown = false;  // an error line stands until the next command (the launcher reads it)
 autopilot::Plan g_plan;
 net::Settings g_net;
 
@@ -60,6 +61,7 @@ std::wstring Widen(const std::string& s) {
 void WriteStatus(const std::string& line) {
   if (!g_on || line == g_last_status) return;
   g_last_status = line;
+  g_error_shown = line.rfind("error", 0) == 0;
   const std::wstring tmp = g_status + L".tmp";
   FILE* f = _wfopen(tmp.c_str(), L"wb");
   if (!f) return;
@@ -165,7 +167,7 @@ void Start(const Command& c) {
   g_online = plan.mode != autopilot::Mode::Practice && (!st.peers.empty() || st.watch);
   if (g_online) {
     net::Configure(st);
-    net::RequestMeet();  // at the hold point, every player's game at its next frame
+    net::RequestMeet(plan.seed);  // at the hold point, every player's game at its next frame
   } else {
     net::Disable();
   }
@@ -226,6 +228,7 @@ void OnFrame(uint64_t frame) {
     std::string line;
     if (ClaimCommand(line)) {
       REXLOG_INFO("mk9 link: command {}", line);
+      g_error_shown = false;
       const Command c = Parse(line);
       if (c.verb == "start") Start(c);
       else if (c.verb == "park") Park();
@@ -238,7 +241,8 @@ void OnFrame(uint64_t frame) {
       }
     }
   }
-  // the state for the launcher
+  // the state for the launcher (an error line stays up until the next command)
+  if (g_error_shown) return;
   if (!g_in_match) {
     WriteStatus(autopilot::AtHoldPoint() ? "ready" : "booting");
     return;
@@ -258,6 +262,11 @@ void OnFrame(uint64_t frame) {
     }
     if (s == net::Status::Disconnected) {
       WriteStatus("disconnected match=" + g_match);
+      g_reported = true;
+      return;
+    }
+    if (s == net::Status::Mismatch) {
+      WriteStatus("error the other player's game is another release; both need the same update");
       g_reported = true;
       return;
     }

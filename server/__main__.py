@@ -14,7 +14,7 @@ from .matchmaking import MatchmakingConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="python -m server", description="MK3D Online lobby and matchmaking server.")
+    ap = argparse.ArgumentParser(prog="python -m server", description="MK9 Online lobby and matchmaking server.")
     ap.add_argument("--host", default="0.0.0.0", help="address to listen on (default 0.0.0.0)")
     ap.add_argument("--port", type=int, default=7777, help="TLS/TCP port (default 7777)")
     ap.add_argument("--udp-port", type=int, default=7778, help="UDP rendezvous port (default 7778)")
@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="development: relay every match through this server (tests the relay on one PC)")
     ap.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     ap.add_argument("--log-file", default=None, help="also append the log to this file")
-    ap.add_argument("--version", action="version", version=f"mk3d-server {__version__}")
+    ap.add_argument("--version", action="version", version=f"mk9-server {__version__}")
     return ap
 
 
@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         asyncio.run(serve(cfg))
     except KeyboardInterrupt:
-        logging.getLogger("mk3d.server").info("stopped")
+        logging.getLogger("mk9.server").info("stopped")
     except OSError as exc:
         print(f"cannot start: {exc}", file=sys.stderr)
         return 1

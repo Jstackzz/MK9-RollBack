@@ -1,9 +1,10 @@
-// MK3D Online launcher: ranked/casual matchmaking, lobbies, practice, leaderboard and the
-// "build the game from your own disc" flow for the native Mortal Kombat ports.
+// MK9 Online launcher: ranked/Kasual matchmaking, lobbies, single player, leaderboard and the "build the game from
+// your own disc" flow for the native port of Mortal Kombat Komplete Edition (Xbox 360).
 
 #include <algorithm>
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QDir>
 #include <QLockFile>
 #include <QMessageBox>
 #include <QSslSocket>
@@ -16,12 +17,12 @@
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
-    QApplication::setApplicationName(QStringLiteral("MK3D Online"));
-    QApplication::setOrganizationName(QStringLiteral("MK3D"));
-    QApplication::setApplicationVersion(QStringLiteral(MK3D_LAUNCHER_VERSION));
+    QApplication::setApplicationName(QStringLiteral("MK9 Online"));  // %LOCALAPPDATA%\MK9\MK9 Online
+    QApplication::setOrganizationName(QStringLiteral("MK9"));
+    QApplication::setApplicationVersion(QStringLiteral(MK9_LAUNCHER_VERSION));
 
     QCommandLineParser cli;
-    cli.setApplicationDescription(QStringLiteral("MK3D Online launcher"));
+    cli.setApplicationDescription(QStringLiteral("MK9 Online launcher"));
     cli.addHelpOption();
     cli.addVersionOption();
     const QCommandLineOption configOpt(QStringLiteral("config"), QStringLiteral("Settings file to use."), QStringLiteral("ini"));
@@ -29,12 +30,14 @@ int main(int argc, char* argv[]) {
     const QCommandLineOption fpOpt(QStringLiteral("fingerprint"), QStringLiteral("Pinned SHA-256 certificate fingerprint."), QStringLiteral("hex"));
     const QCommandLineOption userOpt(QStringLiteral("user"), QStringLiteral("Development: sign in as this account."), QStringLiteral("name"));
     const QCommandLineOption pwEnvOpt(QStringLiteral("password-env"),
-                                      QStringLiteral("Development: environment variable holding the password (default MK3D_DEV_PASSWORD)."),
+                                      QStringLiteral("Development: environment variable holding the password (default MK9_DEV_PASSWORD)."),
                                       QStringLiteral("var"));
     const QCommandLineOption regOpt(QStringLiteral("register"), QStringLiteral("Development: create the --user account if needed."));
     const QCommandLineOption queueOpt(QStringLiteral("queue"), QStringLiteral("Development: queue right after signing in."), QStringLiteral("casual|ranked"));
-    const QCommandLineOption gameOpt(QStringLiteral("game"), QStringLiteral("Game to select: mkda, mkd, mka."), QStringLiteral("id"));
-    const QCommandLineOption modeOpt(QStringLiteral("mode"), QStringLiteral("Mode for --queue."), QStringLiteral("id"));
+    const QCommandLineOption gameOpt(QStringLiteral("game"), QStringLiteral("Game to select (mk9)."), QStringLiteral("id"));
+    const QCommandLineOption modeOpt(QStringLiteral("mode"),
+                                     QStringLiteral("Mode for --queue, --lobby or --local-test: versus, tag, tyl."),
+                                     QStringLiteral("id"));
     const QCommandLineOption charOpt(QStringLiteral("character"), QStringLiteral("Character for --queue."), QStringLiteral("id"));
     const QCommandLineOption pageOpt(QStringLiteral("page"), QStringLiteral("Page to open."), QStringLiteral("name"));
     const QCommandLineOption localTestOpt(QStringLiteral("local-test"),
@@ -49,6 +52,8 @@ int main(int argc, char* argv[]) {
                                       QStringLiteral("host|join|watch"));
     const QCommandLineOption lobbyNameOpt(QStringLiteral("lobby-name"), QStringLiteral("Development: the lobby's name for --lobby."),
                                           QStringLiteral("name"));
+    const QCommandLineOption kothOpt(QStringLiteral("koth"),
+                                     QStringLiteral("Development: with --lobby host, a King of the Hill lobby."));
     const QCommandLineOption upnpProbeOpt(QStringLiteral("upnp-probe"),
                                           QStringLiteral("Find the router (UPnP) and its public address; open no port."));
     const QCommandLineOption lobbyMatchesOpt(QStringLiteral("lobby-matches"),
@@ -70,13 +75,13 @@ int main(int argc, char* argv[]) {
     const QCommandLineOption soloOpt(
         QStringLiteral("solo"),
         QStringLiteral("Development: with --queue, start single player first and search alongside it (standby)."));
-    const QCommandLineOption deathTrapsOpt(
-        QStringLiteral("death-traps"),
-        QStringLiteral("The arenas' death traps in matches this player searches for or hosts, saved (on|off)."),
-        QStringLiteral("on|off"));
-    const QCommandLineOption practiceOpt(
-        QStringLiteral("practice"),
-        QStringLiteral("Practice while a Ranked or Kasual search waits: on or off (saved like the queue pages' box)."),
+    const QCommandLineOption netcodeOpt(
+        QStringLiteral("netcode"),
+        QStringLiteral("The netcode this player asks for, saved: lockstep (default) or rollback (experimental)."),
+        QStringLiteral("lockstep|rollback"));
+    const QCommandLineOption soloWaitOpt(
+        QStringLiteral("solo-wait"),
+        QStringLiteral("Single player while a Ranked or Kasual search waits: on or off (saved like the queue pages' box)."),
         QStringLiteral("on|off"));
     const QCommandLineOption updatedOpt(
         QStringLiteral("updated"),
@@ -85,30 +90,36 @@ int main(int argc, char* argv[]) {
     const QCommandLineOption autoUpdateOpt(QStringLiteral("auto-update"),
                                            QStringLiteral("Development: install an update offered at once, without asking."));
     for (const auto* o : {&configOpt, &serverOpt, &fpOpt, &userOpt, &pwEnvOpt, &regOpt, &queueOpt, &gameOpt, &modeOpt,
-                          &charOpt, &pageOpt, &acceptOpt, &localTestOpt, &extractOpt, &lobbyOpt, &lobbyNameOpt,
+                          &charOpt, &pageOpt, &acceptOpt, &localTestOpt, &extractOpt, &lobbyOpt, &lobbyNameOpt, &kothOpt,
                           &lobbyMatchesOpt, &upnpProbeOpt, &rematchesOpt, &rematchChoiceOpt, &leaveSeriesOpt, &soloOpt,
-                          &practiceOpt, &deathTrapsOpt, &updatedOpt, &autoUpdateOpt})
+                          &soloWaitOpt, &netcodeOpt, &updatedOpt, &autoUpdateOpt})
         cli.addOption(*o);
     cli.process(app);
 
     paths::init(cli.value(configOpt));
-    applog::write(QStringLiteral("launcher %1 starting, settings %2").arg(QStringLiteral(MK3D_LAUNCHER_VERSION), paths::configFile()));
+    applog::write(QStringLiteral("launcher %1 starting, settings %2").arg(QStringLiteral(MK9_LAUNCHER_VERSION), paths::configFile()));
 
     // not "<ini>.lock": QSettings locks that file itself while it syncs. Started by an update, the old launcher is
     // still closing: wait for it.
     QLockFile lock(paths::configFile() + QStringLiteral(".instance"));
     lock.setStaleLockTime(0);
     if (!lock.tryLock(cli.isSet(updatedOpt) ? 30000 : 200)) {
-        QMessageBox::information(nullptr, QStringLiteral("MK3D Online"),
-                                 QStringLiteral("MK3D Online is already running with these settings."));
+        QMessageBox::information(nullptr, QStringLiteral("MK9 Online"),
+                                 QStringLiteral("MK9 Online is already running with these settings."));
         return 0;
     }
 
     QString error;
     if (!GameData::instance().load(&error)) {
-        QMessageBox::critical(nullptr, QStringLiteral("MK3D Online"), error);
+        QMessageBox::critical(nullptr, QStringLiteral("MK9 Online"), error);
         return 1;
     }
+    for (const Game& g : GameData::instance().games())
+        applog::write(QStringLiteral("game %1: exe %2, disc %3, saves %4, build %5 %6")
+                          .arg(g.id, QDir::toNativeSeparators(cfg::gameExe(g.id)),
+                               QDir::toNativeSeparators(cfg::gameDataRoot(g.id)),
+                               QDir::toNativeSeparators(cfg::saveFolder(g.id)),
+                               QDir::toNativeSeparators(cfg::buildScript(g.id)), cfg::buildArgs(g.id)));
     if (QSslSocket::availableBackends().contains(QStringLiteral("schannel")))
         QSslSocket::setActiveBackend(QStringLiteral("schannel"));
     applog::write(QStringLiteral("tls backend %1, %2").arg(QSslSocket::activeBackend(), QSslSocket::sslLibraryVersionString()));
@@ -134,13 +145,14 @@ int main(int argc, char* argv[]) {
     opts.extractImage = cli.value(extractOpt);
     opts.lobby = cli.value(lobbyOpt);
     opts.lobbyName = cli.value(lobbyNameOpt);
+    opts.koth = cli.isSet(kothOpt);
     opts.lobbyMatches = cli.isSet(lobbyMatchesOpt) ? std::max(1, cli.value(lobbyMatchesOpt).toInt()) : 1;
     opts.rematches = cli.isSet(rematchesOpt) ? std::max(0, cli.value(rematchesOpt).toInt()) : 0;
     opts.rematchChoices = cli.value(rematchChoiceOpt).split(QLatin1Char(','), Qt::SkipEmptyParts);
     opts.leaveSeries = cli.isSet(leaveSeriesOpt);
     opts.solo = cli.isSet(soloOpt);
-    opts.practice = cli.value(practiceOpt);
-    opts.deathTraps = cli.value(deathTrapsOpt);
+    opts.soloWait = cli.value(soloWaitOpt);
+    opts.netcode = cli.value(netcodeOpt);
     opts.upnpProbe = cli.isSet(upnpProbeOpt);
     opts.updatedFrom = cli.value(updatedOpt);
     opts.autoUpdate = cli.isSet(autoUpdateOpt);

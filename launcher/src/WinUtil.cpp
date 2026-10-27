@@ -210,7 +210,7 @@ bool thawProcess(qint64 pid, const QList<quintptr>& hidden) {
 }
 
 int smartAppControl() {
-    if (qEnvironmentVariableIsSet("MK3D_SMART_APP_CONTROL")) return qEnvironmentVariableIntValue("MK3D_SMART_APP_CONTROL");
+    if (qEnvironmentVariableIsSet("MK9_SMART_APP_CONTROL")) return qEnvironmentVariableIntValue("MK9_SMART_APP_CONTROL");
     DWORD value = 0, size = sizeof value;
     if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\CI\\Policy",
                      L"VerifiedAndReputablePolicyState", RRF_RT_REG_DWORD, nullptr, &value, &size) != ERROR_SUCCESS)

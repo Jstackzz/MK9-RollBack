@@ -19,17 +19,21 @@
 
 #include "AppPaths.h"
 #include "GameData.h"
+#include "GameProcess.h"
 #include "ServerClient.h"
 
 namespace {
 const Game* gameOf(const QString& id) { return GameData::instance().game(id); }
 
-void fillCharacters(QComboBox* box, const QList<Character>& roster, const QString& select, int fallback = 0) {
+// "-": the player picks on the game's own select screen
+void fillCharacters(QComboBox* box, const QList<Character>& roster, const QString& select) {
     const QSignalBlocker block(box);
     box->clear();
-    for (const auto& c : roster) box->addItem(c.name, c.id);
+    box->addItem(QObject::tr("Pick in the game"), QStringLiteral("-"));
+    for (const auto& c : roster)
+        if (!c.boss) box->addItem(c.name, c.id);
     const int i = box->findData(select);
-    box->setCurrentIndex(i >= 0 ? i : qMin(fallback, box->count() - 1));
+    box->setCurrentIndex(i >= 0 ? i : 0);
 }
 }  // namespace
 
@@ -120,22 +124,14 @@ QueuePage::QueuePage(bool ranked, ServerClient* server, MatchController* control
     strict_->setChecked(cfg::strict());
     strict_->setVisible(ranked);
     mm->addWidget(strict_);
-    practice_ = new QCheckBox(tr("Practice while you wait"));
-    practice_->setChecked(cfg::practiceWhileWaiting());
-    practice_->setToolTip(tr("While the search runs, the game opens its practice: pick your fighter and the dummy "
-                             "(every fighter is unlocked there) and train. A match found comes up over it, and "
-                             "afterwards you are back in practice."));
-    mm->addWidget(practice_);
-    // ranked: never (the server holds to it too)
-    deathTraps_ = new QCheckBox(ranked ? tr("Death traps: always off in Ranked") : tr("Death traps"));
-    deathTraps_->setChecked(!ranked && cfg::deathTraps());
-    deathTraps_->setEnabled(!ranked);
-    deathTraps_->setToolTip(ranked ? tr("Ranked matches never have the arenas' death traps.")
-                                   : tr("Arenas whose death traps kill on the spot (the Dead Pool's acid, the Lower "
-                                        "Mines' spikes...). You only meet players who chose the same: with this off, "
-                                        "only players who turned death traps off too."));
-    mm->addWidget(deathTraps_);
+    solo_ = new QCheckBox(tr("Play single player while you wait"));
+    solo_->setChecked(cfg::soloWhileWaiting());
+    solo_->setToolTip(tr("While the search runs, the game opens single player (your saves, its own menus: practice, "
+                         "the ladder...). A match found comes up over it, and afterwards you are back where you "
+                         "were."));
+    mm->addWidget(solo_);
     delayInfo_ = ui::label(QString(), "Muted");
+    delayInfo_->setWordWrap(true);
     mm->addWidget(delayInfo_);
 
     QVBoxLayout* rec = nullptr;
@@ -179,19 +175,24 @@ QueuePage::QueuePage(bool ranked, ServerClient* server, MatchController* control
     connect(region_, &QComboBox::currentIndexChanged, this, [this] { cfg::set(QStringLiteral("online/region"), region_->currentData()); });
     connect(maxPing_, &QComboBox::currentIndexChanged, this, [this] { cfg::set(QStringLiteral("online/max_ping"), maxPing_->currentData()); });
     connect(strict_, &QCheckBox::toggled, this, [](bool on) { cfg::set(QStringLiteral("online/strict"), on); });
-    connect(practice_, &QCheckBox::toggled, this,
-            [](bool on) { cfg::set(QStringLiteral("online/practice_while_waiting"), on); });
-    connect(deathTraps_, &QCheckBox::toggled, this, [this](bool on) {
-        if (!ranked_) cfg::set(QStringLiteral("online/death_traps"), on);
-    });
+    connect(solo_, &QCheckBox::toggled, this,
+            [](bool on) { cfg::set(QStringLiteral("online/solo_while_waiting"), on); });
     connect(pickInGame_, &QCheckBox::toggled, this, [this](bool on) {
         cfg::set(QStringLiteral("online/pick_in_game"), on);
         refreshRoster();
     });
     connect(find_, &QPushButton::clicked, this, [this] {
         const auto p = controller_->phase();
-        if (p == MatchController::Phase::Idle) {
+        if (p == MatchController::Phase::Idle || p == MatchController::Phase::Solo) {
             if (leavingLosesSet()) startSearch();  // a new search leaves the series (and a ranked set with it)
+        } else if (controller_->canLeaveMatch()) {
+            // ranked: leaving is leaving the set, as closing the game would be
+            if (controller_->leavingCosts() &&
+                QMessageBox::question(this, tr("Leave the ranked match?"),
+                                      tr("Leaving a ranked match counts as leaving the set: you lose it if one of "
+                                         "its matches has counted. Leave anyway?")) != QMessageBox::Yes)
+                return;
+            controller_->leaveMatch();
         } else if (controller_->lastRequest().ranked == ranked_) {
             controller_->cancelSearch();
         }
@@ -223,6 +224,8 @@ QueuePage::QueuePage(bool ranked, ServerClient* server, MatchController* control
             text = r.value(QStringLiteral("left_side")).toInt() == r.value(QStringLiteral("side")).toInt()
                        ? tr("You left the match against %1: your game closed during it.").arg(opp)
                        : tr("%1 left the match: their game closed or dropped out.").arg(opp);
+        else if (status == QLatin1String("no_contest"))
+            text = tr("The match against %1 ended without a result: it does not count.").arg(opp);
         else
             text = tr("Match against %1 ended: %2 (does not count)").arg(opp, status.replace(QLatin1Char('_'), QLatin1Char(' ')));
         const QJsonObject eloObj = r.value(QStringLiteral("elo")).toObject().value(server_->accountName()).toObject();
@@ -264,9 +267,9 @@ void QueuePage::pressFind() {
 }
 
 void QueuePage::showEvent(QShowEvent* event) {
-    const QSignalBlocker block(practice_), blockTraps(deathTraps_);
-    practice_->setChecked(cfg::practiceWhileWaiting());  // the other queue page may have changed it
-    if (!ranked_) deathTraps_->setChecked(cfg::deathTraps());
+    const QSignalBlocker block(solo_);
+    solo_->setChecked(cfg::soloWhileWaiting());  // the other queue page may have changed it
+    refreshRoster();  // and the delay or netcode in Settings
     Page::showEvent(event);
 }
 
@@ -298,18 +301,22 @@ void QueuePage::refreshRoster() {
         const QSignalBlocker block(pickInGame_);
         pickInGame_->setChecked(cfg::pickInGame());  // the other queue page may have changed it
     }
-    const bool team = m && m->picksInGame();  // the mode's own (Chess Kombat's teams)
-    const bool inGame = team || pickInGame_->isChecked();
-    deathTraps_->setVisible(m && m->deathTraps);
-    pickInGame_->setVisible(!team);
+    const bool always = m && m->picksInGame();  // the mode's fighters are always picked in the game (all of MK9's)
+    const bool inGame = always || pickInGame_->isChecked();
+    pickInGame_->setVisible(!always);
     picker_->setVisible(!inGame);
     inGamePick_->setVisible(inGame);
-    inGamePick_->setText(team ? tr("Teams are picked inside the game for this mode.")
-                              : tr("You pick your fighter on the game's select screen when the match starts, with "
-                                   "your own controller; your opponent picks on theirs."));
+    inGamePick_->setText(m && m->fighters > 1
+                             ? tr("You pick your %1 fighters on the game's own select screen when the match starts, "
+                                  "with your own controller; your opponent picks theirs on their PC.").arg(m->fighters)
+                             : tr("You pick your fighter on the game's own select screen when the match starts, with "
+                                  "your own controller; your opponent picks theirs on their PC."));
     picker_->setRoster(g->roster(modeId), cfg::get(QStringLiteral("ui/%1/%2/character").arg(gameId_, modeId)).toString());
-    delayInfo_->setText(tr("Input delay %1 frame(s), game UDP port %2 (change in Settings)")
-                            .arg(qMax(ranked_ ? 1 : 0, cfg::inputDelay())).arg(cfg::gamePort()));
+    const int d = cfg::inputDelay();
+    delayInfo_->setText(tr("Input delay %1, %2 netcode (rollback only when both choose it), game UDP port %3 (change in "
+                           "Settings)")
+                            .arg(cfg::inputDelayText(d < 0 ? d : qMax(ranked_ ? 1 : 0, d)), cfg::netcode())
+                            .arg(cfg::gamePort()));
 }
 
 void QueuePage::updateStats() {
@@ -341,18 +348,18 @@ bool QueuePage::startSearch(const QString& mode, const QString& character) {
     req.maxPing = maxPing_->currentData().toInt();
     req.strict = ranked_ && strict_->isChecked();
     req.character = m->picksInGame() || cfg::pickInGame() ? QString() : picker_->currentId();
-    req.delay = qMax(ranked_ ? 1 : 0, cfg::inputDelay());
-    req.deathTraps = !ranked_ && (!m->deathTraps || deathTraps_->isChecked());
+    const int delay = cfg::inputDelay();
+    req.delay = delay < 0 ? cfg::kAutoDelay : qMax(ranked_ ? 1 : 0, delay);  // ranked: at least a frame
+    req.netcode = cfg::netcode();
     QString error;
     if (!controller_->findMatch(req, &error)) {
         log_->line(error);
         QMessageBox::warning(this, tr("Cannot search"), error);
         return false;
     }
-    log_->line(tr("Searching: %1 %2 as %3 in %4, max ping %5").arg(g->shortName, m->name,
-               m->picksInGame() ? tr("in-game team")
-                                : req.character.isEmpty() ? tr("a fighter picked in the game") : picker_->currentName(),
-               GameData::regionName(req.region), maxPing_->currentText()));
+    log_->line(tr("Searching: %1 %2 as %3 in %4, max ping %5, %6").arg(g->shortName, m->name,
+               req.character.isEmpty() ? tr("a fighter picked in the game") : picker_->currentName(),
+               GameData::regionName(req.region), maxPing_->currentText(), req.netcode));
     return true;
 }
 
@@ -406,10 +413,9 @@ void QueuePage::updateSeries() {
     const QString yours = chosen_.isEmpty() ? series_.value(QStringLiteral("you_choice")).toString() : chosen_;
     const bool themSelect = series_.value(QStringLiteral("them_choice")).toString() == QLatin1String("select");
     const bool select = yours == QLatin1String("select") || themSelect;  // either one: both pick again
-    // modes whose teams or karts are always picked in the game have nothing to pick again
-    const Game* g = gameOf(series_.value(QStringLiteral("game")).toString());
-    const GameMode* m = g ? g->mode(series_.value(QStringLiteral("mode")).toString()) : nullptr;
-    const bool canSelect = !ranked_ && !(m && m->picksInGame());
+    // SELECT: both pick again on the select screen (every MK9 match starts there: REMATCH picks again too until the
+    // game reports the fighters it played)
+    const bool canSelect = !ranked_;
     const int left = qMax(0, series_.value(QStringLiteral("seconds_left")).toInt() -
                                  static_cast<int>(seriesSince_.elapsed() / 1000));
     seriesTitle_->setText(ranked_ ? tr("SET  |  FIRST TO %1  |  VS %2")
@@ -499,6 +505,7 @@ void QueuePage::updateButton() {
     const bool mine = controller_->lastRequest().ranked == ranked_;
     const bool active = p == P::Searching || p == P::Found || p == P::Connecting;
     find_->setProperty("searching", active && mine);
+    find_->setToolTip(QString());
     if (p == P::Idle || p == P::Solo) {  // single player keeps running while a search does (standby)
         find_->setText(tr("FIND MATCH"));
         find_->setEnabled(server_->isLoggedIn());
@@ -511,6 +518,15 @@ void QueuePage::updateButton() {
         find_->setText(tr("CANCEL SEARCH"));
         find_->setEnabled(true);
         if (!clock_.isActive()) clock_.start();
+    } else if (controller_->canLeaveMatch()) {
+        // the game reports no result yet: the players end the match here when they are done
+        find_->setText(tr("LEAVE MATCH"));
+        find_->setEnabled(true);
+        find_->setToolTip(controller_->leavingCosts()
+                              ? tr("Leave this ranked match: as closing the game, it loses the set once a match of it counted")
+                              : tr("End this online match (it does not count) and go back to the menu for the next one"));
+        clock_.stop();
+        timer_->clear();
     } else {
         find_->setText(p == P::Playing || p == P::Starting || p == P::Finishing ? tr("IN MATCH") : tr("BUSY"));
         find_->setEnabled(false);
@@ -528,9 +544,9 @@ SinglePlayerPage::SinglePlayerPage(MatchController* controller, QWidget* parent)
     root->setContentsMargins(28, 20, 28, 16);
     root->setSpacing(14);
     root->addWidget(ui::pageHeader(tr("Single player"),
-                                   tr("The whole game on this PC with its own menus, as on the console: arcade, "
-                                      "practice, its other modes. What you unlock and set is saved in the game's "
-                                      "folder.")));
+                                   tr("The whole game on this PC with its own menus, as on the console: the ladder, "
+                                      "story, practice, the Challenge Tower, Test Your Luck, the Krypt. What you "
+                                      "unlock and set is kept in your save folder.")));
     auto* columns = new QHBoxLayout;
     columns->setSpacing(16);
     root->addLayout(columns);
@@ -543,20 +559,12 @@ SinglePlayerPage::SinglePlayerPage(MatchController* controller, QWidget* parent)
     auto* row = new QHBoxLayout;
     play_ = new QPushButton(tr("PLAY"));
     play_->setObjectName(QStringLiteral("Primary"));
-    practice_ = new QPushButton(tr("PRACTICE"));
-    practice_->setObjectName(QStringLiteral("Primary"));
     close_ = new QPushButton(tr("Close the game"));
     row->addWidget(play_, 1);
-    row->addWidget(practice_, 1);
     row->addWidget(close_);
     solo->addLayout(row);
-    auto* practiceNote = ui::label(tr("PRACTICE goes straight to practice's select screen with every fighter "
-                                      "unlocked: pick yours, then the dummy, with one controller. What your profile "
-                                      "has unlocked stays as it is."),
-                                   "Muted");
-    practiceNote->setWordWrap(true);
-    solo->addWidget(practiceNote);
     exeInfo_ = ui::label(QString(), "Muted");
+    exeInfo_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     exeInfo_->setWordWrap(true);
     solo->addWidget(exeInfo_);
     auto* onlineNote = ui::label(tr("You can search for an online match while you play: when one is found, accept it "
@@ -571,8 +579,9 @@ SinglePlayerPage::SinglePlayerPage(MatchController* controller, QWidget* parent)
     QFrame* devCard = ui::card(tr("Local test (development)"), &dev);
     devCard->setVisible(!paths::isPackage());  // a player package has no use for it
     columns->addWidget(devCard, 1);
-    auto* devInfo = ui::label(tr("Starts two game instances on this PC connected over loopback "
-                                 "(UDP %1 and %2) with matching start lines. No server involved.")
+    auto* devInfo = ui::label(tr("Starts two games on this PC, slots 0 and 1, connected over loopback (UDP %1 and "
+                                 "%2), with matching start lines and the netcode of Settings. No server involved; "
+                                 "Stop both ends it.")
                                   .arg(cfg::localTestPort(1)).arg(cfg::localTestPort(2)),
                               "Muted");
     devInfo->setWordWrap(true);
@@ -598,15 +607,13 @@ SinglePlayerPage::SinglePlayerPage(MatchController* controller, QWidget* parent)
     log_ = new LogView;
     root->addWidget(log_, 1);
 
-    auto start = [this](bool practice) {
+    connect(play_, &QPushButton::clicked, this, [this] {
         QString err;
-        if (!controller_->startSolo(gameId_, &err, practice)) {
+        if (!controller_->startSolo(gameId_, &err)) {
             log_->line(err);
-            QMessageBox::warning(this, practice ? tr("Practice") : tr("Single player"), err);
+            QMessageBox::warning(this, tr("Single player"), err);
         }
-    };
-    connect(play_, &QPushButton::clicked, this, [start] { start(false); });
-    connect(practice_, &QPushButton::clicked, this, [start] { start(true); });
+    });
     connect(close_, &QPushButton::clicked, controller_, &MatchController::stopSolo);
     connect(test, &QPushButton::clicked, this, [this] {
         QString err;
@@ -622,7 +629,7 @@ SinglePlayerPage::SinglePlayerPage(MatchController* controller, QWidget* parent)
         const auto p = controller_->phase();
         if (p == MatchController::Phase::Solo || p == MatchController::Phase::LocalTest ||
             t.startsWith(QLatin1String("Local test")) || t.startsWith(QLatin1String("Single player")) ||
-            t.startsWith(QLatin1String("Practice")) || t.startsWith(QLatin1String("Standby")))
+            t.startsWith(QLatin1String("Game ")) || t.startsWith(QLatin1String("Standby")))
             log_->line(t);
     });
     connect(controller_, &MatchController::gameStatusChanged, this, [this](const QString& s) {
@@ -635,16 +642,12 @@ SinglePlayerPage::SinglePlayerPage(MatchController* controller, QWidget* parent)
 
 void SinglePlayerPage::updateButtons() {
     const bool open = controller_->soloRunning();
-    const bool practicing = controller_->soloIsPractice();
     const auto p = controller_->phase();
     const bool idle = p == MatchController::Phase::Idle || p == MatchController::Phase::Searching;  // standby
     const QString busy = !open && !idle ? tr("Busy: %1").arg(controller_->phaseText()) : QString();
-    play_->setText(open && !practicing ? tr("PLAYING") : tr("PLAY"));
+    play_->setText(open ? tr("PLAYING") : tr("PLAY"));
     play_->setEnabled(!open && idle);
     play_->setToolTip(busy);
-    practice_->setText(practicing ? tr("PRACTICING") : tr("PRACTICE"));
-    practice_->setEnabled(!open && idle);
-    practice_->setToolTip(busy);
     close_->setEnabled(open);
 }
 
@@ -660,16 +663,22 @@ void SinglePlayerPage::setGame(const QString& gameId) {
     }
     refreshTestRoster();
     const QString exe = cfg::gameExe(gameId);
-    exeInfo_->setText(QFileInfo::exists(exe) ? tr("Game: %1").arg(QDir::toNativeSeparators(exe))
-                                             : tr("Game not built yet: %1 (see Build game)").arg(QDir::toNativeSeparators(exe)));
+    const QString disc = cfg::gameDataRoot(gameId);
+    QString text = QFileInfo::exists(exe) ? tr("Game: %1").arg(QDir::toNativeSeparators(exe))
+                                          : tr("Game not built yet: %1 (see Build game)").arg(QDir::toNativeSeparators(exe));
+    text += QLatin1Char('\n') + (GameProcess::hasGameFiles(disc)
+                                      ? tr("Disc files: %1").arg(QDir::toNativeSeparators(disc))
+                                      : tr("Disc files not extracted yet: %1 (see Build game)").arg(QDir::toNativeSeparators(disc)));
+    text += QLatin1Char('\n') + tr("Saves: %1").arg(QDir::toNativeSeparators(cfg::saveFolder(gameId)));
+    exeInfo_->setText(text);
 }
 
 void SinglePlayerPage::refreshTestRoster() {
     const Game* g = gameOf(gameId_);
     if (!g) return;
     const QList<Character> roster = g->roster(testMode_->currentData().toString());
-    fillCharacters(testP1_, roster, QStringLiteral("Scorpion"));
-    fillCharacters(testP2_, roster, QStringLiteral("SubZero"));
+    fillCharacters(testP1_, roster, QStringLiteral("-"));
+    fillCharacters(testP2_, roster, QStringLiteral("-"));
 }
 
 // --- LeaderboardPage -------------------------------------------------------------------------------

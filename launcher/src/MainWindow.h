@@ -23,12 +23,13 @@ class ServerClient;
 class SettingsPage;
 class UpdateDialog;
 class Updater;
+class GitHubUpdates;
 
 struct LaunchOptions {
     QString server;
     QString fingerprint;
     QString user;
-    QString passwordEnv = QStringLiteral("MK3D_DEV_PASSWORD");
+    QString passwordEnv = QStringLiteral("MK9_DEV_PASSWORD");
     bool registerAccount = false;
     QString queue;  // "casual" or "ranked"
     QString game;
@@ -40,13 +41,14 @@ struct LaunchOptions {
     QString extractImage;    // open "Build game" and extract this disc image right away
     QString lobby;           // "host": create a lobby and start it once both are ready; "join": join it by name
     QString lobbyName;
+    bool koth = false;       // --lobby host: a King of the Hill lobby
     int lobbyMatches = 1;    // matches to play there, one after the other
     int rematches = 0;       // --queue casual: rematches to choose after the first match
     QStringList rematchChoices;  // what each of them chooses, "rematch" or "select" (the last one repeats)
     bool leaveSeries = false;    // once those are chosen, leave the series at once instead of letting it run out
     bool solo = false;           // --queue: single player first, the search running alongside it (standby)
-    QString practice;            // "on" / "off": practice while a search waits, saved (cfg::practiceWhileWaiting)
-    QString deathTraps;          // "on" / "off": the arenas' death traps, saved (cfg::deathTraps)
+    QString soloWait;            // "on" / "off": single player while a search waits, saved (cfg::soloWhileWaiting)
+    QString netcode;             // "lockstep" / "rollback": saved (cfg::netcode)
     bool upnpProbe = false;  // find the router and its public address, open nothing
     QString updatedFrom;     // --updated: the version this launcher just replaced (Updater)
     bool autoUpdate = false; // development: an update offered installs at once, without asking
@@ -115,6 +117,7 @@ private:
     QLabel* onlineText_ = nullptr;
     QLabel* gameText_ = nullptr;
     QLabel* phaseText_ = nullptr;
+    QPushButton* leaveMatch_ = nullptr;  // the footer's LEAVE MATCH, while a match runs
     QTimer noticeTimer_;
     GamepadNav* pad_ = nullptr;  // the launcher with a controller
     QTimer soloFrontTimer_;  // frontSoloWhenUp's tries, 30 s at most
@@ -125,6 +128,7 @@ private:
     QPointer<MatchFoundDialog> matchDialog_;
     QPointer<RematchDialog> rematchDialog_;
     Updater* updater_ = nullptr;
+    GitHubUpdates* github_ = nullptr;  // the project's GitHub releases, asked at start and every few hours
     QPointer<UpdateDialog> updateDialog_;
     QPushButton* updateButton_ = nullptr;  // the footer's, once a release is offered (LATER leaves it)
     QJsonObject update_;                   // the release offered

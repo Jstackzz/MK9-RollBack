@@ -1,0 +1,105 @@
+{
+  "id": "mk9",
+  "title": "Mortal Kombat Komplete Edition",
+  "short": "MK9",
+  "edition": "Xbox 360",
+  "title_id": "575207FD",
+  "default_exe": "mk9.exe",
+  "xex_sha1": "d7d75bd806afe12b929fd71c06e216c369d470fd",
+  "modes": [
+    {
+      "id": "versus",
+      "name": "One vs One",
+      "description": "The classic one-on-one fight. Both players pick their fighter on the game's own select screen.",
+      "online": true,
+      "ranked": true,
+      "roster": "fighters",
+      "character_select": "in_game",
+      "fighters": 1,
+      "rounds": [1, 3, 5],
+      "default_rounds": 3
+    },
+    {
+      "id": "tag",
+      "name": "Two vs Two",
+      "description": "Tag team fight: each player picks two fighters on the game's select screen and tags between them.",
+      "online": true,
+      "ranked": true,
+      "roster": "fighters",
+      "character_select": "in_game",
+      "fighters": 2,
+      "rounds": [1, 3, 5],
+      "default_rounds": 3
+    },
+    {
+      "id": "tyl",
+      "name": "Test Your Luck",
+      "description": "One vs One with random modifiers rolled on the slot machine before the fight. Kasual only.",
+      "online": true,
+      "ranked": false,
+      "roster": "fighters",
+      "character_select": "in_game",
+      "fighters": 1,
+      "rounds": [1, 3, 5],
+      "default_rounds": 3
+    },
+    {
+      "id": "practice",
+      "name": "Practice",
+      "description": "Offline on this PC: the whole game with its own menus (Single player).",
+      "online": false,
+      "ranked": false,
+      "roster": "fighters",
+      "character_select": "in_game",
+      "fighters": 1,
+      "rounds": [1],
+      "default_rounds": 1
+    }
+  ],
+  "rosters": {
+    "fighters": [
+      {"id": "Baraka", "name": "Baraka"},
+      {"id": "CyberSubZero", "name": "Cyber Sub-Zero", "secret": true},
+      {"id": "Cyrax", "name": "Cyrax"},
+      {"id": "Ermac", "name": "Ermac"},
+      {"id": "Jade", "name": "Jade"},
+      {"id": "Jax", "name": "Jax"},
+      {"id": "JohnnyCage", "name": "Johnny Cage"},
+      {"id": "Kabal", "name": "Kabal"},
+      {"id": "Kano", "name": "Kano"},
+      {"id": "Kitana", "name": "Kitana"},
+      {"id": "KungLao", "name": "Kung Lao"},
+      {"id": "LiuKang", "name": "Liu Kang"},
+      {"id": "Mileena", "name": "Mileena"},
+      {"id": "Nightwolf", "name": "Nightwolf"},
+      {"id": "NoobSaibot", "name": "Noob Saibot"},
+      {"id": "QuanChi", "name": "Quan Chi"},
+      {"id": "Raiden", "name": "Raiden"},
+      {"id": "Reptile", "name": "Reptile"},
+      {"id": "Scorpion", "name": "Scorpion"},
+      {"id": "Sektor", "name": "Sektor"},
+      {"id": "ShangTsung", "name": "Shang Tsung"},
+      {"id": "Sheeva", "name": "Sheeva"},
+      {"id": "Sindel", "name": "Sindel"},
+      {"id": "Smoke", "name": "Smoke"},
+      {"id": "SonyaBlade", "name": "Sonya Blade"},
+      {"id": "Stryker", "name": "Stryker"},
+      {"id": "SubZero", "name": "Sub-Zero"},
+      {"id": "Skarlet", "name": "Skarlet", "dlc": true},
+      {"id": "Kenshi", "name": "Kenshi", "dlc": true},
+      {"id": "Rain", "name": "Rain", "dlc": true},
+      {"id": "FreddyKrueger", "name": "Freddy Krueger", "dlc": true},
+      {"id": "Goro", "name": "Goro", "boss": true},
+      {"id": "Kintaro", "name": "Kintaro", "boss": true},
+      {"id": "ShaoKahn", "name": "Shao Kahn", "boss": true}
+    ]
+  },
+  "not_on_xbox": [
+    {"name": "Kratos", "note": "PlayStation 3 and PS Vita versions only; the Xbox 360 disc has no Kratos"}
+  ],
+  "notes": "Komplete Edition on Xbox 360: the 27 fighters of the original Xbox 360 release (Cyber Sub-Zero is unlocked in the game) and the four downloadable ones on the disc (Skarlet, Kenshi, Rain, Freddy Krueger). Goro, Kintaro and Shao Kahn are the bosses; the disc has their fights and fatalities, but they are not on the regular select screen. Fighters are picked on the game's own select screen; the ids are what a start line's p1/p2 would name.",
+  "sources": [
+    "game/filelist.txt (the disc's Asset folder: a <Name>_Ladder.xxx for each fighter of the select screen, fatalities for the bosses)",
+    "https://en.wikipedia.org/wiki/Mortal_Kombat_(2011_video_game)"
+  ]
+}

@@ -104,14 +104,14 @@ ControlsPage::ControlsPage(QWidget* parent) : Page(parent) {
     root->setContentsMargins(28, 20, 28, 20);
     root->setSpacing(10);
     root->addWidget(ui::pageHeader(
-        tr("Controls"), tr("For all three games, on this PC: they only change what your own keys and buttons press, so "
-                           "they work the same in online matches. A game that is running picks up a change within a "
+        tr("Controls"), tr("For the game on this PC: they only change what your own keys and buttons press, so they "
+                           "work the same in online matches. A game that is running picks up a change within a "
                            "second.")));
     auto* columns = new QHBoxLayout;
     columns->setSpacing(16);
     root->addLayout(columns);
 
-    // keyboard: each Xbox button and its keys
+    // keyboard: each Xbox 360 button and its keys
     auto* keyBox = new QGroupBox(tr("KEYBOARD"));
     auto* kv = new QVBoxLayout(keyBox);
     keyboard_ = new QCheckBox(tr("Play with the keyboard as player 1 (while the game's window is in front)"));
@@ -119,11 +119,13 @@ ControlsPage::ControlsPage(QWidget* parent) : Page(parent) {
     auto* keyGrid = new QGridLayout;
     keyGrid->setHorizontalSpacing(10);
     keyGrid->setVerticalSpacing(4);
-    keyGrid->addWidget(ui::label(tr("Xbox button"), "Muted"), 0, 0);
+    keyGrid->addWidget(ui::label(tr("Xbox 360 button"), "Muted"), 0, 0);
     keyGrid->addWidget(ui::label(tr("Key"), "Muted"), 0, 1);
     keyGrid->addWidget(ui::label(tr("Second key"), "Muted"), 0, 2);
     for (int c = 0; c < Count; ++c) {
-        keyGrid->addWidget(new QLabel(controlLabel(c)), c + 1, 0);
+        const QString use = controlUse(c);
+        auto* name = new QLabel(use.isEmpty() ? controlLabel(c) : tr("%1   (%2)").arg(controlLabel(c), use));
+        keyGrid->addWidget(name, c + 1, 0);
         for (int slot = 0; slot < kKeysPerButton; ++slot) {
             auto* b = new QPushButton;
             b->setMinimumWidth(130);
@@ -191,9 +193,10 @@ ControlsPage::ControlsPage(QWidget* parent) : Page(parent) {
     pv->addStretch();
     columns->addWidget(padBox, 1);
 
-    auto* game = ui::label(tr("Which button punches, kicks or blocks is set in each game's own controller options. "
-                              "Deadly Alliance and Deception keep yours online; Armageddon plays online matches with "
-                              "its default layout, so change what your buttons press here instead."), "Muted");
+    auto* game = ui::label(tr("Which button punches, kicks, blocks or throws is the game's own controller setting "
+                              "(by default X 1, Y 2, A 3, B 4, RT block, RB throw, LB tag, LT flip stance). Online "
+                              "matches start the game with a fresh save, so they play with that default layout: to "
+                              "play another one online, change what your keys and buttons press here."), "Muted");
     game->setWordWrap(true);
     root->addWidget(game);
     status_ = ui::label(QString(), "Muted");

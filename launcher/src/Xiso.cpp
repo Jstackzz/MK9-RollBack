@@ -15,8 +15,18 @@ constexpr qint64 kSector = 2048;
 constexpr char kMagic[] = "MICROSOFT*XBOX*MEDIA";  // the volume descriptor, at sector 32 of the file system
 constexpr int kMagicSize = 20;
 constexpr quint8 kAttrDirectory = 0x10;
-// where the file system starts: a plain XISO, then whole-disc dumps of the three disc layouts
-constexpr qint64 kKnownBases[] = {0, 0x18300000, 0xFD90000, 0x2080000};
+// where the game partition starts: an XISO (the partition alone), then whole-disc dumps of the disc layouts: Xbox 360
+// XGD2 (Komplete Edition), XGD3, original Xbox XGD1
+struct KnownBase {
+    qint64 offset;
+    const char* layout;
+};
+constexpr KnownBase kKnownBases[] = {
+    {0, "XISO (the game partition alone)"},
+    {0xFD90000, "Xbox 360 XGD2 disc"},
+    {0x2080000, "Xbox 360 XGD3 disc"},
+    {0x18300000, "original Xbox XGD1 disc"},
+};
 constexpr qint64 kScanLimit = qint64(2) << 30;
 constexpr int kMaxDepth = 32;
 constexpr int kMaxEntries = 200000;
@@ -56,11 +66,17 @@ bool Image::open(const QString& path, QString* error) {
     return walk(u32(vd.constData() + 20), u32(vd.constData() + 24), QString(), 0, error);
 }
 
+QString Image::layout() const {
+    for (const KnownBase& b : kKnownBases)
+        if (b.offset == base_) return QLatin1String(b.layout);
+    return QStringLiteral("a disc dump with its game partition at an unusual offset");
+}
+
 bool Image::findBase(QString* error) {
     const QByteArray magic(kMagic, kMagicSize);
-    for (qint64 base : kKnownBases) {
-        if (f_.seek(base + 32 * kSector) && f_.read(kMagicSize) == magic) {
-            base_ = base;
+    for (const KnownBase& b : kKnownBases) {
+        if (f_.seek(b.offset + 32 * kSector) && f_.read(kMagicSize) == magic) {
+            base_ = b.offset;
             return true;
         }
     }
@@ -168,9 +184,16 @@ bool Image::extractAll(const QString& outDir, const std::atomic<bool>& cancel, s
             *error = QStringLiteral("Cannot make the folder %1.").arg(native(QFileInfo(target).absolutePath()));
             return false;
         }
-        QFile dst(target);
+        // there already, whole: an extraction that stopped before, or the same disc again
+        if (QFileInfo(target).size() == qint64(e->size) && QFileInfo(target).isFile()) {
+            bytesDone += e->size;
+            ++filesDone;
+            continue;
+        }
+        const QString part = target + QStringLiteral(".part");
+        QFile dst(part);
         if (!dst.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            *error = QStringLiteral("Cannot write %1: %2").arg(native(target), dst.errorString());
+            *error = QStringLiteral("Cannot write %1: %2").arg(native(part), dst.errorString());
             return false;
         }
         if (!f_.seek(base_ + qint64(e->sector) * kSector)) {
@@ -200,6 +223,12 @@ bool Image::extractAll(const QString& outDir, const std::atomic<bool>& cancel, s
             }
             left -= n;
             bytesDone += n;
+        }
+        dst.close();
+        QFile::remove(target);
+        if (!QFile::rename(part, target)) {
+            *error = QStringLiteral("Cannot put %1 in place.").arg(native(target));
+            return false;
         }
         ++filesDone;
     }

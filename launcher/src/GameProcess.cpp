@@ -14,39 +14,7 @@
 #include "WinUtil.h"
 
 namespace {
-
-// A package keeps clang and lld once, in toolchain\ beside the launcher. A game's first start compiles its code with
-// the tools in its own compiler folder, so they are linked there before it starts (hard links: no extra space).
-void linkToolchain(const QString& gameDir) {
-    const QDir compiler(QDir(gameDir).filePath(QStringLiteral("compiler")));
-    const QDir toolchain(paths::toolchainDir());
-    if (!compiler.exists() || !toolchain.exists()) return;  // a source build, or the player deleted the compiler
-    for (const QString& name : toolchain.entryList(QDir::Files)) {
-        const QString to = compiler.filePath(name);
-        if (QFileInfo::exists(to)) continue;
-        const QString from = toolchain.filePath(name);
-        const bool linked = CreateHardLinkW(QDir::toNativeSeparators(to).toStdWString().c_str(),
-                                            QDir::toNativeSeparators(from).toStdWString().c_str(), nullptr);
-        if (!linked && !QFile::copy(from, to))
-            applog::write(QStringLiteral("toolchain: cannot put %1 into %2").arg(name, QDir::toNativeSeparators(compiler.path())));
-    }
-}
-
-// the game's files where the game looks for them (runtime app/game_files.cpp): the first assets folder at or above
-// the executable's, holding default.xbe or a disc image
-bool hasGameFiles(const QString& exeDir) {
-    QDir dir(exeDir);
-    for (int i = 0; i < 6; ++i) {
-        if (dir.exists(QStringLiteral("assets"))) {
-            const QDir assets(dir.filePath(QStringLiteral("assets")));
-            return assets.exists(QStringLiteral("default.xbe")) ||
-                   !assets.entryList({QStringLiteral("*.iso")}, QDir::Files).isEmpty();
-        }
-        if (!dir.cdUp()) break;
-    }
-    return false;
-}
-
+QString native(const QString& path) { return QDir::toNativeSeparators(path); }
 }  // namespace
 
 GameProcess::GameProcess(const QString& gameId, int instance, QObject* parent)
@@ -78,74 +46,94 @@ QHash<QString, QString> GameProcess::parseKeys(const QString& line) {
     return out;
 }
 
+bool GameProcess::hasGameFiles(const QString& dataRoot) {
+    return !dataRoot.isEmpty() && QFileInfo::exists(QDir(dataRoot).filePath(QStringLiteral("default.xex")));
+}
+
 QString GameProcess::smartAppControlHelp(bool blocked) {
     return (blocked ? tr("Windows' Smart App Control blocked the game.")
-                    : tr("Windows' Smart App Control is on, and it will block the games.")) +
+                    : tr("Windows' Smart App Control is on, and it will block the game.")) +
            QLatin1Char(' ') +
-           tr("It only runs programs signed by a publisher it knows, and these games can never be: every PC builds "
-              "its own copy of the game's code from its own disc. To play, switch it off in Windows Security > App & "
-              "browser control > Smart App Control settings. (On some versions of Windows 11 it can only be "
-              "switched back on by resetting Windows.)");
+           tr("It only runs programs signed by a publisher it knows, and this game is built on each PC from its own "
+              "disc, so it can never be. To play, switch it off in Windows Security > App & browser control > Smart "
+              "App Control settings. (On some versions of Windows 11 it can only be switched back on by resetting "
+              "Windows.)");
 }
 
 bool GameProcess::start(const QString& exe, QString* error, bool netMode) {
     if (isRunning()) return true;
     const QFileInfo fi(exe);
     if (exe.isEmpty() || !fi.exists()) {
-        if (error) *error = tr("Game executable not found: %1. Build the game first or set its path in Settings.")
-                                .arg(QDir::toNativeSeparators(exe));
+        if (error) *error = tr("Game executable not found: %1. Build the game first (Build game) or set its path in "
+                               "Settings.").arg(native(exe));
         return false;
     }
-    if (fi.suffix().compare(QLatin1String("exe"), Qt::CaseInsensitive) == 0) {
-        if (!hasGameFiles(fi.absolutePath())) {
-            if (error) *error = tr("The game's files are not there yet: open Build game and extract your disc first.");
-            return false;
-        }
-        linkToolchain(fi.absolutePath());
+    const bool standIn = fi.suffix().compare(QLatin1String("py"), Qt::CaseInsensitive) == 0;
+    const QString dataRoot = cfg::gameDataRoot(gameId_);
+    if (!standIn && !hasGameFiles(dataRoot)) {
+        if (error) *error = tr("The game's files are not there yet (no default.xex in %1): open Build game and "
+                               "extract your disc first.").arg(native(dataRoot));
+        return false;
     }
-    // the newest sessions are kept (an online match's netplay log is about a megabyte)
+    // the newest sessions are kept (an online match's netplay log is about a megabyte, a fresh save a few)
     constexpr int kKeepSessions = 30;
     const QFileInfoList old = QDir(paths::sessionsDir()).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
     for (int i = kKeepSessions; i < old.size(); i++) QDir(old[i].absoluteFilePath()).removeRecursively();
     const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss"));
     sessionDir_ = QDir(paths::sessionsDir()).filePath(QStringLiteral("%1-%2-%3").arg(gameId_, stamp).arg(instance_));
+    for (int n = 2; QFileInfo::exists(sessionDir_); n++)  // a game started again within the same second
+        sessionDir_ = QDir(paths::sessionsDir()).filePath(QStringLiteral("%1-%2-%3-%4").arg(gameId_, stamp).arg(instance_).arg(n));
     QDir().mkpath(sessionDir_);
     cmdPath_ = QDir(sessionDir_).filePath(QStringLiteral("cmd.txt"));
     statusPath_ = QDir(sessionDir_).filePath(QStringLiteral("status.txt"));
     QFile::remove(cmdPath_);
     QFile::remove(statusPath_);
+    // online: a fresh save for every game the launcher drives (the autopilot steers by a fresh save's menus); single
+    // player keeps the player's saves
+    saveDir_ = netMode ? QDir(sessionDir_).filePath(QStringLiteral("save")) : cfg::saveFolder(gameId_);
+    QDir().mkpath(saveDir_);
 
     netMode_ = netMode;
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    for (const char* name : {"MK9_LINK", "MK9_CMD", "MK9_STATUS"}) env.remove(QLatin1String(name));
     if (netMode) {
-        env.insert(QStringLiteral("MK3D_NET"), QStringLiteral("1"));
-        env.insert(QStringLiteral("MK3D_CMD"), QDir::toNativeSeparators(cmdPath_));
-        env.insert(QStringLiteral("MK3D_STATUS"), QDir::toNativeSeparators(statusPath_));
+        env.insert(QStringLiteral("MK9_LINK"), QStringLiteral("1"));
+        env.insert(QStringLiteral("MK9_CMD"), native(cmdPath_));
+        env.insert(QStringLiteral("MK9_STATUS"), native(statusPath_));
         // every online match's frames (both players' inputs, the state checks) beside the session's other files: what
-        // to look at when a match went wrong; a test that names its own log keeps it
-        const QString netLog = gameId_.toUpper() + QStringLiteral("_NET_LOG");
-        if (!env.contains(netLog))
-            env.insert(netLog, QDir::toNativeSeparators(QDir(sessionDir_).filePath(QStringLiteral("net-{match}.log"))));
+        // to look at when a match went wrong ({match} and {slot} are the game's to fill in); a test that names its own
+        // log keeps it
+        if (!env.contains(QStringLiteral("MK9_NET_LOG")))
+            env.insert(QStringLiteral("MK9_NET_LOG"), native(QDir(sessionDir_).filePath(QStringLiteral("net-{match}.log"))));
     }
-    env.insert(QStringLiteral("MK3D_GAME"), gameId_);
-    env.insert(QStringLiteral("MK3D_SESSION_DIR"), QDir::toNativeSeparators(sessionDir_));
-    env.insert(QStringLiteral("MK3D_INSTANCE"), QString::number(instance_));
-    env.insert(QStringLiteral("MK3D_LOG"), QDir::toNativeSeparators(QDir(sessionDir_).filePath(QStringLiteral("game.log"))));
-    env.insert(QStringLiteral("MK3D_DISPLAY"), cfg::displayMode());
-    env.insert(QStringLiteral("MK3D_RESOLUTION"), cfg::resolution());
-    env.insert(QStringLiteral("MK3D_VSYNC"), cfg::vsync() ? QStringLiteral("1") : QStringLiteral("0"));
-    env.insert(QStringLiteral("XBE_CONTROLS"), QDir::toNativeSeparators(controls::file()));  // read again when it changes
+    env.insert(QStringLiteral("MK9_SESSION_DIR"), native(sessionDir_));
+    env.insert(QStringLiteral("MK9_INSTANCE"), QString::number(instance_));
+    env.insert(QStringLiteral("MK9_CONTROLS"), native(controls::file()));  // read again when it changes
     for (auto it = extraEnv_.cbegin(); it != extraEnv_.cend(); ++it) env.insert(it.key(), it.value());
+
+    // the game's paths and window as its command line takes them (the ReXGlue SDK's cvars)
+    QStringList gameArgs = {
+        QStringLiteral("--game_data_root=") + native(dataRoot),
+        QStringLiteral("--user_data_root=") + native(saveDir_),
+        QStringLiteral("--log_file=") + native(QDir(sessionDir_).filePath(QStringLiteral("game.log"))),
+        windowed_ || !cfg::fullscreen() ? QStringLiteral("--no-fullscreen") : QStringLiteral("--fullscreen"),
+    };
+    // the shader cache outlives the fresh saves of online games (one per instance: two games must not share it)
+    if (netMode) {
+        const QString cache = QDir(paths::cacheDir()).filePath(QStringLiteral("%1-online-%2").arg(gameId_).arg(instance_));
+        QDir().mkpath(cache);
+        gameArgs << QStringLiteral("--cache_root=") + native(cache);
+    }
 
     proc_ = new QProcess(this);
     proc_->setProcessEnvironment(env);
     proc_->setWorkingDirectory(fi.absolutePath());
     proc_->setProcessChannelMode(QProcess::MergedChannels);
     QString program = fi.absoluteFilePath();
-    QStringList args;
-    if (fi.suffix().compare(QLatin1String("py"), Qt::CaseInsensitive) == 0) {
+    QStringList args = gameArgs;
+    if (standIn) {
         program = cfg::python();
-        args = {QStringLiteral("-u"), fi.absoluteFilePath()};
+        args = QStringList{QStringLiteral("-u"), fi.absoluteFilePath()} + gameArgs;
         proc_->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* a) {
             a->flags |= CREATE_NO_WINDOW;  // the development stand-in has no window of its own
         });
@@ -172,23 +160,24 @@ bool GameProcess::start(const QString& exe, QString* error, bool netMode) {
     proc_->start(program, args);
     if (!proc_->waitForStarted(10000)) {
         if (error) {
-            *error = tr("Could not start %1: %2").arg(QDir::toNativeSeparators(program), proc_->errorString());
+            *error = tr("Could not start %1: %2").arg(native(program), proc_->errorString());
             // "An Application Control policy has blocked this file" (English Windows) or the policy reported on
             if (winutil::smartAppControl() == 1 || proc_->errorString().contains(QLatin1String("Application Control")))
                 *error += QLatin1Char('\n') + smartAppControlHelp();
         }
         // one arg() call: Windows' messages can hold a %1 of their own, which a second call would fill
         applog::write(QStringLiteral("game %1/%2: could not start %3: %4 (Smart App Control %5)")
-                          .arg(gameId_, QString::number(instance_), QDir::toNativeSeparators(program),
-                               proc_->errorString(), QString::number(winutil::smartAppControl())));
+                          .arg(gameId_, QString::number(instance_), native(program), proc_->errorString(),
+                               QString::number(winutil::smartAppControl())));
         delete proc_;
         proc_ = nullptr;
         return false;
     }
     winutil::gameJob().assign(proc_->processId());
-    applog::write(QStringLiteral("game %1/%2: started %3 (pid %4), session %5")
-                      .arg(gameId_).arg(instance_).arg(QDir::toNativeSeparators(fi.absoluteFilePath()))
-                      .arg(proc_->processId()).arg(QDir::toNativeSeparators(sessionDir_)));
+    applog::write(QStringLiteral("game %1/%2: started %3 (pid %4, %5), session %6, saves %7")
+                      .arg(gameId_, QString::number(instance_), native(fi.absoluteFilePath()),
+                           QString::number(proc_->processId()), netMode ? QStringLiteral("launcher link") : QStringLiteral("plain"),
+                           native(sessionDir_), native(saveDir_)));
     status_ = QStringLiteral("starting");
     emit statusChanged(status_);
     if (netMode) poll_.start();
@@ -220,6 +209,10 @@ void GameProcess::command(const QString& line) {
         return;
     }
     writeCommand(line);
+}
+
+bool GameProcess::commandWaiting() const {
+    return !pendingCmd_.isEmpty() || (!cmdPath_.isEmpty() && QFileInfo::exists(cmdPath_));
 }
 
 void GameProcess::writeCommand(const QString& line) {

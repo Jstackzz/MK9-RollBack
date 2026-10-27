@@ -249,7 +249,7 @@ async def test_disconnect_during_setup_requeues_the_other(server, connect, udp_p
 async def test_full_flow_helper(server, connect, udp_peers):
     a, b = await connect("Reptile"), await connect("Frost")
     ua, ub = await udp_peers(), await udp_peers()
-    await a.request(queue_msg(game="mka", mode="motor"))
-    await b.request(queue_msg(game="mka", mode="motor"))
+    await a.request(queue_msg(mode="tag"))
+    await b.request(queue_msg(mode="tag"))
     gos = await run_to_go(server, [(a, ua), (b, ub)])
-    assert gos[0]["game"] == "mka" and gos[0]["mode"] == "motor"
+    assert gos[0]["game"] == "mk9" and gos[0]["mode"] == "tag"

@@ -58,8 +58,7 @@ private:
     QComboBox* region_;
     QComboBox* maxPing_;
     QCheckBox* strict_;
-    QCheckBox* practice_;  // practice while the search waits (shared by both queue pages)
-    QCheckBox* deathTraps_;  // the arenas' death traps (both queue pages)
+    QCheckBox* solo_;  // single player while the search waits (shared by both queue pages)
     QLabel* delayInfo_;
     QPushButton* find_;
     QLabel* status_;
@@ -85,8 +84,8 @@ private:
     QString chosen_;  // "rematch" or "select" pressed, not seen by the server yet (sent once the game is ready)
 };
 
-// the whole game with its own menus (arcade, its practice mode, the side modes), straight to practice with every
-// fighter unlocked, and in a source build the two-game local test
+// the whole game with its own menus and the player's saves (the ladder, practice, the Challenge Tower...), and in a
+// source build the two-game local test
 class SinglePlayerPage : public Page {
     Q_OBJECT
 public:
@@ -99,7 +98,6 @@ private:
     MatchController* controller_;
     QLabel* title_;
     QPushButton* play_;
-    QPushButton* practice_;
     QPushButton* close_;
     QComboBox* testMode_;
     QComboBox* testP1_;

@@ -1,16 +1,17 @@
-"""A small asyncio client for the MK3D server, used by the tests and as a scripted second player.
+"""A small asyncio client for the MK9 server, used by the tests and as a scripted second player.
 
     python -m server.client demo --host 127.0.0.1 --port 7777 --fingerprint <sha256>
-        two throw-away accounts queue for casual mkd kombat and play one simulated match
+        two throw-away accounts queue for casual mk9 versus and play one simulated match
 
     python -m server.client play --host 127.0.0.1 --port 7777 --fingerprint <sha256> --name tester2
-        [--register] [--game mkd --mode kombat] [--ranked] [--region eu] [--character Raiden] [--udp-port 7002]
+        [--register] [--game mk9 --mode versus] [--ranked] [--region eu] [--character -] [--udp-port 7002]
+        [--netcode lockstep|rollback]
         one scripted player: queue, accept, punch, report the simulated result
 
     python -m server.client notice --host lobby.example.org --fingerprint <sha256> --name admin --text "..."
         send a server notice to everyone online (the account must be listed in the server's --admins)
 
-The password for `play` and `notice` is read from the environment variable MK3D_PASSWORD (never from the
+The password for `play` and `notice` is read from the environment variable MK9_PASSWORD (never from the
 command line); without it a random one is generated (fine for --register of a throw-away account).
 The simulated result is a function of the match seed, so two scripted players (or a scripted
 player and launcher/tools/fake_game.py) always agree.
@@ -34,7 +35,7 @@ from typing import Any
 from . import protocol as P
 from .makecert import normalize_fingerprint
 
-CLIENT_NAME = "mk3d-testclient"
+CLIENT_NAME = "mk9-testclient"
 CLIENT_VERSION = "0.1.0"
 
 
@@ -357,7 +358,7 @@ async def play_one_match(conn: Connection, udp: UdpPeer, *, server_host: str, la
         say(f"match_cancelled {go['reason']}")
         return go
     say(f"match_go side={go['side']} remote={go['remote']} rtt={go['rtt_ms']}ms delay={go['delay']} "
-        f"seed={go['seed']} p1={go['p1']} p2={go['p2']}")
+        f"netcode={go.get('netcode', 'lockstep')} seed={go['seed']} p1={go['p1']} p2={go['p2']}")
     await asyncio.sleep(game_seconds)  # the "game"
     winner, r1, r2 = result_override or simulated_result(int(go["seed"]), int(go["rounds"]))
     await conn.request({"type": "result", "match": go["match"], "winner": winner, "p1_rounds": r1, "p2_rounds": r2})
@@ -382,7 +383,7 @@ async def _login_or_register(conn: Connection, name: str, password: str, registe
 
 
 async def cmd_play(args: argparse.Namespace) -> int:
-    password = os.environ.get("MK3D_PASSWORD") or secrets.token_urlsafe(12)
+    password = os.environ.get("MK9_PASSWORD") or secrets.token_urlsafe(12)
     conn = Connection(args.host, args.port, fingerprint=args.fingerprint, plain=args.plain)
     udp = await UdpPeer.open("127.0.0.1" if args.host.startswith("127.") else "0.0.0.0", args.udp_port)
     try:
@@ -393,7 +394,9 @@ async def cmd_play(args: argparse.Namespace) -> int:
                               lan=f"{args.lan_ip}:{udp.port}", timeout=3)
         await conn.request({"type": "queue_join", "game": args.game, "mode": args.mode, "ranked": args.ranked,
                             "region": args.region, "max_ping": args.max_ping, "strict": False,
-                            "character": args.character, "delay": 2,
+                            "character": "" if args.character == "-" else args.character,
+                            "delay": "auto" if args.delay == "auto" else int(args.delay),
+                            "netcode": args.netcode,
                             **({"server_rtt": ack["rtt_ms"]} if ack else {})})
         print(f"[{args.name}] queued for {args.game}/{args.mode} {'ranked' if args.ranked else 'casual'}", flush=True)
         for _ in range(args.matches):
@@ -409,9 +412,9 @@ async def cmd_play(args: argparse.Namespace) -> int:
 
 
 async def cmd_notice(args: argparse.Namespace) -> int:
-    password = os.environ.get("MK3D_PASSWORD")
+    password = os.environ.get("MK9_PASSWORD")
     if not password:
-        print("set MK3D_PASSWORD to the admin account's password", file=sys.stderr)
+        print("set MK9_PASSWORD to the admin account's password", file=sys.stderr)
         return 2
     conn = Connection(args.host, args.port, fingerprint=args.fingerprint, plain=args.plain)
     try:
@@ -441,7 +444,7 @@ async def cmd_demo(args: argparse.Namespace) -> int:
             print(f"[{name}] registered", flush=True)
         for name, conn in zip(names, conns):
             await conn.request({"type": "queue_join", "game": args.game, "mode": args.mode, "ranked": False,
-                                "region": "eu", "max_ping": 0, "strict": False, "character": "Scorpion",
+                                "region": "eu", "max_ping": 0, "strict": False, "character": "",
                                 "delay": 2})
             print(f"[{name}] queued for {args.game}/{args.mode} casual", flush=True)
         results = await asyncio.gather(*[
@@ -469,15 +472,17 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--port", type=int, default=7777)
         sp.add_argument("--fingerprint", default=None, help="pinned SHA-256 of the server certificate")
         sp.add_argument("--plain", action="store_true", help="server runs with --plain")
-        sp.add_argument("--game", default="mkd")
-        sp.add_argument("--mode", default="kombat")
+        sp.add_argument("--game", default="mk9")
+        sp.add_argument("--mode", default="versus")
     play = sub.choices["play"]
     play.add_argument("--name", required=True)
     play.add_argument("--register", action="store_true", help="create the account if it does not exist")
     play.add_argument("--ranked", action="store_true")
     play.add_argument("--region", default="eu")
     play.add_argument("--max-ping", type=int, default=0)
-    play.add_argument("--character", default="Raiden")
+    play.add_argument("--character", default="-", help="a roster id, or - to pick on the game's select screen")
+    play.add_argument("--netcode", choices=["lockstep", "rollback"], default="lockstep")
+    play.add_argument("--delay", default="2", help="input delay in frames (0-6), or auto (from the measured ping)")
     play.add_argument("--udp-port", type=int, default=0, help="local UDP port (0 = any)")
     play.add_argument("--lan-ip", default="127.0.0.1", help="LAN address announced in the hello")
     play.add_argument("--matches", type=int, default=1)

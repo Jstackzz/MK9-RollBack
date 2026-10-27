@@ -12,7 +12,7 @@ from .conftest import queue_msg
 CFG = MatchmakingConfig()
 
 
-def entry(account_id: int, since: float = 0.0, *, game: str = "mkd", mode: str = "kombat", ranked: bool = False,
+def entry(account_id: int, since: float = 0.0, *, game: str = "mk9", mode: str = "versus", ranked: bool = False,
           region: str = "eu", elo: int = 1500, max_ping: int = 0, strict: bool = False,
           ip: str | None = None, death_traps: bool = True) -> QueueEntry:
     return QueueEntry(account_id=account_id, name=f"p{account_id}", game=game, mode=mode, ranked=ranked,
@@ -32,7 +32,7 @@ def test_casual_first_come_first_served():
 
 
 def test_queues_do_not_mix():
-    entries = [entry(1), entry(2, mode="chess"), entry(3, ranked=True), entry(4, game="mka")]
+    entries = [entry(1), entry(2, mode="tag"), entry(3, ranked=True), entry(4, game="other")]
     assert find_pairs(entries, 100, CFG, PingCache()) == []
 
 
@@ -41,7 +41,7 @@ def test_casual_death_traps_choices_do_not_mix():
                entry(4, since=3)]
     assert ids(find_pairs(entries, 5, CFG, PingCache())) == [(1, 3), (2, 4)]
     assert find_pairs(entries[:2], 1000, CFG, PingCache()) == []  # waiting longer changes nothing
-    assert [e.queue_name for e in entries[:2]] == ["mkd/kombat/casual/no-traps", "mkd/kombat/casual"]
+    assert [e.queue_name for e in entries[:2]] == ["mk9/versus/casual/no-traps", "mk9/versus/casual"]
     # ranked never has them, whatever the search asked for
     ranked = [entry(5, ranked=True), entry(6, ranked=True, death_traps=False)]
     assert ids(find_pairs(ranked, 1, CFG, PingCache())) == [(5, 6)]
@@ -129,12 +129,13 @@ async def test_ranked_hides_opponent_and_keeps_queues_apart(server, connect):
 
 async def test_queue_validation_and_leave(server, connect):
     a = await connect("Mileena")
-    for bad, code in ((queue_msg(game="mk9"), "bad_game"), (queue_msg(mode="motor"), "bad_mode"),
+    for bad, code in ((queue_msg(game="mkd"), "bad_game"), (queue_msg(mode="kombat"), "bad_mode"),
+                      (queue_msg(mode="tyl", ranked=True), "bad_mode"),  # Test Your Luck is Kasual only
                       (queue_msg(region="mars"), "bad_region")):
         with pytest.raises(ServerError) as exc:
             await a.request(bad)
         assert exc.value.code == code
-    await a.request(queue_msg(game="mka", mode="motor"))
+    await a.request(queue_msg(mode="tyl"))
     left = await a.request({"type": "queue_leave"})
     assert left["reason"] == "left" and server.queue == {}
 

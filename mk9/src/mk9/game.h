@@ -45,8 +45,13 @@ bool TitleUp();
 int RoundsWon(int player);
 int Round();
 
-// what the barrier tells the other players (the match's settings this game would use)
+// what the barrier tells the other players: this build's release stamp first, then the match's
+// settings this game would use
 std::vector<uint32_t> ReadyWords();
+// every player's game at the barrier is built from the same release (MK9_VERSION): games built
+// from different code would drift apart
+bool SameRelease(const mk9::net::Agreement& agreed);
+uint32_t ReleaseStamp();
 // make this game's state what everyone agreed on at the barrier (main thread, top of a frame):
 // the game's random number generator and the main thread's rand() from the agreed seed. Until
 // the next barrier, when the game seeds its generator again, the seed comes from the agreed one

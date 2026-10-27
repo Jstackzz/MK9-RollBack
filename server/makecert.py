@@ -68,7 +68,7 @@ def generate_with_cryptography(cert_path: Path, key_path: Path, common_name: str
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name),
-                         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "MK3D Online")])
+                         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "MK9 Online")])
     names, ips = _split_hosts(hosts)
     san = [x509.DNSName(n) for n in names] + [x509.IPAddress(ipaddress.ip_address(i)) for i in ips]
     now = dt.datetime.now(dt.timezone.utc)
@@ -99,13 +99,13 @@ def generate_with_openssl(cert_path: Path, key_path: Path, common_name: str, day
     san = ",".join([f"DNS:{n}" for n in names] + [f"IP:{i}" for i in ips])
     subprocess.run(
         [exe, "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes", "-days", str(days),
-         "-keyout", str(key_path), "-out", str(cert_path), "-subj", f"/CN={common_name}/O=MK3D Online",
+         "-keyout", str(key_path), "-out", str(cert_path), "-subj", f"/CN={common_name}/O=MK9 Online",
          "-addext", f"subjectAltName={san}", "-addext", "basicConstraints=critical,CA:FALSE"],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
 
 
-def generate(cert_path: str | os.PathLike[str], key_path: str | os.PathLike[str], *, common_name: str = "mk3d-server",
+def generate(cert_path: str | os.PathLike[str], key_path: str | os.PathLike[str], *, common_name: str = "mk9-server",
              days: int = 3650, hosts: list[str] | None = None) -> str:
     """Write a new key and self-signed certificate; returns the colon-separated SHA-256 fingerprint."""
     cert_p, key_p = Path(cert_path), Path(key_path)
@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out-dir", default=".", help="folder for the two files (default: current folder)")
     ap.add_argument("--cert", default=DEFAULT_CERT, help=f"certificate file name (default {DEFAULT_CERT})")
     ap.add_argument("--key", default=DEFAULT_KEY, help=f"private key file name (default {DEFAULT_KEY})")
-    ap.add_argument("--cn", default="mk3d-server", help="certificate common name")
+    ap.add_argument("--cn", default="mk9-server", help="certificate common name")
     ap.add_argument("--host", action="append", default=[],
                     help="DNS name or IP to put in subjectAltName (repeatable; informational, the launcher pins)")
     ap.add_argument("--days", type=int, default=3650, help="validity in days (default 3650)")

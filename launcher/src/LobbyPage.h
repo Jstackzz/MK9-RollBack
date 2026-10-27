@@ -1,6 +1,7 @@
 #pragma once
-// Lobby browser and the current lobby: members, character, ready, host start, chat, and spectators: members who watch
-// the lobby's matches in their own game instead of playing them (docs/PROTOCOL.md 1.10.1).
+// Lobby browser and the current lobby: members, ready, host start, chat, spectators (members who watch the lobby's
+// matches in their own game instead of playing them, docs/mk3d-reference/PROTOCOL.md 1.10.1), and King of the Hill
+// lobbies: up to eight players in line, the winner stays and the next in line fights them (docs/PROTOCOL.md).
 
 #include <QJsonObject>
 
@@ -28,6 +29,7 @@ protected:
 private:
     void onMessage(const QJsonObject& msg);
     void showLobby(const QJsonObject& lobby);
+    void updateLeaveMatch();
     void leftLobby();
     void join(const QString& code, bool locked, bool spectate = false);
     bool spectating() const;  // this player watches in the lobby they are in
@@ -50,6 +52,7 @@ private:
     QPushButton* start_;
     QPushButton* leave_;
     QPushButton* role_;  // PLAY (a spectator takes a free place) / WATCH (a player steps aside)
+    QPushButton* leaveMatch_;  // LEAVE MATCH: the game reports no result yet, the players end a match here
     LogView* chat_;
     QLineEdit* chatInput_;
     QJsonObject lobby_;

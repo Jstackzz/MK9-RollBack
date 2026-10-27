@@ -1,6 +1,7 @@
 #pragma once
-// "Build game" (disc image -> assets folder -> first launch) and Settings.
+// "Build game" (disc image -> the game data folder -> the build script) and Settings.
 
+#include <QPointer>
 #include <QTimer>
 
 #include <atomic>
@@ -14,11 +15,11 @@ class QCheckBox;
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QProcess;
 class QProgressBar;
 class QPushButton;
 class QSpinBox;
 class QThread;
-class GameProcess;
 class ServerClient;
 class UpnpMapper;
 
@@ -29,17 +30,21 @@ public:
     ~BuildPage() override;
     void setGame(const QString& gameId) override;
     void extractImage(const QString& path);  // fill in the image and start, as if Extract was clicked
-    bool busy() const { return step_ != Step::Idle; }  // extracting a disc or building a game
+    bool busy() const { return step_ != Step::Idle; }  // extracting a disc or building the game
+    // the game was built from another release than the package's project now holds (an update came): it must be
+    // built again before it plays online (netplay refuses two different releases)
+    static bool needsRebuild(const QString& gameId);
+    void rebuild();  // as if Build was clicked
 
 signals:
     void busyChanged(bool busy);
 
 private:
-    enum class Step { Idle, Reading, Extracting, Compiling };
+    enum class Step { Idle, Reading, Extracting, Building };
     struct WorkResult {
         bool ok = false;
         QString error;
-        QString sha1;  // of the disc's default.xbe
+        QString sha1;  // of the disc's default.xex
     };
     void refreshInfo();
     void startExtract();
@@ -48,22 +53,25 @@ private:
     void runWorker(std::function<void()> work, std::function<void()> done);
     void finishStep();
     void updateProgress();
-    void compileFirstLaunch();
+    // the build script from Settings (a source build: mk9\build.cmd release), its output streamed into the log
+    void runBuild();
     void setBusy(bool busy);
 
     QLabel* gameTitle_;
     QLabel* folderInfo_;
-    QLabel* assetsInfo_;
+    QLabel* dataInfo_;
     QLabel* exeInfo_;
+    QLabel* scriptInfo_;
     QLineEdit* image_;
     QPushButton* browse_;
     QPushButton* extract_;
-    QPushButton* compile_;
+    QPushButton* build_;
     QPushButton* cancel_;
     QProgressBar* progress_;
     LogView* log_;
     QThread* worker_ = nullptr;
-    GameProcess* firstRun_ = nullptr;
+    QPointer<QProcess> builder_;
+    QByteArray buildOut_;
     Step step_ = Step::Idle;
     std::atomic<bool> stop_{false};
     std::atomic<qint64> bytesDone_{0};

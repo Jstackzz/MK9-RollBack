@@ -14,13 +14,13 @@ from .conftest import queue_msg, run_to_go
 
 
 def create_msg(**kw):
-    return {"type": "lobby_create", "name": "Watch party", "game": "mkd", "mode": "kombat", "password": "",
+    return {"type": "lobby_create", "name": "Watch party", "game": "mk9", "mode": "versus", "password": "",
             "rounds": 3, "region": "eu", "character": "Scorpion", **kw}
 
 
 def packet(kind: int, side: int, payload: bytes = b"", seq: int = 1) -> bytes:
-    """One spectator feed packet of a game, after its u16 length (recomp/common/src/mk3d/netplay.cpp)."""
-    body = struct.pack("<IBBH", 0x52444B4D, kind, side, seq) + payload
+    """One spectator feed packet of a game, after its u16 length (mk9/src/mk9/net/netplay.cpp: magic "MK9N")."""
+    body = struct.pack("<IBBH", 0x4E394B4D, kind, side, seq) + payload
     return struct.pack("<H", len(body)) + body
 
 
@@ -61,7 +61,7 @@ async def test_spectator_gets_the_match_and_both_feeds(server, connect, udp_peer
     assert spec["death_traps"] is False
 
     # each player's launcher passes on its own game's packets; the spectator gets them as they come
-    p1 = packet(5, 0, b"\x02\x0c\0\0\0\0\0\0\0", seq=0) + own_inputs(0, 0, 4)
+    p1 = packet(6, 0, struct.pack("<IB", 2718281828, 1) + b"\x0c\0\0\0", seq=0) + own_inputs(0, 0, 4)
     host.send({"type": "feed", "match": go["match"], "data": b64(p1)})
     assert base64.b64decode((await watcher.expect("spectate_feed"))["data"]) == p1
     p2 = own_inputs(1, 0, 4)
@@ -102,7 +102,7 @@ async def test_play_and_watch_roles(server, connect, udp_peers):
     watcher = await connect("Tanya")
     state = await watcher.request({"type": "lobby_join", "lobby": code, "spectate": True})
     assert state["lobby"]["state"] == "open"
-    listed = await guest.request({"type": "lobby_list", "game": "mkd"})
+    listed = await guest.request({"type": "lobby_list", "game": "mk9"})
     assert [(lb["players"], lb["spectators"]) for lb in listed["lobbies"]] == [(1, 1)]
     # the spectator takes the free place, the host steps aside to watch
     state = await watcher.request({"type": "lobby_role", "role": "player"})

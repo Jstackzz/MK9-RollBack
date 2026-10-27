@@ -1,7 +1,10 @@
 #pragma once
-// Original Xbox disc images (XDVDFS, "XISO"), read straight from the image file: the file table, one file, or every
-// file into a folder. A plain XISO has the file system at offset 0; a whole-disc dump has it behind the video
-// partition. The launcher's disc step, without Python (tools/py/xiso.py is the same reader).
+// Xbox disc images, read straight from the image file: the file table, one file, or every file into a folder. The
+// Xbox 360's game discs keep their files in the Xbox Game Disc file system (GDFX), which is the original Xbox's
+// XDVDFS: the volume descriptor "MICROSOFT*XBOX*MEDIA" at sector 32 of the game partition, each folder a binary tree
+// of entries. Where the game partition starts depends on the disc: 0 (an XISO, the partition alone), 0xFD90000 (a
+// whole XGD2 dump, Mortal Kombat Komplete Edition's), 0x2080000 (XGD3), 0x18300000 (an original Xbox XGD1 dump).
+// The launcher's disc step, without Python (tools/extract_iso.py reads the same).
 
 #include <QFile>
 #include <QList>
@@ -22,12 +25,15 @@ class Image {
 public:
     bool open(const QString& path, QString* error);
     const QList<Entry>& entries() const { return entries_; }
-    qint64 base() const { return base_; }
+    qint64 base() const { return base_; }  // where the game partition starts in the image
+    QString layout() const;                // "XGD2 disc", "XISO", ...: what that offset says the image is
     qint64 totalBytes() const;  // of the files
     int fileCount() const;
     const Entry* find(const QString& path) const;  // case-insensitive
     bool read(const Entry& e, QByteArray* out, QString* error);
-    // every file under outDir; bytesDone and filesDone count up as it goes; false on an error or when cancel is set
+    // every file under outDir (each written as <name>.part, then renamed; a file already there with the right size is
+    // kept, so a cancelled extraction goes on where it stopped); bytesDone and filesDone count up as it goes; false on
+    // an error or when cancel is set
     bool extractAll(const QString& outDir, const std::atomic<bool>& cancel, std::atomic<qint64>& bytesDone,
                     std::atomic<int>& filesDone, QString* error);
 

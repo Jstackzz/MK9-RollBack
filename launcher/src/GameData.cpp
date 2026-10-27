@@ -1,5 +1,6 @@
 #include "GameData.h"
 
+#include <QDir>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -38,8 +39,14 @@ GameData& GameData::instance() {
 
 bool GameData::load(QString* error) {
     games_.clear();
-    for (const char* id : {"mkda", "mkd", "mka"}) {
-        QFile f(QStringLiteral(":/data/%1.json").arg(QLatin1String(id)));
+    // every game the launcher was built with (CMakeLists.txt's resources), in name order
+    const QStringList files = QDir(QStringLiteral(":/data")).entryList({QStringLiteral("*.json")}, QDir::Files, QDir::Name);
+    if (files.isEmpty()) {
+        if (error) *error = QStringLiteral("no game data in the launcher (:/data/*.json)");
+        return false;
+    }
+    for (const QString& name : files) {
+        QFile f(QStringLiteral(":/data/") + name);
         if (!f.open(QIODevice::ReadOnly)) {
             if (error) *error = QStringLiteral("missing game data %1").arg(f.fileName());
             return false;
@@ -57,7 +64,7 @@ bool GameData::load(QString* error) {
         g.edition = o.value(QStringLiteral("edition")).toString();
         g.titleId = o.value(QStringLiteral("title_id")).toString();
         g.defaultExe = o.value(QStringLiteral("default_exe")).toString();
-        g.xbeSha1 = o.value(QStringLiteral("xbe_sha1")).toString();
+        g.discSha1 = o.value(QStringLiteral("xex_sha1")).toString();
         g.notes = o.value(QStringLiteral("notes")).toString();
         for (const auto& mv : o.value(QStringLiteral("modes")).toArray()) {
             const QJsonObject mo = mv.toObject();
@@ -69,6 +76,7 @@ bool GameData::load(QString* error) {
             m.characterSelect = mo.value(QStringLiteral("character_select")).toString(QStringLiteral("launcher"));
             m.online = mo.value(QStringLiteral("online")).toBool();
             m.ranked = mo.value(QStringLiteral("ranked")).toBool();
+            m.fighters = qMax(1, mo.value(QStringLiteral("fighters")).toInt(1));
             for (const auto& r : mo.value(QStringLiteral("rounds")).toArray()) m.rounds.append(r.toInt());
             m.defaultRounds = mo.value(QStringLiteral("default_rounds")).toInt(3);
             m.deathTraps = mo.value(QStringLiteral("death_traps")).toBool();
@@ -79,8 +87,13 @@ bool GameData::load(QString* error) {
             QList<Character> list;
             for (const auto& cv : it.value().toArray()) {
                 const QJsonObject co = cv.toObject();
-                list.append({co.value(QStringLiteral("id")).toString(), co.value(QStringLiteral("name")).toString(),
-                             co.value(QStringLiteral("secret")).toBool()});
+                Character c;
+                c.id = co.value(QStringLiteral("id")).toString();
+                c.name = co.value(QStringLiteral("name")).toString();
+                c.secret = co.value(QStringLiteral("secret")).toBool();
+                c.dlc = co.value(QStringLiteral("dlc")).toBool();
+                c.boss = co.value(QStringLiteral("boss")).toBool();
+                list.append(c);
             }
             g.rosters.insert(it.key(), list);
         }

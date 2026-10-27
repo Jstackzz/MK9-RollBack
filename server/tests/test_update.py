@@ -16,9 +16,9 @@ from server.matchmaking import MatchmakingConfig
 
 RELEASE = {
     "version": "0.1.8",
-    "url": "https://github.com/Jstackzz/MK-3D-rollback/releases/download/v0.1.8/MK3D-Online-0.1.8-windows.zip",
+    "url": "https://example.org/mk9-rollback/releases/download/v0.1.8/MK9-Online-0.1.8-windows.zip",
     "sha256": "ab" * 32, "size": 96_000_000, "notes": "What is new.",
-    "page": "https://github.com/Jstackzz/MK-3D-rollback/releases/tag/v0.1.8",
+    "page": "https://example.org/mk9-rollback/releases/tag/v0.1.8",
 }
 
 
@@ -55,8 +55,10 @@ async def launcher(server: Server, version: str) -> tuple[Connection, dict]:
 
 def test_parse_update_checks_every_field():
     assert P.parse_update(RELEASE) == RELEASE
-    assert P.parse_update({k: v for k, v in RELEASE.items() if k not in ("notes", "page")})["page"] == P.RELEASES_PAGE
-    local = P.parse_update({**RELEASE, "url": "http://127.0.0.1:8000/MK3D-Online-0.1.8-windows.zip"})
+    # without a page of its own the release links to the releases page, or to its zip while there is none
+    bare = P.parse_update({k: v for k, v in RELEASE.items() if k not in ("notes", "page")})
+    assert bare["page"] == (P.RELEASES_PAGE or RELEASE["url"])
+    local = P.parse_update({**RELEASE, "url": "http://127.0.0.1:8000/MK9-Online-0.1.8-windows.zip"})
     assert local["url"].startswith("http://127.0.0.1")
     for bad in ({"version": "0.1.8-beta"}, {"url": "http://example.com/a.zip"}, {"url": "file:///C:/a.zip"},
                 {"sha256": "AB" * 32}, {"sha256": "ab" * 31}, {"size": 0}, {"size": True}, {"notes": "x" * 2001},

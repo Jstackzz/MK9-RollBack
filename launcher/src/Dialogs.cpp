@@ -26,7 +26,7 @@
 
 LoginDialog::LoginDialog(ServerClient* server, const QString& lastName, QWidget* parent)
     : QDialog(parent), server_(server) {
-    setWindowTitle(tr("MK3D Online account"));
+    setWindowTitle(tr("MK9 Online account"));
     setModal(true);
     setMinimumWidth(420);
     auto* v = new QVBoxLayout(this);
@@ -279,7 +279,7 @@ UpdateDialog::UpdateDialog(const QJsonObject& release, bool required, const QStr
     : QDialog(parent) {
     const QString version = release.value(QStringLiteral("version")).toString();
     const QString page = release.value(QStringLiteral("page")).toString();
-    setWindowTitle(tr("MK3D Online %1").arg(version));
+    setWindowTitle(tr("MK9 Online %1").arg(version));
     setModal(false);
     setMinimumWidth(500);
     auto* v = new QVBoxLayout(this);
@@ -292,12 +292,12 @@ UpdateDialog::UpdateDialog(const QJsonObject& release, bool required, const QStr
     auto* title = ui::label(required ? tr("UPDATE NEEDED") : tr("UPDATE AVAILABLE"), "CardTitle");
     title->setAlignment(Qt::AlignCenter);
     v->addWidget(title);
-    auto* big = ui::label(tr("MK3D Online %1").arg(version), "Big");
+    auto* big = ui::label(tr("MK9 Online %1").arg(version), "Big");
     big->setAlignment(Qt::AlignCenter);
     v->addWidget(big);
     auto* info = ui::label(required ? tr("You have %1. The server needs this version to play online.")
-                                          .arg(QStringLiteral(MK3D_LAUNCHER_VERSION))
-                                    : tr("You have %1.").arg(QStringLiteral(MK3D_LAUNCHER_VERSION)),
+                                          .arg(QStringLiteral(MK9_LAUNCHER_VERSION))
+                                    : tr("You have %1.").arg(QStringLiteral(MK9_LAUNCHER_VERSION)),
                            "Muted");
     info->setAlignment(Qt::AlignCenter);
     info->setWordWrap(true);
@@ -318,7 +318,7 @@ UpdateDialog::UpdateDialog(const QJsonObject& release, bool required, const QStr
         v->addWidget(link);
     }
     status_ = ui::label(blocker.isEmpty() ? tr("The launcher downloads it, checks it, puts it in place and starts "
-                                               "again. Your settings, saves and built games stay.")
+                                               "again. Your settings, saves and built game stay.")
                                           : blocker,
                         "Muted");
     status_->setWordWrap(true);
@@ -409,27 +409,34 @@ CreateLobbyDialog::CreateLobbyDialog(const Game& game, const QString& defaultNam
     password_->setPlaceholderText(tr("optional"));
     password_->setMaxLength(64);
     rounds_ = new QComboBox;
-    for (int r : {1, 3, 5}) rounds_->addItem(tr("Best of %1").arg(r), r);
-    rounds_->setCurrentIndex(1);
-    deathTraps_ = new QCheckBox(tr("Death traps"));
-    deathTraps_->setChecked(cfg::deathTraps());
-    deathTraps_->setToolTip(tr("Arenas whose death traps kill on the spot, in this lobby's matches."));
+    koth_ = new QCheckBox(tr("King of the Hill"));
+    koth_->setToolTip(tr("Up to eight players in line: the first two fight, the winner stays and the next in line "
+                         "fights them; the loser goes to the end of the line. A match without a result keeps the "
+                         "king, and the next in line steps in."));
     form->addRow(tr("Name"), name_);
     form->addRow(tr("Mode"), mode_);
     form->addRow(tr("Password"), password_);
     form->addRow(tr("Rounds"), rounds_);
-    form->addRow(QString(), deathTraps_);
+    form->addRow(QString(), koth_);
     v->addLayout(form);
-    // only for a mode whose fights have them
-    const auto showTraps = [this, modes = game.modes] {
+    // the rounds a mode can have (best of 1, 3 or 5), its own default first
+    const auto fillRounds = [this, modes = game.modes] {
         const QString id = mode_->currentData().toString();
-        bool traps = false;
+        QList<int> rounds{1, 3, 5};
+        int preferred = 3;
         for (const auto& m : modes)
-            if (m.id == id) traps = m.deathTraps;
-        deathTraps_->setVisible(traps);
+            if (m.id == id && !m.rounds.isEmpty()) {
+                rounds = m.rounds;
+                preferred = m.defaultRounds;
+            }
+        const int was = rounds_->currentData().toInt();
+        rounds_->clear();
+        for (int r : rounds) rounds_->addItem(tr("Best of %1").arg(r), r);
+        const int at = rounds_->findData(was ? was : preferred);
+        rounds_->setCurrentIndex(at >= 0 ? at : qMax(0, rounds_->findData(preferred)));
     };
-    showTraps();
-    connect(mode_, &QComboBox::currentIndexChanged, this, showTraps);
+    fillRounds();
+    connect(mode_, &QComboBox::currentIndexChanged, this, fillRounds);
     auto* buttons = new QHBoxLayout;
     auto* cancel = new QPushButton(tr("Cancel"));
     auto* ok = new QPushButton(tr("Create"));
@@ -447,4 +454,4 @@ QString CreateLobbyDialog::name() const { return name_->text().trimmed(); }
 QString CreateLobbyDialog::mode() const { return mode_->currentData().toString(); }
 QString CreateLobbyDialog::password() const { return password_->text(); }
 int CreateLobbyDialog::rounds() const { return rounds_->currentData().toInt(); }
-bool CreateLobbyDialog::deathTraps() const { return deathTraps_->isHidden() || deathTraps_->isChecked(); }
+bool CreateLobbyDialog::kingOfTheHill() const { return koth_->isChecked(); }

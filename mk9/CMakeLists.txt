@@ -8,6 +8,23 @@ project(mk9 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Every player's PC builds its own copy, with or without AVX2: no fused multiply-adds the source
+# did not ask for, so every build computes the same floats (netplay compares the games' state)
+add_compile_options(-ffp-contract=off)
+
+# the release (VERSION beside the project in a player package, at the repository's root here):
+# netplay refuses to match two games built from different releases
+foreach(_v "${CMAKE_SOURCE_DIR}/VERSION" "${CMAKE_SOURCE_DIR}/../VERSION")
+    if(NOT MK9_VERSION AND EXISTS "${_v}")
+        file(READ "${_v}" MK9_VERSION)
+        string(STRIP "${MK9_VERSION}" MK9_VERSION)
+    endif()
+endforeach()
+if(NOT MK9_VERSION)
+    set(MK9_VERSION "0.0.0")
+endif()
+message(STATUS "MK9 game version ${MK9_VERSION}")
+
 include(generated/rexglue.cmake)
 
 # Sources
@@ -38,6 +55,7 @@ else()
 endif()
 
 rexglue_setup_target(mk9 GPU_PLUGINS xenos)
+target_compile_definitions(mk9 PRIVATE MK9_VERSION="${MK9_VERSION}")
 
 # The SDK built in-tree (REXSDK_DIR) does not pass on ImGui's include directory; its functions
 # come from rexruntime.dll (WINDOWS_EXPORT_ALL_SYMBOLS).

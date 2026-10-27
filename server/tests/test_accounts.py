@@ -16,9 +16,9 @@ async def test_welcome_and_version_check(server, connect):
     assert conn.welcome["type"] == "welcome"
     assert conn.welcome["proto"] == P.PROTO
     assert conn.welcome["udp_port"] == server.udp_port
-    assert conn.welcome["games"]["mkd"] == ["kombat", "chess", "puzzle"]
-    assert conn.welcome["games"]["mka"] == ["kombat", "motor"]
-    assert conn.welcome["games"]["mkda"] == ["kombat"]
+    assert conn.welcome["games"] == {"mk9": ["versus", "tag", "tyl"]}
+    assert conn.welcome["ranked"] == {"mk9": ["versus", "tag"]}  # Test Your Luck is Kasual only
+    assert conn.welcome["netcodes"] == ["lockstep", "rollback"]
 
     bad_proto = Connection("127.0.0.1", server.tcp_port, fingerprint=server.fingerprint)
     await bad_proto.connect(hello=False)
@@ -111,7 +111,7 @@ async def test_passwords_are_salted_scrypt_hashes(server, connect):
 async def test_profile_and_requires_login(server, connect):
     anon = await connect()
     with pytest.raises(ServerError) as exc:
-        await anon.request({"type": "queue_join", "game": "mkd", "mode": "kombat", "region": "eu"})
+        await anon.request({"type": "queue_join", "game": "mk9", "mode": "versus", "region": "eu"})
     assert exc.value.code == "not_logged_in"
     await connect("Erin")
     prof = await anon.request({"type": "profile", "name": "erin"})

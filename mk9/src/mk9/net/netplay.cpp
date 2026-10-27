@@ -711,6 +711,7 @@ void Pace() {
 
 uint64_t g_meet_frame = 0;  // tests: meet at the top of this frame (counted from boot)
 std::atomic<bool> g_meet_asked{false};  // the launcher's start
+std::atomic<uint32_t> g_meet_seed{0};
 
 void OnTop(PPCContext& ctx, uint8_t* base) {
   ApplyPending();
@@ -720,7 +721,9 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
                         ((g_meet_frame && frame::Count() == g_meet_frame) || g_meet_asked.exchange(false));
   if (meet_now) {
     Agreement agreed;
-    Meet(game::ReadyWords(), 0x1234567u + uint32_t(g_cfg.slot), agreed);
+    const uint32_t seed = g_meet_seed.load() ? g_meet_seed.load() : 0x1234567u + uint32_t(g_cfg.slot);
+    Meet(game::ReadyWords(), seed, agreed);
+    if (g_status == Status::InSync && !game::SameRelease(agreed)) return Lost(Status::Mismatch);
     if (g_status == Status::InSync) game::Agree(ctx, base, agreed);
   }
   if (g_status == Status::Connecting || (g_status != Status::InSync && g_status != Status::Barrier)) {
@@ -747,6 +750,7 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
   if (!g_rolling && game::SyncPoint()) {
     Agreement agreed;
     if (!Meet(game::ReadyWords(), 0x89ABCDEFu ^ uint32_t(g_match), agreed)) return;
+    if (!game::SameRelease(agreed)) return Lost(Status::Mismatch);
     game::Agree(ctx, base, agreed);
   }
   // this frame's local input waits `delay` frames (a test's script for this slot stands in for the pad)
@@ -817,6 +821,7 @@ const char* StatusName(Status s) {
     case Status::InSync: return "in sync";
     case Status::Desynced: return "desynced";
     case Status::Disconnected: return "disconnected";
+    case Status::Mismatch: return "another release";
   }
   return "?";
 }
@@ -873,7 +878,10 @@ void Disable() {
   g_pending_off = true;
 }
 
-void RequestMeet() { g_meet_asked = true; }
+void RequestMeet(uint32_t seed) {
+  g_meet_seed = seed;
+  g_meet_asked = true;
+}
 
 Status GetStatus() { return g_status.load(); }
 bool InSync() { return g_status == Status::InSync; }

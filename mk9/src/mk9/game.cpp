@@ -86,7 +86,29 @@ bool TitleUp() { return ReadU32(0x833C77B8) == 1; }
 int RoundsWon(int player) { return int(ReadU32(0x833C7A38 + 4 * uint32_t(player & 1))); }
 int Round() { return int(ReadU32(0x833CED28)); }
 
-std::vector<uint32_t> ReadyWords() { return {uint32_t(RoundTimer())}; }
+#ifndef MK9_VERSION
+#define MK9_VERSION "0.0.0"
+#endif
+
+uint32_t ReleaseStamp() {
+  static const uint32_t stamp = Fnv(reinterpret_cast<const uint8_t*>(MK9_VERSION), sizeof(MK9_VERSION) - 1);
+  return stamp;
+}
+
+std::vector<uint32_t> ReadyWords() { return {ReleaseStamp(), uint32_t(RoundTimer())}; }
+
+bool SameRelease(const mk9::net::Agreement& agreed) {
+  for (int s = 0; s < mk9::net::kMaxSlots; s++) {
+    const auto& w = agreed.words[s];
+    if (w.empty()) continue;
+    if (w[0] != ReleaseStamp()) {
+      REXLOG_ERROR("mk9 game: slot {} runs another release of the game (stamp {:08X}, this one {} = {:08X})", s,
+                   w[0], MK9_VERSION, ReleaseStamp());
+      return false;
+    }
+  }
+  return true;
+}
 
 namespace {
 

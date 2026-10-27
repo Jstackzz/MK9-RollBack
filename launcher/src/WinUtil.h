@@ -51,7 +51,7 @@ bool thawProcess(qint64 pid, const QList<quintptr>& hidden);
 
 // Smart App Control (Windows 11): 1 on, blocking programs without a known publisher's signature (the games, whose
 // code each PC builds for itself, never have one), 2 evaluating (it may switch itself on), 0 off, -1 not on this
-// Windows. MK3D_SMART_APP_CONTROL=<state> pretends a state, to see what the launcher says.
+// Windows. MK9_SMART_APP_CONTROL=<state> pretends a state, to see what the launcher says.
 int smartAppControl();
 
 }  // namespace winutil

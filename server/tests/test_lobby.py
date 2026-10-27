@@ -12,7 +12,7 @@ from .conftest import hello_and_accept
 
 
 def create_msg(**kw):
-    return {"type": "lobby_create", "name": "Friday sets", "game": "mkd", "mode": "kombat", "password": "",
+    return {"type": "lobby_create", "name": "Friday sets", "game": "mk9", "mode": "versus", "password": "",
             "rounds": 3, "region": "eu", "character": "Scorpion", **kw}
 
 
@@ -26,9 +26,12 @@ async def test_lobby_create_join_ready_start(server, connect, udp_peers):
     assert lobby["members"] == [{"name": "Goro", "character": "Scorpion", "ready": False, "host": True,
                                  "spectator": False}]
 
-    listed = await guest.request({"type": "lobby_list", "game": "mkd"})
+    listed = await guest.request({"type": "lobby_list", "game": "mk9"})
     assert [(lb["id"], lb["players"], lb["locked"]) for lb in listed["lobbies"]] == [(code, 1, True)]
-    assert (await guest.request({"type": "lobby_list", "game": "mka"}))["lobbies"] == []
+    assert [lb["id"] for lb in (await guest.request({"type": "lobby_list"}))["lobbies"]] == [code]
+    with pytest.raises(ServerError) as exc:
+        await guest.request({"type": "lobby_list", "game": "mkd"})  # an MK3D game is no game of this server
+    assert exc.value.code == "bad_game"
 
     with pytest.raises(ServerError) as exc:
         await guest.request({"type": "lobby_join", "lobby": code, "password": "wrong"})
@@ -47,7 +50,7 @@ async def test_lobby_create_join_ready_start(server, connect, udp_peers):
         await third.request({"type": "lobby_join", "lobby": code, "password": "pw-123"})
     assert exc.value.code == "lobby_full"
     with pytest.raises(ServerError) as exc:
-        await guest.request({"type": "queue_join", "game": "mkd", "mode": "kombat", "region": "eu"})
+        await guest.request({"type": "queue_join", "game": "mk9", "mode": "versus", "region": "eu"})
     assert exc.value.code == "busy"
 
     # chat reaches both members and is kept in the lobby state

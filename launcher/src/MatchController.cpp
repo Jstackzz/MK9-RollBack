@@ -31,6 +31,20 @@ QString reasonText(const QString& reason) {
     };
     return texts.value(reason, reason);
 }
+
+QString pick(const QJsonObject& o, const char* key) {
+    const QString v = str(o, key);
+    return v.isEmpty() ? QStringLiteral("-") : v;
+}
+
+// what a match plays with: what the server decided for both (rollback only when both asked for it); a server that does
+// not say gets lockstep, which every game has
+QString netcodeOf(const QJsonObject& o) {
+    return str(o, "netcode") == QLatin1String("rollback") ? QStringLiteral("rollback") : QStringLiteral("lockstep");
+}
+
+constexpr int kParkMs = 30000;          // a park from the game's CONTINUE? menu back to its main menu, at most
+constexpr int kWatchFeedCheckMs = 10000;  // a spectator's game connects to its feed within this once it plays
 }  // namespace
 
 MatchController::MatchController(ServerClient* server, QObject* parent)
@@ -63,17 +77,56 @@ MatchController::MatchController(ServerClient* server, QObject* parent)
     });
     keepaliveTimer_.setInterval(15000);
     connect(&keepaliveTimer_, &QTimer::timeout, this, &MatchController::sendKeepaliveHello);
+    // a park that did not bring the game back to its hold point: it is started again
     finishTimeout_.setSingleShot(true);
     connect(&finishTimeout_, &QTimer::timeout, this, [this] {
         if (phase_ != Phase::Finishing) return;
         closeFeed();
         closeWatchFeed();
-        setPhase(Phase::Idle, finishText_.isEmpty() ? tr("Match over") : finishText_);
+        if (game_ && game_->isRunning() && !game_->isReady()) {
+            restartGame(tr("it did not come back to its menu"));
+            return;
+        }
+        finishDone();
     });
     // a watched match whose game never got into it (the players' feed never came): parked after this
     watchTimeout_.setSingleShot(true);
     connect(&watchTimeout_, &QTimer::timeout, this, [this] {
         if (phase_ == Phase::Watching) endWatch(tr("The watched match never came through"));
+    });
+    // a spectator's game that plays without reading its feed did not take the watch line: a game without spectating
+    watchFeedCheck_.setSingleShot(true);
+    connect(&watchFeedCheck_, &QTimer::timeout, this, [this] {
+        if (phase_ == Phase::Watching && watchFeed_ && !watchFeed_->gameConnected())
+            watchUnsupported(tr("the game never read the match's feed"));
+    });
+    // A start line the game took and still at its hold point: it turned it down (its "error ..." line may be gone by
+    // the next poll, the game writes "ready" again at once)
+    startCheck_.setSingleShot(true);
+    connect(&startCheck_, &QTimer::timeout, this, [this] {
+        if (!game_ || !game_->isRunning()) return;
+        if (game_->commandWaiting()) {  // not taken yet (the game is busy or frozen): look again
+            startCheck_.start(2000);
+            return;
+        }
+        if (!game_->isReady()) return;  // it took it
+        if (phase_ == Phase::Watching && !watchInMatch_) {
+            watchUnsupported(tr("it turned the watch line down"));
+        } else if (phase_ == Phase::Starting) {
+            log(tr("The game turned the start line down (status %1).").arg(game_->status()));
+            reportResult({{QStringLiteral("outcome"), QStringLiteral("error")}});
+        }
+    });
+    continueTimer_.setSingleShot(true);
+    connect(&continueTimer_, &QTimer::timeout, this, [this] {
+        const QString state = str(series_, "state");
+        if (atContinue_ && state != QLatin1String("between") && state != QLatin1String("playing")) parkFromContinue(true);
+    });
+    parkWatch_.setSingleShot(true);
+    connect(&parkWatch_, &QTimer::timeout, this, [this] {
+        if (!game_ || !game_->isRunning() || game_->isReady()) return;
+        const QString st = game_->state();
+        if (st != QLatin1String("in_match") && st != QLatin1String("result")) restartGame(tr("it did not come back to its menu"));
     });
     startTimeout_.setSingleShot(true);
     connect(&startTimeout_, &QTimer::timeout, this, [this] {
@@ -100,7 +153,7 @@ void MatchController::setPhase(Phase p, const QString& text) {
     emit phaseChanged(p, text);
     if (p == Phase::Idle) sendSeriesReady();
     maybeBackToSolo();
-    if (p == Phase::Searching) maybeStartPractice();
+    if (p == Phase::Searching) maybeStartSolo();
     if (p == Phase::Idle) startWatch();  // a lobby match waiting to be watched
 }
 
@@ -108,9 +161,8 @@ void MatchController::freezeSolo() {
     if (!solo_ || soloFrozen_) return;
     soloHidden_.clear();
     soloFrozen_ = true;
-    const QString what = soloPractice_ ? tr("practice") : tr("single player");
-    if (!winutil::freezeProcess(solo_->pid(), &soloHidden_)) log(tr("Standby: %1 could not be frozen").arg(what));
-    log(tr("Standby: %1 set aside for the match").arg(what));
+    if (!winutil::freezeProcess(solo_->pid(), &soloHidden_)) log(tr("Standby: single player could not be frozen"));
+    log(tr("Standby: single player set aside for the match"));
 }
 
 void MatchController::thawSolo() {
@@ -143,8 +195,8 @@ void MatchController::maybeBackToSolo() {
     const QString state = str(series_, "state");
     if (state == QLatin1String("between") || state == QLatin1String("playing")) return;
     thawSolo();
-    log(soloPractice_ ? tr("Standby: back to practice") : tr("Standby: back to single player"));
-    if (phase_ == Phase::Idle) setPhase(Phase::Solo, soloPractice_ ? tr("Practicing") : tr("Playing single player"));
+    log(tr("Standby: back to single player"));
+    if (phase_ == Phase::Idle) setPhase(Phase::Solo, tr("Playing single player"));
     // in front while the match's game still runs: taking the foreground from a frozen window would wait on it for ever
     emit soloResumed();
     freezeGame();
@@ -163,17 +215,21 @@ void MatchController::seriesReady(bool ready, const QString& choice) {
     sendSeriesReady();
 }
 
-// the next match of the series is asked for once this launcher is idle: the game is back at its hold point and has
-// let go of the game port
+// the next match of the series is asked for once this launcher is idle: the game is back at its hold point (or
+// booting to it again) and has let go of the game port
 void MatchController::sendSeriesReady() {
     if (!wantNext_ || phase_ != Phase::Idle || series_.isEmpty() || str(series_, "state") != QLatin1String("between") ||
         !server_->isLoggedIn())
         return;
     wantNext_ = false;
-    server_->send({{QStringLiteral("type"), QStringLiteral("series_ready")},
-                   {QStringLiteral("series"), str(series_, "series")},
-                   {QStringLiteral("ready"), true},
-                   {QStringLiteral("choice"), nextChoice_}});
+    QJsonObject msg{{QStringLiteral("type"), QStringLiteral("series_ready")},
+                    {QStringLiteral("series"), str(series_, "series")},
+                    {QStringLiteral("ready"), true},
+                    {QStringLiteral("choice"), nextChoice_}};
+    // the game still waits at its CONTINUE? menu with the other's: the next match may start there
+    if (atContinue_ && game_ && game_->isRunning() && game_->state() == QLatin1String("result"))
+        msg.insert(QStringLiteral("continue"), true);
+    server_->send(msg);
 }
 
 int MatchController::searchSeconds() const {
@@ -235,14 +291,32 @@ QString MatchController::opponentName() const {
     return opp.isEmpty() ? tr("opponent") : str(opp, "name");
 }
 
+GameProcess* MatchController::spawnGame(const QString& gameId, QString* error) {
+    showWhenReady_ = soloFrozen_;
+    auto* g = new GameProcess(gameId, 1, this);
+    connect(g, &GameProcess::statusChanged, this, &MatchController::onGameStatus);
+    connect(g, &GameProcess::exited, this, &MatchController::onGameExited);
+    if (!g->start(cfg::gameExe(gameId), error)) {
+        delete g;
+        return nullptr;
+    }
+    game_ = g;
+    gameFrozen_ = false;
+    log(tr("Game %1 starting (session %2)").arg(gameId, g->sessionDir()));
+    return game_;
+}
+
 GameProcess* MatchController::ensureGame(const QString& gameId, QString* error) {
+    // something else than the series' next match from CONTINUE?: the game goes back to its main menu for it (a start
+    // waits until it is there)
+    if (atContinue_) parkFromContinue(false);
     // one game runs at a time: while single player runs, only an accepted match (which freezes it) brings this one
     if (solo_ && !soloFrozen_) {
         if (error) *error = tr("Close your single-player game first.");
         return nullptr;
     }
     if (phase_ == Phase::Finishing) {
-        if (error) *error = tr("Your game is still playing the last match's ending: a moment.");
+        if (error) *error = tr("Your game is still on its way back from the last match: a moment.");
         return nullptr;
     }
     if (game_ && game_->isRunning() && game_->gameId() == gameId) {
@@ -255,21 +329,43 @@ GameProcess* MatchController::ensureGame(const QString& gameId, QString* error) 
     }
     if (game_) {
         thawGame();  // a frozen game would not see its quit command
+        disconnect(game_, nullptr, this, nullptr);
         game_->quit();
-        game_->deleteLater();
+        QTimer::singleShot(6000, game_, &QObject::deleteLater);
         game_ = nullptr;
     }
-    showWhenReady_ = soloFrozen_;
-    auto* g = new GameProcess(gameId, 1, this);
-    connect(g, &GameProcess::statusChanged, this, &MatchController::onGameStatus);
-    connect(g, &GameProcess::exited, this, &MatchController::onGameExited);
-    if (!g->start(cfg::gameExe(gameId), error)) {
-        delete g;
-        return nullptr;
+    return spawnGame(gameId, error);
+}
+
+void MatchController::restartGame(const QString& why) {
+    if (!game_) {
+        finishDone();
+        return;
     }
-    game_ = g;
-    log(tr("Game %1 starting (session %2)").arg(gameId, g->sessionDir()));
-    return game_;
+    GameProcess* old = game_;
+    const QString gameId = old->gameId();
+    thawGame();  // a frozen game would not see its quit command
+    game_ = nullptr;
+    gameFrozen_ = false;
+    disconnect(old, nullptr, this, nullptr);
+    log(tr("Starting the game again for the next match: %1").arg(why));
+    const auto next = [this, gameId] {
+        if (game_) return;  // one was started meanwhile
+        QString err;
+        if (!spawnGame(gameId, &err)) log(err);
+        if (phase_ == Phase::Finishing) finishDone();
+    };
+    if (!old->isRunning()) {
+        old->deleteLater();
+        next();
+        return;
+    }
+    // once it is gone and has let go of the game port: a new session with a fresh save, booting to the hold point
+    connect(old, &GameProcess::exited, this, [old, next] {
+        old->deleteLater();
+        next();
+    });
+    old->quit();
 }
 
 bool MatchController::prepareGame(const QString& gameId, QString* error) { return ensureGame(gameId, error) != nullptr; }
@@ -285,14 +381,41 @@ bool MatchController::findMatch(const QueueRequest& req, QString* error) {
     }
     // standby: single player runs on while this searches; the match's game starts once a match is accepted
     if (!solo_ && !ensureGame(req.game, error)) return false;
+    request_ = req;
     QString uerr;
     if (!openUdp(&uerr)) {
-        if (error) *error = uerr;
-        return false;
+        if (!game_ || !game_->isRunning() || game_->isReady()) {
+            if (error) *error = uerr;
+            return false;
+        }
+        searchClock_.start();
+        setPhase(Phase::Searching, tr("Searching: the game lets go of its port first..."));
+        queueWhenPortFree(50);
+        return true;
     }
+    sendQueueJoin();
+    return true;
+}
+
+void MatchController::queueWhenPortFree(int tries) {
+    QTimer::singleShot(100, this, [this, tries] {
+        if (phase_ != Phase::Searching) return;  // cancelled meanwhile
+        QString err;
+        if (openUdp(&err)) {
+            sendQueueJoin();
+        } else if (tries > 0) {
+            queueWhenPortFree(tries - 1);
+        } else {
+            log(err);
+            setPhase(Phase::Idle, tr("Search not started: %1").arg(err));
+        }
+    });
+}
+
+void MatchController::sendQueueJoin() {
+    const QueueRequest& req = request_;
     udp_->startHello(server_->serverAddress(), server_->serverUdpPort(), server_->udpToken(), QString(),
                      lanEndpoint(), 3000);
-    request_ = req;
     QJsonObject msg{{QStringLiteral("type"), QStringLiteral("queue_join")},
                     {QStringLiteral("game"), req.game},
                     {QStringLiteral("mode"), req.mode},
@@ -301,15 +424,16 @@ bool MatchController::findMatch(const QueueRequest& req, QString* error) {
                     {QStringLiteral("max_ping"), req.maxPing},
                     {QStringLiteral("strict"), req.strict},
                     {QStringLiteral("character"), req.character},
-                    {QStringLiteral("delay"), req.delay},
-                    {QStringLiteral("death_traps"), req.deathTraps}};
+                    {QStringLiteral("delay"), cfg::inputDelayValue(req.delay)},
+                    {QStringLiteral("netcode"), req.netcode}};
     if (udp_->serverRttMs() >= 0) msg.insert(QStringLiteral("server_rtt"), udp_->serverRttMs());
     server_->send(msg);
     searchClock_.start();
+    const Game* g = GameData::instance().game(req.game);
+    const GameMode* m = g ? g->mode(req.mode) : nullptr;
     setPhase(Phase::Searching, tr("Searching for a %1 %2 opponent...")
-                                   .arg(req.ranked ? tr("ranked") : tr("Kasual"), req.mode));
+                                   .arg(req.ranked ? tr("ranked") : tr("Kasual"), m ? m->name : req.mode));
     keepaliveTimer_.start();
-    return true;
 }
 
 void MatchController::sendKeepaliveHello() {
@@ -353,6 +477,23 @@ void MatchController::decline() {
     found_ = {};
     releaseUdp();
     setPhase(Phase::Idle, tr("Match declined"));
+}
+
+bool MatchController::canLeaveMatch() const {
+    return (phase_ == Phase::Starting || phase_ == Phase::Playing) && !go_.isEmpty() && !resultSent_;
+}
+
+bool MatchController::leavingCosts() const { return canLeaveMatch() && go_.value(QStringLiteral("ranked")).toBool(); }
+
+void MatchController::leaveMatch() {
+    if (!canLeaveMatch()) return;
+    if (leavingCosts()) {
+        log(tr("You left the ranked match against %1").arg(opponentName()));
+        reportResult({{QStringLiteral("outcome"), QStringLiteral("left")}});
+        return;
+    }
+    log(tr("You ended the match against %1 (no result: it does not count)").arg(opponentName()));
+    reportResult({{QStringLiteral("outcome"), QStringLiteral("ended")}});
 }
 
 void MatchController::releaseUdp() { udp_->close(); }
@@ -416,19 +557,25 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
         udp_->startPunch(match, str(msg, "key"), msg.value(QStringLiteral("side")).toInt(), str(peer, "lan"), pub,
                          punchMs);
     } else if (type == QLatin1String("match_go")) {
+        if (!str(msg, "rematch").isEmpty()) {
+            startRematch(msg);
+            return;
+        }
         if (match != str(found_, "match")) return;
         go_ = msg;
         releaseUdp();  // the game binds the same port right away
         openFeed(msg);
         pendingStart_ = startLine(go_);
-        setPhase(Phase::Starting, tr("Starting the match against %1 (%2 ms)...")
-                                      .arg(opponentName()).arg(msg.value(QStringLiteral("rtt_ms")).toInt()));
+        setPhase(Phase::Starting, tr("Starting the match against %1 (%2 ms, %3, delay %4%5)...")
+                                      .arg(opponentName()).arg(msg.value(QStringLiteral("rtt_ms")).toInt())
+                                      .arg(netcodeOf(msg)).arg(msg.value(QStringLiteral("delay")).toInt())
+                                      .arg(msg.value(QStringLiteral("delay_auto")).toBool() ? tr(" auto") : QString()));
         emit matchStarted(msg);
-        // a player who picks on the game's select screen has 75 s there (40 in Armageddon) before the game picks for
-        // them, and the select screen gives up after 4 minutes: the start waits for that
+        // the game may still be booting to its hold point (started again after the last match), and the players
+        // then pick on its select screen: the start waits for that
         const bool picksInGame = str(msg, "p1").isEmpty() || str(msg, "p1") == QLatin1String("-") ||
                                  str(msg, "p2").isEmpty() || str(msg, "p2") == QLatin1String("-");
-        startTimeout_.start(picksInGame ? 300000 : 60000);
+        startTimeout_.start(picksInGame ? 300000 : 120000);
         tryStart();
     } else if (type == QLatin1String("match_cancelled")) {
         if (match != str(found_, "match")) return;
@@ -451,6 +598,7 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
         const int winner = msg.value(QStringLiteral("winner")).toInt();
         result.insert(QStringLiteral("side"), side);
         result.insert(QStringLiteral("opponent"), side == 1 ? str(go_, "p2_name") : str(go_, "p1_name"));
+        result.insert(QStringLiteral("lobby"), go_.value(QStringLiteral("lobby")));
         if (winner == 1 || winner == 2) {
             const int mine = msg.value(side == 1 ? QStringLiteral("p1_rounds") : QStringLiteral("p2_rounds")).toInt();
             const int theirs = msg.value(side == 1 ? QStringLiteral("p2_rounds") : QStringLiteral("p1_rounds")).toInt();
@@ -458,10 +606,12 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
             result.insert(QStringLiteral("score"), QStringLiteral("%1-%2").arg(mine).arg(theirs));
         }
         emit matchFinished(result);
-        finishMatch();
+        finishMatch(str(msg, "status"));
     } else if (type == QLatin1String("series")) {
         const QString state = str(msg, "state");
         series_ = msg;
+        if (state == QLatin1String("between") || state == QLatin1String("playing")) continueTimer_.stop();
+        if (state == QLatin1String("over") && atContinue_) parkFromContinue(true);  // no next match: back to the menu
         // a ranked set goes on by itself: its next match once this game is back at its hold point
         if (state == QLatin1String("between") && msg.value(QStringLiteral("ranked")).toBool() &&
             !msg.value(QStringLiteral("you_ready")).toBool())
@@ -494,7 +644,7 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
     }
 }
 
-// --- spectators (docs/PROTOCOL.md 1.10.1)
+// --- spectators (docs/mk3d-reference/PROTOCOL.md 1.10.1)
 
 void MatchController::openFeed(const QJsonObject& go) {
     closeFeed();
@@ -529,20 +679,22 @@ void MatchController::closeFeed() {
     });
 }
 
+// a spectator's start line: no slot or peers, every player's inputs come from the feed (the game's netplay plays the
+// match in lockstep with no player of its own)
 QString MatchController::watchStartLine(const QJsonObject& info) const {
     const QStringList tokens = {
         QStringLiteral("start"),
-        QStringLiteral("game=") + str(info, "game"),
         QStringLiteral("mode=") + str(info, "mode"),
         QStringLiteral("watch=1"),
         QStringLiteral("feed=") + (watchFeed_ ? watchFeed_->endpoint() : QString()),
+        QStringLiteral("players=2"),
+        QStringLiteral("netcode=") + netcodeOf(info),
         QStringLiteral("seed=%1").arg(info.value(QStringLiteral("seed")).toInteger()),
-        QStringLiteral("p1=") + (str(info, "p1").isEmpty() ? QStringLiteral("-") : str(info, "p1")),
-        QStringLiteral("p2=") + (str(info, "p2").isEmpty() ? QStringLiteral("-") : str(info, "p2")),
-        QStringLiteral("rounds=%1").arg(info.value(QStringLiteral("rounds")).toInt(3)),
-        QStringLiteral("traps=%1").arg(info.value(QStringLiteral("death_traps")).toBool(true) ? 1 : 0),
-        QStringLiteral("ranked=0"),
         QStringLiteral("match=") + str(info, "match"),
+        QStringLiteral("p1=") + pick(info, "p1"),
+        QStringLiteral("p2=") + pick(info, "p2"),
+        QStringLiteral("rounds=%1").arg(info.value(QStringLiteral("rounds")).toInt(3)),
+        QStringLiteral("ranked=0"),
         QStringLiteral("p1_name=") + str(info, "p1_name"),
         QStringLiteral("p2_name=") + str(info, "p2_name"),
     };
@@ -571,20 +723,25 @@ void MatchController::startWatch() {
     watchFeed_ = feed;
     watchFeedMatch_ = match;
     watch_ = info;
+    watchInMatch_ = false;
     finishText_ = tr("Done watching");
     pendingStart_ = watchStartLine(info);
     setPhase(Phase::Watching, tr("Watching %1 vs %2: the match is being set up...")
                                   .arg(str(info, "p1_name"), str(info, "p2_name")));
-    // the players pick on the select screen (up to 75 s), and the game may start behind them
+    // the players pick on the select screen, and the game may start behind them
     watchTimeout_.start(6 * 60 * 1000);
     tryStart();
     emit gameShown();  // the watched match comes to the game
 }
 
-void MatchController::onWatchStatus(const QString& state) {
+void MatchController::onWatchStatus(const QString& state, const QString& line) {
     if (state == QLatin1String("ready")) {
         tryStart();
     } else if (state == QLatin1String("in_match")) {
+        if (!watchInMatch_) {
+            watchInMatch_ = true;
+            watchFeedCheck_.start(kWatchFeedCheckMs);
+        }
         watchTimeout_.stop();
         setPhase(Phase::Watching, tr("Watching %1 vs %2").arg(str(watch_, "p1_name"), str(watch_, "p2_name")));
         emit gameShown();
@@ -592,22 +749,41 @@ void MatchController::onWatchStatus(const QString& state) {
         endWatch(tr("Done watching %1 vs %2").arg(str(watch_, "p1_name"), str(watch_, "p2_name")));
     } else if (state == QLatin1String("desync")) {
         endWatch(tr("The watched match went out of step with the players' games; stopped watching"));
+    } else if (state == QLatin1String("error") && !watchInMatch_) {
+        watchUnsupported(line.section(QLatin1Char(' '), 1));  // the game turned the watch line down
     } else if (state == QLatin1String("disconnected") || state == QLatin1String("error")) {
         endWatch(tr("The watched match ended before its end (a player left)"));
     }
 }
 
-// the game parks once the watched match's end has played (link RequestPark), from the rest of the feed, which goes on
-// to it until then; then the next one may come
-void MatchController::endWatch(const QString& text) {
+// the game could not watch: it turned the watch line down (error) or plays without reading the feed
+void MatchController::watchUnsupported(const QString& why) {
+    const QString text = tr("Your game could not watch the lobby's match (%1); it starts again for the next one.").arg(why);
+    endWatch(text, true);
+    watchQueue_.clear();
+    watchData_.clear();
+    emit notice(text);
+}
+
+// the game parks once the watched match's end has played, from the rest of the feed, which goes on to it until then;
+// then the next one may come
+void MatchController::endWatch(const QString& text, bool restart) {
     watchTimeout_.stop();
+    watchFeedCheck_.stop();
+    startCheck_.stop();
     watch_ = {};
+    watchInMatch_ = false;
     pendingStart_.clear();
     finishText_ = text;
     if (game_ && game_->isRunning() && !game_->isReady()) {
+        setPhase(Phase::Finishing, text);
+        if (restart) {
+            closeWatchFeed();
+            restartGame(tr("it did not take the watched match"));
+            return;
+        }
         game_->command(QStringLiteral("park"));
         finishTimeout_.start(45000);
-        setPhase(Phase::Finishing, text);
         return;
     }
     closeWatchFeed();
@@ -642,22 +818,25 @@ void MatchController::onPunchDone(bool ok, int rtt, const QString& remote, const
            : tr("Could not reach %1 this way").arg(opponentName()));
 }
 
+// MK9's start line (docs/LAUNCHER.md, the game contract): side 1 is slot 0 (player 1, on the left), side 2 slot 1; the
+// other player is the one peer. rounds, ranked and the names are for the game to show or use, the rest it plays by.
 QString MatchController::startLine(const QJsonObject& go) const {
+    const int slot = go.value(QStringLiteral("side")).toInt() == 2 ? 1 : 0;
     const QStringList tokens = {
         QStringLiteral("start"),
-        QStringLiteral("game=") + str(go, "game"),
         QStringLiteral("mode=") + str(go, "mode"),
-        QStringLiteral("side=%1").arg(go.value(QStringLiteral("side")).toInt()),
+        QStringLiteral("slot=%1").arg(slot),
+        QStringLiteral("players=2"),
         QStringLiteral("local_port=%1").arg(cfg::gamePort()),
-        QStringLiteral("remote=") + str(go, "remote"),
+        QStringLiteral("peers=%1@%2").arg(1 - slot).arg(str(go, "remote")),
         QStringLiteral("delay=%1").arg(go.value(QStringLiteral("delay")).toInt()),
+        QStringLiteral("netcode=") + netcodeOf(go),
         QStringLiteral("seed=%1").arg(go.value(QStringLiteral("seed")).toInteger()),
-        QStringLiteral("p1=") + (str(go, "p1").isEmpty() ? QStringLiteral("-") : str(go, "p1")),
-        QStringLiteral("p2=") + (str(go, "p2").isEmpty() ? QStringLiteral("-") : str(go, "p2")),
+        QStringLiteral("match=") + str(go, "match"),
+        QStringLiteral("p1=") + pick(go, "p1"),
+        QStringLiteral("p2=") + pick(go, "p2"),
         QStringLiteral("rounds=%1").arg(go.value(QStringLiteral("rounds")).toInt(3)),
         QStringLiteral("ranked=%1").arg(go.value(QStringLiteral("ranked")).toBool() ? 1 : 0),
-        QStringLiteral("traps=%1").arg(go.value(QStringLiteral("death_traps")).toBool(true) ? 1 : 0),
-        QStringLiteral("match=") + str(go, "match"),
         QStringLiteral("p1_name=") + str(go, "p1_name"),
         QStringLiteral("p2_name=") + str(go, "p2_name"),
     };
@@ -668,19 +847,65 @@ QString MatchController::startLine(const QJsonObject& go) const {
 
 void MatchController::tryStart() {
     if (pendingStart_.isEmpty() || !game_) return;
-    if (!game_->isReady()) {
+    const bool can = pendingRematch_ ? game_->state() == QLatin1String("result") : game_->isReady();
+    if (!can) {
         log(tr("Waiting for the game to reach its hold point (status: %1)").arg(game_->status()));
         return;
     }
     game_->command(pendingStart_);
     pendingStart_.clear();
+    pendingRematch_ = false;
+    startCheck_.start(5000);
+}
+
+void MatchController::startRematch(const QJsonObject& go) {
+    const int side = go.value(QStringLiteral("side")).toInt();
+    found_ = go;  // no match_found for it: the match is the one the go names
+    found_.insert(QStringLiteral("opponent"),
+                  QJsonObject{{QStringLiteral("name"), side == 1 ? str(go, "p2_name") : str(go, "p1_name")}});
+    go_ = go;
+    resultSent_ = false;
+    const bool there = atContinue_ && game_ && game_->isRunning() && game_->state() == QLatin1String("result");
+    atContinue_ = false;
+    continueTimer_.stop();
+    const bool select = str(go, "rematch") == QLatin1String("select");
+    setPhase(Phase::Starting, select ? tr("Next match against %1: both pick again...").arg(opponentName())
+                                     : tr("Rematch against %1: the same fighters...").arg(opponentName()));
+    emit matchStarted(go);
+    if (!there) {
+        log(tr("The game is no longer at its CONTINUE? menu: the match cannot start there"));
+        reportResult({{QStringLiteral("outcome"), QStringLiteral("error")}});
+        return;
+    }
+    pendingStart_ = QStringLiteral("rematch match=%1 seed=%2%3")
+                        .arg(str(go, "match"))
+                        .arg(go.value(QStringLiteral("seed")).toInteger())
+                        .arg(select ? QStringLiteral(" select=1") : QString());
+    pendingRematch_ = true;
+    startTimeout_.start(select ? 300000 : 120000);
+    tryStart();
+}
+
+void MatchController::parkFromContinue(bool finishing) {
+    if (!atContinue_) return;
+    atContinue_ = false;
+    continueTimer_.stop();
+    if (!game_ || !game_->isRunning() || game_->state() != QLatin1String("result")) return;  // not there any more
+    game_->command(QStringLiteral("park"));
+    if (finishing && phase_ == Phase::Idle) {
+        finishText_ = tr("Back at the menu");
+        finishTimeout_.start(kParkMs);
+        setPhase(Phase::Finishing, tr("The game goes back to its menu"));
+    } else {
+        parkWatch_.start(kParkMs);
+    }
 }
 
 void MatchController::onGameStatus(const QString& line) {
     emit gameStatusChanged(line);
     const QString st = line.section(QLatin1Char(' '), 0, 0);
     if (phase_ == Phase::Watching) {
-        onWatchStatus(st);
+        onWatchStatus(st, line);
         return;
     }
     const QHash<QString, QString> keys = GameProcess::parseKeys(line);
@@ -696,10 +921,10 @@ void MatchController::onGameStatus(const QString& line) {
             finishTimeout_.stop();
             closeFeed();
             closeWatchFeed();
-            setPhase(Phase::Idle, finishText_.isEmpty() ? tr("Match over") : finishText_);
+            finishDone();
         }
         tryStart();
-        maybeStartPractice();
+        maybeStartSolo();
     } else if (st == QLatin1String("in_match")) {
         if (phase_ == Phase::Starting && forThisMatch) {
             startTimeout_.stop();
@@ -761,6 +986,9 @@ void MatchController::reportResult(QJsonObject fields) {
     if (resultSent_ || go_.isEmpty()) return;
     resultSent_ = true;
     startTimeout_.stop();
+    startCheck_.stop();
+    pendingStart_.clear();
+    pendingRematch_ = false;
     fields.insert(QStringLiteral("type"), QStringLiteral("result"));
     fields.insert(QStringLiteral("match"), str(go_, "match"));
     if (server_->isLoggedIn())
@@ -776,28 +1004,53 @@ void MatchController::reportResult(QJsonObject fields) {
     parkTimer_.start(10000);
 }
 
-void MatchController::finishMatch() {
+// The match is over (its result is in, or 10 s went by). A queue or series match that ended with a result keeps its
+// game at the CONTINUE? menu, together with the opponent's, for the series' next match (both choose a rematch, or a
+// ranked set goes on); otherwise the game goes back to its hold point: from its CONTINUE? menu a park takes it back by
+// itself, anywhere else (a match ended in the middle, the games lost each other) it cannot, and is started again: a
+// new session with a fresh save boots to the hold point.
+void MatchController::finishMatch(const QString& status) {
     parkTimer_.stop();
     startTimeout_.stop();
+    const bool fromLobby = go_.value(QStringLiteral("lobby")).isString();
+    const bool keep = !fromLobby && status == QLatin1String("agreed") && game_ && game_->isRunning() &&
+                      game_->state() == QLatin1String("result");
     go_ = {};
     found_ = {};
     pendingStart_.clear();
+    pendingRematch_ = false;
     finishText_.clear();
+    if (keep) {
+        atContinue_ = true;
+        continueTimer_.start(8000);  // the series' state comes right after the result
+        closeFeed();
+        setPhase(Phase::Idle, tr("Match over: the game waits at its CONTINUE? menu for the next match"));
+        return;
+    }
     if (game_ && game_->isRunning() && !game_->isReady()) {
-        // the game parks once its ending has played (it holds the game port until then): ready again, then idle
-        game_->command(QStringLiteral("park"));
-        finishTimeout_.start(45000);
-        setPhase(Phase::Finishing, tr("Match over: the game plays its ending"));
+        if (game_->state() == QLatin1String("result")) {
+            game_->command(QStringLiteral("park"));
+            finishTimeout_.start(kParkMs);
+            setPhase(Phase::Finishing, tr("Match over: the game goes back to its menu"));
+        } else {
+            setPhase(Phase::Finishing, tr("Match over: the game starts again for the next match"));
+            restartGame(tr("the match ended away from the game's CONTINUE? menu"));
+        }
         return;
     }
     closeFeed();
     setPhase(Phase::Idle, tr("Match over"));
 }
 
-// The whole game started plainly, its menus as on the console (arcade, its practice mode, the side modes): no hold
-// point and no match. One game runs at a time: the game waiting in the background for a match closes first, or,
-// while a search runs (standby), is frozen until a match is accepted.
-bool MatchController::startSolo(const QString& gameId, QString* error, bool practice) {
+void MatchController::finishDone() {
+    finishTimeout_.stop();
+    setPhase(Phase::Idle, finishText_.isEmpty() ? tr("Match over") : finishText_);
+}
+
+// The whole game started plainly, its menus as on the console, with the player's saves: no hold point and no match.
+// One game runs at a time: the game waiting in the background for a match closes first, or, while a search runs
+// (standby), is frozen until a match is accepted.
+bool MatchController::startSolo(const QString& gameId, QString* error, bool whileWaiting) {
     if (solo_) {
         if (error) *error = tr("Your single-player game is already open.");
         return false;
@@ -806,6 +1059,7 @@ bool MatchController::startSolo(const QString& gameId, QString* error, bool prac
         if (error) *error = tr("Busy: %1").arg(phaseText_);
         return false;
     }
+    if (atContinue_) parkFromContinue(false);
     if (game_ && phase_ == Phase::Searching) {
         freezeGame();
     } else if (game_) {
@@ -820,20 +1074,19 @@ bool MatchController::startSolo(const QString& gameId, QString* error, bool prac
         waiting->deleteLater();
     }
     auto* g = new GameProcess(gameId, 1, this);
-    if (practice) g->setEnv(QStringLiteral("MK3D_TRAINING"), QStringLiteral("1"));
     if (!g->start(cfg::gameExe(gameId), error, false)) {
         delete g;
         thawGame();
         return false;
     }
     solo_ = g;
-    soloPractice_ = practice;
+    soloWaiting_ = whileWaiting;
     soloFrozen_ = false;
     connect(g, &GameProcess::exited, this, [this, g] {
         if (solo_ != g) return;
-        const QString closed = soloPractice_ ? tr("Practice closed") : tr("Single player closed");
+        const QString closed = tr("Single player closed");
         solo_ = nullptr;
-        soloPractice_ = false;
+        soloWaiting_ = false;
         soloFrozen_ = false;
         soloHidden_.clear();
         g->deleteLater();
@@ -847,22 +1100,20 @@ bool MatchController::startSolo(const QString& gameId, QString* error, bool prac
         }
         emit gameStatusChanged(gameStatus());
     });
-    log(tr("Game %1 started for %2 (session %3)")
-            .arg(gameId, practice ? tr("practice") : tr("single player"), g->sessionDir()));
-    if (phase_ == Phase::Idle) setPhase(Phase::Solo, practice ? tr("Practicing") : tr("Playing single player"));
-    else if (practice) log(tr("Practice while you wait: pick your fighter, then the dummy; a match found comes up over it"));
+    log(tr("Game %1 started for single player (session %2, saves %3)").arg(gameId, g->sessionDir(), g->saveDir()));
+    if (phase_ == Phase::Idle) setPhase(Phase::Solo, tr("Playing single player"));
     else log(tr("Playing single player while the search runs: a match found comes up over it"));
     emit gameStatusChanged(gameStatus());
     emit soloStarted();
     return true;
 }
 
-// Practice while a Ranked or Kasual search waits: once the match's game is at its hold point, ready for a match, it is
-// frozen there (a match found thaws it at once) and the game starts again for practice (standby takes it from there)
-void MatchController::maybeStartPractice() {
-    if (phase_ != Phase::Searching || solo_ || !game_ || !game_->isReady() || !cfg::practiceWhileWaiting()) return;
+// Single player while a Ranked or Kasual search waits: once the match's game is at its hold point, ready for a match, it
+// is frozen there (a match found thaws it at once) and the game starts again plainly (standby takes it from there)
+void MatchController::maybeStartSolo() {
+    if (phase_ != Phase::Searching || solo_ || !game_ || !game_->isReady() || !cfg::soloWhileWaiting()) return;
     QString err;
-    if (!startSolo(request_.game, &err, true)) log(tr("Practice while you wait: %1").arg(err));
+    if (!startSolo(request_.game, &err, true)) log(tr("Single player while you wait: %1").arg(err));
 }
 
 void MatchController::stopSolo() {
@@ -879,6 +1130,7 @@ bool MatchController::startLocalTest(const QString& gameId, const QString& mode,
     const QString exe = cfg::gameExe(gameId);
     localA_ = new GameProcess(gameId, 1, this);
     localB_ = new GameProcess(gameId, 2, this);
+    for (GameProcess* g : {localA_, localB_}) g->setWindowed(true);  // two fullscreen games would fight for the screen
     if (!localA_->start(exe, error) || !localB_->start(exe, error)) {
         delete localA_;
         delete localB_;
@@ -891,17 +1143,33 @@ bool MatchController::startLocalTest(const QString& gameId, const QString& mode,
     }
     const int portA = cfg::localTestPort(1), portB = cfg::localTestPort(2);
     const quint32 seed = QRandomGenerator::global()->generate();
+    // Auto: what a match over loopback (no round trip to speak of) gets
+    const int localDelay = cfg::inputDelay() < 0 ? cfg::autoDelay(0) : cfg::inputDelay();
     const QString match = QStringLiteral("local-") + QDateTime::currentDateTime().toString(QStringLiteral("hhmmss"));
-    const auto line = [&](int side, int local, int remote) {
-        return QStringLiteral("start game=%1 mode=%2 side=%3 local_port=%4 remote=127.0.0.1:%5 delay=%6 seed=%7 "
-                              "p1=%8 p2=%9 rounds=3 ranked=0 match=%10")
-            .arg(gameId, mode).arg(side).arg(local).arg(remote).arg(cfg::inputDelay()).arg(seed).arg(p1, p2, match);
+    const auto line = [&](int slot, int local, int remote) {
+        return QStringList{
+            QStringLiteral("start"),
+            QStringLiteral("mode=") + mode,
+            QStringLiteral("slot=%1").arg(slot),
+            QStringLiteral("players=2"),
+            QStringLiteral("local_port=%1").arg(local),
+            QStringLiteral("peers=%1@127.0.0.1:%2").arg(1 - slot).arg(remote),
+            QStringLiteral("delay=%1").arg(localDelay),
+            QStringLiteral("netcode=") + cfg::netcode(),
+            QStringLiteral("seed=%1").arg(seed),
+            QStringLiteral("match=") + match,
+            QStringLiteral("p1=") + (p1.isEmpty() ? QStringLiteral("-") : p1),
+            QStringLiteral("p2=") + (p2.isEmpty() ? QStringLiteral("-") : p2),
+            QStringLiteral("rounds=3"),
+            QStringLiteral("ranked=0"),
+        }.join(QLatin1Char(' '));
     };
-    localStartA_ = line(1, portA, portB);
-    localStartB_ = line(2, portB, portA);
+    localStartA_ = line(0, portA, portB);
+    localStartB_ = line(1, portB, portA);
     localResultA_.clear();
     localResultB_.clear();
-    setPhase(Phase::LocalTest, tr("Local test: two instances on ports %1/%2, waiting for both to be ready").arg(portA).arg(portB));
+    setPhase(Phase::LocalTest, tr("Local test: two games on ports %1/%2 (%3), waiting for both to be ready")
+                                   .arg(portA).arg(portB).arg(cfg::netcode()));
     return true;
 }
 
@@ -911,16 +1179,20 @@ void MatchController::onLocalStatus() {
     if (!localStartA_.isEmpty() && localA_->isReady() && localB_->isReady()) {
         localA_->command(localStartA_);
         localB_->command(localStartB_);
-        setPhase(Phase::LocalTest, tr("Local test: start lines written, both instances starting"));
+        setPhase(Phase::LocalTest, tr("Local test: start lines written, both games starting"));
         localStartA_.clear();
         localStartB_.clear();
     }
+    for (GameProcess* g : {localA_, localB_})
+        if (g->state() == QLatin1String("error") || g->state() == QLatin1String("desync") ||
+            g->state() == QLatin1String("disconnected"))
+            log(tr("Local test: game %1 says %2").arg(g->instance()).arg(g->status()));
     const auto strip = [](const QString& s) { return s.section(QStringLiteral(" match="), 0, 0); };
     if (localA_->state() == QLatin1String("result")) localResultA_ = strip(localA_->status());
     if (localB_->state() == QLatin1String("result")) localResultB_ = strip(localB_->status());
     if (!localResultA_.isEmpty() && !localResultB_.isEmpty()) {
         setPhase(Phase::LocalTest,
-                 localResultA_ == localResultB_ ? tr("Local test: both instances agree: %1").arg(localResultA_)
+                 localResultA_ == localResultB_ ? tr("Local test: both games agree: %1").arg(localResultA_)
                                                 : tr("Local test: results differ: %1 / %2").arg(localResultA_, localResultB_));
         localResultA_.clear();
         localResultB_.clear();
@@ -928,7 +1200,7 @@ void MatchController::onLocalStatus() {
         localB_->command(QStringLiteral("park"));
     }
     if (!localA_->isRunning() && !localB_->isRunning()) {
-        log(tr("Local test: both instances exited"));
+        log(tr("Local test: both games exited"));
         localA_->deleteLater();
         localB_->deleteLater();
         localA_ = localB_ = nullptr;

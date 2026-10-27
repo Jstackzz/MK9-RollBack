@@ -9,7 +9,7 @@
 function Start-LinkLocal {
     param([Parameter(Mandatory = $true)][string]$Out, [string]$Mode = "versus", [string]$Netcode = "lockstep",
           [int]$Delay = 2, [string]$Picks = "cursor", [string]$Snaps = "2:300", [int]$TimeoutS = 240,
-          [switch]$Spectator, [switch]$Attack, [switch]$Rematch, [switch]$Park, [switch]$TraceRand,
+          [switch]$Spectator, [switch]$Attack, [switch]$Rematch, [switch]$Park, [switch]$TraceRand, [int]$DelayB = -1,
           [string]$Extra = "")
     $root = Split-Path $PSScriptRoot -Parent
     if (-not $root) { $root = "C:\Users\Owner\source\repos\mk9-rollback" }
@@ -65,7 +65,8 @@ function Start-LinkLocal {
         $p = if ($Picks -and $i.slot -ge 0) { "p1=$Picks p2=$Picks" } else { "" }
         if ($i.slot -ge 0) {
             $f = if ($Spectator) { "feed=$($i.feed)" } else { "" }
-            $line = "start mode=$Mode slot=$($i.slot) players=2 local_port=$($i.port) peers=$($i.peer) delay=$Delay netcode=$Netcode seed=12345 match=$match $p $f"
+            $dl = if ($i.slot -eq 1 -and $DelayB -ge 0) { $DelayB } else { $Delay }
+            $line = "start mode=$Mode slot=$($i.slot) players=2 local_port=$($i.port) peers=$($i.peer) delay=$dl netcode=$Netcode seed=12345 match=$match $p $f"
         } else {
             $line = "start mode=$Mode watch=1 feed=$($i.feed) players=2 seed=12345 match=$match"
         }

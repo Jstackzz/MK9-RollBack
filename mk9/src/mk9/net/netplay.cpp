@@ -2,8 +2,9 @@
 //
 // Packets (little endian): u32 magic "MK9N", u8 type, u8 slot, u16 match (barrier number), then
 //   1 HELLO  -                                  presence while connecting (and between matches)
-//   2 READY  u32 seed, u8 n, n x u32            "my match is about to be set up": the barrier ends
-//                                               when every slot's READY of this match arrived
+//   2 READY  u32 seed, u8 n, n x u32, u8 delay  "my match is about to be set up": the barrier ends
+//                                               when every slot's READY of this match arrived; the
+//                                               match runs with the largest input delay any side asked
 //   3 INPUT  u32 ack, u32 now, u32 seen, u32 first, u8 n, n x 8 bytes
 //            the sender's own inputs for frames first..first+n-1; ack: how many of the receiver's
 //            inputs the sender holds without a gap; now: the frame the sender runs; seen: the
@@ -118,6 +119,7 @@ struct PeerState {
   uint16_t ready_match = 0;         // the match their last READY was for (they wait there or are past it)
   uint32_t seed = 0;
   std::vector<uint32_t> words;
+  int delay = -1;  // the input delay their READY asked for
   uint32_t old_ack = 0, old_now = 0;  // they are still in the match before ours: what they need of us
   std::map<uint32_t, uint32_t> checks;
   bool left = false;
@@ -154,7 +156,11 @@ bool g_rolling = false;                    // rollback armed: frames may run on 
 std::map<uint32_t, uint32_t> g_tentative;  // state hashes at frame tops, until every input before is known
 uint32_t g_paced_at = 0;                   // the last frame held back to let the others catch up
 
-int Delay() { return g_cfg.delay >= 0 ? g_cfg.delay : (g_cfg.rollback ? 1 : 2); }
+// this side's own input delay, and the match's: the largest any side asked at the barrier (each
+// side's inputs start `delay` frames in, so every side must use the same)
+int OwnDelay() { return g_cfg.delay >= 0 ? g_cfg.delay : (g_cfg.rollback ? 1 : 2); }
+int g_match_delay = -1;
+int Delay() { return g_match_delay >= 0 ? g_match_delay : OwnDelay(); }
 
 bool ParseAddress(const std::string& s, sockaddr_in& out) {
   auto colon = s.rfind(':');
@@ -282,6 +288,8 @@ void HandlePacket(const uint8_t* b, int n) {
     p->seed = u32(8);
     p->words.clear();
     for (int i = 0; i < b[12] && 13 + i * 4 + 4 <= n; i++) p->words.push_back(u32(13 + i * 4));
+    const int after = 13 + b[12] * 4;
+    p->delay = after < n ? b[after] : -1;
   } else if (type == kInput && n >= 25) {
     if (match == uint16_t(g_match - 1)) {
       // they are still in the match we left for the next barrier: our part of it is neutral from here on
@@ -480,6 +488,7 @@ bool Open(const Settings& st) {
   if (g_log) std::fclose(g_log);
   g_log = st.log.empty() ? nullptr : std::fopen(st.log.c_str(), "w");
   g_match = 0;
+  g_match_delay = -1;
   g_status = Status::Connecting;
   REXLOG_INFO("mk9 net: slot {} of {}, port {}, {} peers, {} delay {}", st.slot, st.players, st.bind,
               g_peers.size(), st.rollback ? "rollback" : "lockstep", Delay());
@@ -899,12 +908,14 @@ bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agree
   const uint8_t n = uint8_t(std::min<size_t>(words.size(), kMaxWords));
   w.U8(n);
   for (uint8_t i = 0; i < n; i++) w.U32(words[i]);
+  w.U8(uint8_t(OwnDelay()));
   REXLOG_INFO("mk9 net: meeting for match {} ({} words) at frame {}", g_match, n, frame::Count());
   {
     Writer meet = Header(kFeedMeet);
     meet.U32(my_seed);
     meet.U8(n);
     for (uint8_t i = 0; i < n; i++) meet.U32(words[i]);
+    meet.U8(uint8_t(OwnDelay()));
     FeedSend(meet);
   }
   // what the feed brought for this match before this spectator got here
@@ -971,6 +982,9 @@ bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agree
     agreed.words[p.slot] = p.words;
     if (p.slot == 0) agreed.seed = p.seed;
   }
+  // the largest input delay any side asked for
+  g_match_delay = g_cfg.watch ? 0 : OwnDelay();  // a spectator plays the players' delay
+  for (const PeerState& p : g_peers) g_match_delay = std::max(g_match_delay, p.delay);
   // the first `delay` frames run on neutral inputs for everyone
   g_frame = 0;
   for (int f = 0; f < Delay(); f++) {
@@ -982,7 +996,7 @@ bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agree
   for (PeerState& p : g_peers) p.contiguous = uint32_t(Delay());
   g_status = Status::InSync;
   input::SetSource(&FrameInput);
-  REXLOG_INFO("mk9 net: match {} in sync, seed {:08X}", g_match, agreed.seed);
+  REXLOG_INFO("mk9 net: match {} in sync, seed {:08X}, input delay {}", g_match, agreed.seed, Delay());
   return true;
 }
 

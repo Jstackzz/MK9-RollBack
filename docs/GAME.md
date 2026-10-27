@@ -81,6 +81,25 @@ python -I tools\netcmp.py a\net.log b\net.log                  # frame logs of t
 python -I tools\randcmp.py a\rand.txt b\rand.txt               # MK9_TRACE_RAND random draw traces
 ```
 
+## The player package (each PC builds its own game)
+
+Nobody ships the game's code: like the Tekken 6 and MK3D projects, every player translates their
+own disc. `tools\package.ps1` (`New-PlayerPackage`) assembles `dist\MK9Online`:
+
+| part | from |
+|---|---|
+| `MK9Launcher.exe` + Qt | `build\launcher` (`launcher\build.cmd`) |
+| `toolchain\` | clang, lld-link and clang's headers out of `external\llvm` (~230 MB) |
+| `games\mk9\sdk\` | the ReXGlue runtime and codegen tool, built standalone and installed: `cmake --build external\rexglue-sdk\out\build\win-amd64` then `cmake --install ... --prefix dist\sdk` |
+| `games\mk9\project\` | the game's CMake project, `src`, `config`, a manifest pointing at `games\mk9\game` |
+| `games\mk9\build-game.cmd` | `tools\player\build-game.cmd` |
+
+On the player's PC the launcher extracts the disc into `games\mk9\game` and runs
+`build-game.cmd`: codegen on their `default.xex`, then CMake + Ninja + clang against the prebuilt
+runtime (Visual Studio Build Tools with "Desktop development with C++" must be installed for the
+MSVC libraries and the Windows SDK). Tested here: the packaged build took about 12 minutes and
+the resulting `mk9.exe` boots to the hold point.
+
 ## Rollback: where it stands
 
 `net/rollback.cpp` snapshots guest memory copy-on-write per frame (pages write-protected at the

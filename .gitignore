@@ -3,6 +3,7 @@ game/
 mk9/generated/
 mk9/out/
 mk9/*.log
+/*.log
 *.xex
 *.iso
 

@@ -21,6 +21,9 @@ set(MK9_SOURCES
     src/mk9/game.cpp
     src/mk9/input.cpp
     src/mk9/net/netplay.cpp
+    src/mk9/net/rollback.cpp
+    src/mk9/net/synctest.cpp
+    src/mk9/randtrace.cpp
     src/mk9/snap.cpp
     src/mk9/testinput.cpp
 )

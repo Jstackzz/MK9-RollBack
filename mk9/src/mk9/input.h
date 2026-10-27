@@ -13,6 +13,9 @@ struct Pad {
   uint16_t buttons = 0;  // XINPUT_GAMEPAD_* bits
   uint8_t left_trigger = 0, right_trigger = 0;
   int16_t lx = 0, ly = 0, rx = 0, ry = 0;
+  // the XInput packet number when a source decides it (netplay: it must come out the same when a
+  // frame runs again); 0: this layer counts changes itself
+  uint32_t packet = 0;
 };
 
 constexpr uint16_t kDpadUp = 0x0001, kDpadDown = 0x0002, kDpadLeft = 0x0004, kDpadRight = 0x0008;

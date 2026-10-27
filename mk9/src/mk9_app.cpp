@@ -16,6 +16,10 @@
 #include "mk9/diag.h"
 #include "mk9/net/netplay.h"
 #include "mk9/snap.h"
+
+namespace mk9::synctest {
+bool Init();
+}
 #include "mk9/testinput.h"
 
 REXCVAR_DECLARE(std::string, game_data_root);
@@ -73,6 +77,7 @@ void Mk9App::OnPostSetup() {
   mk9::controls::Poll();
   mk9::testinput::Init();
   mk9::net::InitFromEnvironment();
+  mk9::synctest::Init();  // a sync test takes the frame hooks over from netplay
   mk9::diag::Init();
   mk9::snap::Init();
   mk9::snap::SetCapture([this](mk9::snap::Image& out) {

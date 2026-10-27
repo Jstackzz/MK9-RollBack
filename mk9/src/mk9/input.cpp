@@ -50,7 +50,7 @@ uint32_t UserIndex(uint32_t user_index, uint32_t flags) {
 bool Same(const Pad& a, const Pad& b) {
   return a.connected == b.connected && a.buttons == b.buttons && a.left_trigger == b.left_trigger &&
          a.right_trigger == b.right_trigger && a.lx == b.lx && a.ly == b.ly && a.rx == b.rx &&
-         a.ry == b.ry;
+         a.ry == b.ry && a.packet == b.packet;
 }
 
 Pad Current(uint32_t user) {
@@ -120,7 +120,7 @@ uint32_t Mk9XamInputGetState(rex::u32 user_index, rex::u32 flags,
       }
       packet = g_packet[user];
     }
-    input_state->packet_number = packet;
+    input_state->packet_number = pad.packet ? pad.packet : packet;
     input_state->gamepad.buttons = pad.buttons;
     input_state->gamepad.left_trigger = pad.left_trigger;
     input_state->gamepad.right_trigger = pad.right_trigger;

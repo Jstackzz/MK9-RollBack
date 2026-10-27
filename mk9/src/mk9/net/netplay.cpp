@@ -4,11 +4,18 @@
 //   1 HELLO  -                                  presence while connecting (and between matches)
 //   2 READY  u32 seed, u8 n, n x u32            "my match is about to be set up": the barrier ends
 //                                               when every slot's READY of this match arrived
-//   3 INPUT  u32 ack, u32 now, u32 first, u8 n, n x 8 bytes
+//   3 INPUT  u32 ack, u32 now, u32 seen, u32 first, u8 n, n x 8 bytes
 //            the sender's own inputs for frames first..first+n-1; ack: how many of the receiver's
-//            inputs the sender holds without a gap; now: the frame the sender runs
+//            inputs the sender holds without a gap; now: the frame the sender runs; seen: the
+//            frame the sender last heard the receiver run (for keeping rollback's sides even)
 //   4 CHECK  u32 frame, u32 hash                the sender's state hash at the top of that frame
 //   5 BYE    u32 frame                          the sender left the match
+//
+// Rollback (from match 2, while a round runs): a frame runs as soon as it is due, with a guess for
+// the inputs that have not come yet (the player's last one). Inputs that come in for frames that
+// ran on a wrong guess put the game back to the first of them (mk9/net/rollback.h), and the frames
+// since run again, unseen, within the same frame. Checks wait until every input before their
+// frame is known. Outside rounds (menus, loading, between rounds) the frames go in lockstep.
 
 #include "mk9/net/netplay.h"
 
@@ -29,9 +36,12 @@
 #include <thread>
 
 #include <rex/logging.h>
+#include <rex/ppc/context.h>
 
 #include "mk9/frame.h"
 #include "mk9/game.h"
+#include "mk9/net/rollback.h"
+#include "mk9/snap.h"
 #include "mk9/testinput.h"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -47,6 +57,9 @@ constexpr int kWindow = 24;               // inputs repeated in every INPUT pack
 constexpr int kMaxWords = 64;
 constexpr auto kPeerTimeout = std::chrono::seconds(10);
 constexpr auto kBarrierTimeout = std::chrono::seconds(60);
+// rollback: frames run ahead of the last input someone sent, at most (well within what rollback
+// keeps, rb::kKeepFrames)
+constexpr uint32_t kMaxPredict = 8;
 
 struct Wire {
   uint16_t buttons = 0;
@@ -90,11 +103,15 @@ struct PeerState {
   uint32_t contiguous = 0;          // their inputs held without a gap: [0, contiguous)
   uint32_t ack = 0;                 // how many of ours they hold without a gap
   uint32_t now = 0;                 // the frame they said they run
-  bool ready = false;               // their READY for the barrier now
+  uint16_t ready_match = 0;         // the match their last READY was for (they wait there or are past it)
   uint32_t seed = 0;
   std::vector<uint32_t> words;
+  uint32_t old_ack = 0, old_now = 0;  // they are still in the match before ours: what they need of us
   std::map<uint32_t, uint32_t> checks;
   bool left = false;
+  std::map<uint32_t, Wire> used;  // what each frame ran with for this player (theirs or a guess)
+  uint32_t confirmed = 0;         // frames below this ran with their real inputs
+  uint32_t heard = 0;             // the frame of ours they last heard of
 };
 
 struct Outgoing {
@@ -121,6 +138,9 @@ std::mt19937 g_rng{12345};
 Stats g_stats;
 FILE* g_log = nullptr;
 Clock::time_point g_last_hello{};
+bool g_rolling = false;                    // rollback armed: frames may run on guesses
+std::map<uint32_t, uint32_t> g_tentative;  // state hashes at frame tops, until every input before is known
+uint32_t g_paced_at = 0;                   // the last frame held back to let the others catch up
 
 int Delay() { return g_cfg.delay >= 0 ? g_cfg.delay : (g_cfg.rollback ? 1 : 2); }
 
@@ -192,6 +212,7 @@ void SendInputs(PeerState& p) {
   Writer w = Header(kInput);
   w.U32(p.contiguous);
   w.U32(g_frame);
+  w.U32(p.now);
   w.U32(first);
   w.U8(uint8_t(last - first + 1));
   for (uint32_t f = first; f <= last; f++) {
@@ -227,22 +248,31 @@ void Receive() {
       std::memcpy(&v, b + o, 4);
       return v;
     };
-    if (type == kReady && n >= 13 && match == g_match) {
-      p->ready = true;
+    if (type == kReady && n >= 13) {
+      // the barrier of this match, or the next one when they got there first (they then need nothing more
+      // of this match from us, and we play their part of it as neutral input until we get there too)
+      if (match != g_match && match != uint16_t(g_match + 1)) continue;
+      if (match == p->ready_match) continue;
+      p->ready_match = match;
       p->seed = u32(8);
       p->words.clear();
       for (int i = 0; i < b[12] && 13 + i * 4 + 4 <= n; i++) p->words.push_back(u32(13 + i * 4));
-    } else if (type == kInput && n >= 21) {
-      // a peer already in the match we are still meeting for: its READY was lost
-      if (g_status == Status::Barrier && match == uint16_t(g_match)) p->ready = p->ready || !p->words.empty();
+    } else if (type == kInput && n >= 25) {
+      if (match == uint16_t(g_match - 1)) {
+        // they are still in the match we left for the next barrier: our part of it is neutral from here on
+        p->old_ack = std::max(p->old_ack, u32(8));
+        p->old_now = std::max(p->old_now, u32(12));
+        continue;
+      }
       if (match != g_match) continue;
       p->ack = std::max(p->ack, u32(8));
       p->now = std::max(p->now, u32(12));
-      const uint32_t first = u32(16);
-      const int count = b[20];
-      for (int i = 0; i < count && 21 + i * 8 + 8 <= n; i++) {
+      p->heard = std::max(p->heard, u32(16));
+      const uint32_t first = u32(20);
+      const int count = b[24];
+      for (int i = 0; i < count && 25 + i * 8 + 8 <= n; i++) {
         Wire in;
-        std::memcpy(&in, b + 21 + i * 8, 8);
+        std::memcpy(&in, b + 25 + i * 8, 8);
         p->inputs.emplace(first + uint32_t(i), in);
       }
       while (p->inputs.count(p->contiguous)) p->contiguous++;
@@ -321,25 +351,38 @@ void ApplyPending() {
   }
 }
 
-void LogFrame() {
+// one line per frame run: its number ("r" in front when a rollback ran it again), every slot's
+// input, and its check when it has one (the last line of a frame is the one that counts)
+void LogFrame(bool again) {
   if (!g_log) return;
-  std::fprintf(g_log, "%u", g_frame);
+  std::fprintf(g_log, again ? "r%u" : "%u", g_frame);
   for (int s = 0; s < g_cfg.players; s++)
     std::fprintf(g_log, " %04X:%02X%02X:%02X%02X%02X%02X", g_now[s].buttons, g_now[s].lt, g_now[s].rt,
                  uint8_t(g_now[s].lx), uint8_t(g_now[s].ly), uint8_t(g_now[s].rx), uint8_t(g_now[s].ry));
   auto it = g_my_checks.find(g_frame);
-  if (it != g_my_checks.end()) std::fprintf(g_log, " check %08X", it->second);
+  auto t = g_tentative.find(g_frame);
+  if (it != g_my_checks.end() || t != g_tentative.end()) {
+    uint32_t timer, rand_state;
+    game::LastCheckDetail(timer, rand_state);
+    std::fprintf(g_log, " check %08X timer %u rand %08X", it != g_my_checks.end() ? it->second : t->second,
+                 timer, rand_state);
+  }
   std::fputc('\n', g_log);
 }
 
-// lockstep: every other player's input for frame f is here (false: they are gone)
+// every other player's inputs up to frame f are here (false: someone is gone)
 bool WaitForInputs(uint32_t f) {
   auto started = Clock::now();
   bool waited = false;
   for (;;) {
     bool all = true;
     for (PeerState& p : g_peers) {
-      if (p.inputs.count(f)) continue;
+      // waiting at the next barrier already: they play no more of this match
+      if (p.ready_match == uint16_t(g_match + 1)) {
+        while (p.contiguous <= f) p.inputs.emplace(p.contiguous++, Wire{});
+        while (p.inputs.count(p.contiguous)) p.contiguous++;
+      }
+      if (p.contiguous > f) continue;
       all = false;
       if (p.left || Clock::now() - p.last_heard > kPeerTimeout) {
         REXLOG_WARN("mk9 net: slot {} stopped answering at frame {}", p.slot, f);
@@ -382,11 +425,124 @@ void CompareChecks() {
   }
 }
 
+// the input a player's slot runs with at frame f: theirs when it is here, else a guess: the last one
+// they sent (buttons are held for many frames)
+Wire Guess(const PeerState& p, uint32_t f) {
+  auto it = p.inputs.find(f);
+  if (it != p.inputs.end()) return it->second;
+  auto last = p.contiguous ? p.inputs.find(p.contiguous - 1) : p.inputs.end();
+  return last != p.inputs.end() ? last->second : Wire{};
+}
+
+void SetFrameInputs(uint32_t f) {
+  g_now[g_cfg.slot] = g_mine[f];
+  for (PeerState& p : g_peers) {
+    const Wire w = Guess(p, f);
+    p.used[f] = w;
+    g_now[p.slot] = w;
+  }
+}
+
+// every 30 frames both sides compare what the game says its state is at the top of the frame; with
+// rollback the hash is sent once every input before the frame is known (and was used)
+void Tentative(uint32_t f, PPCContext& ctx, uint8_t* base) {
+  if (f % 30 == 0) g_tentative[f] = game::StateHash(ctx, base);
+}
+
+void SettleChecks() {
+  uint32_t settled = g_frame;
+  for (const PeerState& p : g_peers) settled = std::min(settled, p.confirmed);
+  while (!g_tentative.empty() && g_tentative.begin()->first <= settled) {
+    Check(g_tentative.begin()->first, g_tentative.begin()->second);
+    g_tentative.erase(g_tentative.begin());
+  }
+}
+
+bool StartRolling(PPCContext& ctx) {
+  if (!rb::Arm(ctx, g_frame)) return false;
+  g_rolling = true;
+  for (PeerState& p : g_peers) p.confirmed = g_frame;
+  REXLOG_INFO("mk9 net: rollback from frame {} of match {}", g_frame, g_match);
+  return true;
+}
+
+void StopRolling() {
+  if (!g_rolling) return;
+  rb::Disarm();
+  g_rolling = false;
+  REXLOG_INFO("mk9 net: lockstep from frame {} of match {} ({} rollbacks so far, longest {} frames)", g_frame,
+              g_match, g_stats.rollbacks, g_stats.max_rollback);
+}
+
+void Lost(Status s) {
+  StopRolling();
+  g_status = s;
+  input::SetSource(nullptr);
+}
+
+// Inputs that came in for frames that ran on a guess: when a guess was wrong, put the game back to
+// the top of that frame and run the frames since again with what is known now. False when the game
+// cannot go back that far (it then no longer runs what the others run).
+bool CorrectGuesses(PPCContext& ctx, uint8_t* base) {
+  uint32_t wrong = g_frame;
+  for (PeerState& p : g_peers) {
+    const uint32_t known = std::min(p.contiguous, g_frame);
+    for (uint32_t f = p.confirmed; f < known; f++) {
+      auto u = p.used.find(f);
+      if (u != p.used.end() && !(u->second == p.inputs[f])) {
+        wrong = std::min(wrong, f);
+        break;
+      }
+    }
+    p.confirmed = std::max(p.confirmed, known);
+  }
+  if (wrong >= g_frame) return true;
+  const uint32_t now = g_frame;
+  const PPCContext top = ctx;
+  if (!rb::Restore(wrong, ctx)) {
+    ctx = top;
+    REXLOG_ERROR("mk9 net: cannot go back to frame {} from {}", wrong, now);
+    return false;
+  }
+  game::RolledBack(wrong);
+  frame::SetCount(frame::Count() - (now - wrong));
+  for (uint32_t f = wrong; f < now; f++) {
+    g_frame = f;
+    SetFrameInputs(f);
+    ctx = top;  // the registers at the top of a frame are GuardedMain's loop's, the same every frame
+    rb::OpenFrame(f, ctx);
+    Tentative(f, ctx, base);
+    frame::RunAgain(ctx, base);  // its end hook moves g_frame on
+    rb::CloseFrame();
+  }
+  ctx = top;
+  g_frame = now;
+  g_stats.rollbacks++;
+  g_stats.max_rollback = std::max(g_stats.max_rollback, now - wrong);
+  return true;
+}
+
+// Keep the sides even: when this PC runs further ahead of the others than they run ahead of it, it
+// would do all the rolling back; hold a frame back now and then until it does not
+void Pace() {
+  int ahead = 0;
+  for (const PeerState& p : g_peers) {
+    const int mine = int(g_frame) - int(p.now);  // how far ahead of them we are, as we hear them
+    const int theirs = int(p.now) - int(p.heard);  // how far ahead of us they were, as they heard us
+    ahead = std::max(ahead, mine - theirs);       // twice the frames we are ahead by
+  }
+  if (ahead >= 3 && g_frame - g_paced_at >= 20) {
+    g_paced_at = g_frame;
+    std::this_thread::sleep_for(std::chrono::microseconds(16667));
+    Receive();
+  }
+}
+
 uint64_t g_meet_frame = 0;  // tests: meet at the top of this frame (counted from boot)
 
 void OnTop(PPCContext& ctx, uint8_t* base) {
   ApplyPending();
-  if (g_status == Status::Off) return;
+  if (g_status == Status::Off) return StopRolling();
   Receive();
   if (g_meet_frame && frame::Count() == g_meet_frame && g_status == Status::Connecting) {
     Agreement agreed;
@@ -394,6 +550,7 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
     if (g_status == Status::InSync) game::Agree(ctx, base, agreed);
   }
   if (g_status == Status::Connecting || (g_status != Status::InSync && g_status != Status::Barrier)) {
+    StopRolling();
     if (Clock::now() - g_last_hello > std::chrono::milliseconds(250)) {
       SendAll(Header(kHello));
       g_last_hello = Clock::now();
@@ -401,26 +558,60 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
     return;
   }
   if (g_status != Status::InSync) return;
+  if (g_rolling) {
+    rb::CloseFrame();  // the frame that just ran
+    if (!CorrectGuesses(ctx, base)) return Lost(Status::Desynced);
+    // the round is over: lockstep again once every frame so far ran with the real inputs
+    if (game::RoundTimer() == 0) {
+      if (g_frame && !WaitForInputs(g_frame - 1)) return Lost(Status::Disconnected);
+      if (!CorrectGuesses(ctx, base)) return Lost(Status::Desynced);
+      if (game::RoundTimer() == 0) StopRolling();
+    }
+  }
+  // The game reached a point where everyone must start alike (a fight, once it is loaded): meet again there,
+  // whatever number of frames each PC needed to get there, and start the frames anew
+  if (!g_rolling && game::SyncPoint()) {
+    Agreement agreed;
+    if (!Meet(game::ReadyWords(), 0x89ABCDEFu ^ uint32_t(g_match), agreed)) return;
+    game::Agree(ctx, base, agreed);
+  }
   // this frame's local input waits `delay` frames (a test's script for this slot stands in for the pad)
   input::Pad local;
   if (!testinput::ScriptedPad(uint32_t(g_cfg.slot), local)) local = input::ReadPhysical(0);
   g_mine[g_frame + uint32_t(Delay())] = Pack(local);
   for (PeerState& p : g_peers) SendInputs(p);
-  if (!WaitForInputs(g_frame)) {
-    g_status = Status::Disconnected;
-    input::SetSource(nullptr);
-    return;
+  if (g_rolling) {
+    // never further ahead of what anyone sent than kMaxPredict frames
+    if (g_frame >= kMaxPredict && !WaitForInputs(g_frame - kMaxPredict)) return Lost(Status::Disconnected);
+    if (!CorrectGuesses(ctx, base)) return Lost(Status::Desynced);
+    Pace();
+    rb::OpenFrame(g_frame, ctx);
+  } else if (!(g_cfg.rollback && g_match >= 2 && game::RoundTimer() != 0 && StartRolling(ctx))) {
+    if (!WaitForInputs(g_frame)) return Lost(Status::Disconnected);
+    for (PeerState& p : g_peers) p.confirmed = g_frame + 1;
   }
-  g_now[g_cfg.slot] = g_mine[g_frame];
-  for (PeerState& p : g_peers) g_now[p.slot] = p.inputs[g_frame];
-  // every 30 frames both sides compare what the game says its state is
-  if (g_frame % 30 == 0) Check(g_frame, game::StateHash(ctx, base));
+  SetFrameInputs(g_frame);
+  Tentative(g_frame, ctx, base);
+  SettleChecks();
   CompareChecks();
 }
 
+// tests: MK9_NET_SNAPS="2:600,2:1200" screenshots at frames of a match in sync (comparable across PCs)
+std::vector<std::pair<uint16_t, uint32_t>> g_sync_snaps;
+
 void OnEnd(PPCContext&, uint8_t*) {
   if (g_status != Status::InSync) return;
-  LogFrame();
+  if (frame::Replaying()) {  // a frame a rollback runs again: only its log line
+    LogFrame(true);
+    g_frame++;
+    return;
+  }
+  LogFrame(false);
+  for (const auto& s : g_sync_snaps)
+    if (s.first == g_match && s.second == g_frame) {
+      const std::string name = "sync-" + std::to_string(g_match) + "-" + std::to_string(g_frame);
+      std::thread([name] { snap::Snap(name); }).detach();
+    }
   g_stats.frames++;
   // forget what everyone holds and no longer needs
   const uint32_t keep = g_frame > 120 ? g_frame - 120 : 0;
@@ -429,7 +620,10 @@ void OnEnd(PPCContext&, uint8_t*) {
                  for (const PeerState& p : g_peers) m = std::min(m, p.ack);
                  return m;
                }())));
-  for (PeerState& p : g_peers) p.inputs.erase(p.inputs.begin(), p.inputs.lower_bound(keep));
+  for (PeerState& p : g_peers) {
+    p.inputs.erase(p.inputs.begin(), p.inputs.lower_bound(keep));
+    p.used.erase(p.used.begin(), p.used.lower_bound(keep));
+  }
   g_frame++;
 }
 
@@ -473,6 +667,16 @@ void InitFromEnvironment() {
   }
   st.loopback_only = std::getenv("MK9_NET_LOOPBACK") != nullptr;
   if (const char* v = std::getenv("MK9_NET_MEET_FRAME")) g_meet_frame = std::strtoull(v, nullptr, 10);
+  if (const char* v = std::getenv("MK9_NET_SNAPS")) {
+    std::stringstream ss(v);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+      auto colon = item.find(':');
+      if (colon == std::string::npos) continue;
+      g_sync_snaps.push_back({uint16_t(std::atoi(item.substr(0, colon).c_str())),
+                              uint32_t(std::strtoul(item.c_str() + colon + 1, nullptr, 10))});
+    }
+  }
   Configure(st);
 }
 
@@ -494,37 +698,65 @@ uint32_t Frame() { return g_frame; }
 bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agreed) {
   ApplyPending();
   if (g_status == Status::Off || g_sock == INVALID_SOCKET) return false;
+  StopRolling();
   g_match++;
   g_status = Status::Barrier;
   for (PeerState& p : g_peers) {
-    p.ready = false;
-    p.words.clear();
+    // a READY of this match that came first stays (ready_match, seed, words)
     p.inputs.clear();
+    p.used.clear();
     p.contiguous = 0;
+    p.confirmed = 0;
     p.ack = 0;
     p.now = 0;
+    p.heard = 0;
     p.checks.clear();
     p.left = false;
+    p.old_ack = p.old_now = 0;
     p.last_heard = Clock::now();
   }
   g_mine.clear();
   g_my_checks.clear();
+  g_tentative.clear();
+  g_paced_at = 0;
   Writer w = Header(kReady);
   w.U32(my_seed);
   const uint8_t n = uint8_t(std::min<size_t>(words.size(), kMaxWords));
   w.U8(n);
   for (uint8_t i = 0; i < n; i++) w.U32(words[i]);
-  REXLOG_INFO("mk9 net: meeting for match {} ({} words)", g_match, n);
+  REXLOG_INFO("mk9 net: meeting for match {} ({} words) at frame {}", g_match, n, frame::Count());
   const auto started = Clock::now();
   auto last_send = Clock::time_point{};
   for (;;) {
     if (Clock::now() - last_send > std::chrono::milliseconds(50)) {
       SendAll(w);
+      // a player still in the match we left plays our part of it as neutral input until it gets here
+      for (PeerState& p : g_peers) {
+        if (p.ready_match == g_match || !p.old_now) continue;
+        Writer in;
+        in.U32(kMagic);
+        in.U8(kInput);
+        in.U8(uint8_t(g_cfg.slot));
+        in.U16(uint16_t(g_match - 1));
+        in.U32(0);
+        in.U32(0);
+        in.U32(0);
+        const uint32_t first = p.old_ack;
+        const uint32_t last = std::max(p.old_now + uint32_t(Delay()) + 8, first);
+        const uint8_t count = uint8_t(std::min<uint32_t>(last - first + 1, 120));
+        in.U32(first);
+        in.U8(count);
+        for (uint8_t i = 0; i < count; i++) {
+          Wire none;
+          in.Bytes(&none, sizeof none);
+        }
+        Send(p, in);
+      }
       last_send = Clock::now();
     }
     Receive();
     bool all = true;
-    for (const PeerState& p : g_peers) all = all && p.ready;
+    for (const PeerState& p : g_peers) all = all && p.ready_match == g_match;
     if (all) break;
     if (Clock::now() - started > kBarrierTimeout) {
       REXLOG_WARN("mk9 net: nobody met at match {}", g_match);
@@ -561,6 +793,8 @@ bool FrameInput(uint32_t user, input::Pad& out) {
     return true;
   }
   out = Unpack(g_now[user]);
+  // a new packet every frame, numbered by the frame: the same when a rollback runs it again
+  out.packet = (uint32_t(g_match) << 24) + g_frame + 1;
   return true;
 }
 

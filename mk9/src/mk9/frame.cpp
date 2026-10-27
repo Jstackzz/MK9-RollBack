@@ -19,6 +19,9 @@ uint64_t Switches();
 #include <windows.h>
 #endif
 
+// FEngineLoop::Tick, called once per frame from GuardedMain's loop (0x823668E8)
+REX_EXTERN(__imp__sub_823621F8);
+
 namespace mk9::frame {
 namespace {
 
@@ -26,6 +29,7 @@ std::atomic<uint64_t> g_frames{0};
 std::atomic<uint32_t> g_main_tid{0};
 Hook g_top = nullptr;
 Hook g_end = nullptr;
+std::atomic<bool> g_replaying{false};
 
 uint32_t CurrentTid() {
 #if defined(_WIN32)
@@ -38,15 +42,23 @@ uint32_t CurrentTid() {
 }  // namespace
 
 uint64_t Count() { return g_frames.load(std::memory_order_relaxed); }
+void SetCount(uint64_t n) { g_frames.store(n, std::memory_order_relaxed); }
 uint32_t MainThreadId() { return g_main_tid.load(std::memory_order_relaxed); }
 bool OnMainThread() { return CurrentTid() == MainThreadId(); }
 void SetTopHook(Hook hook) { g_top = hook; }
 void SetEndHook(Hook hook) { g_end = hook; }
+bool Replaying() { return g_replaying.load(std::memory_order_relaxed); }
+
+void RunAgain(PPCContext& ctx, uint8_t* base) {
+  g_replaying.store(true, std::memory_order_relaxed);
+  __imp__sub_823621F8(ctx, base);
+  g_frames.fetch_add(1, std::memory_order_relaxed);
+  if (g_end) g_end(ctx, base);
+  g_replaying.store(false, std::memory_order_relaxed);
+}
 
 }  // namespace mk9::frame
 
-// FEngineLoop::Tick, called once per frame from GuardedMain's loop (0x823668E8).
-REX_EXTERN(__imp__sub_823621F8);
 REX_HOOK_RAW(sub_823621F8) {
   using namespace mk9::frame;
   if (g_main_tid.load(std::memory_order_relaxed) == 0) {

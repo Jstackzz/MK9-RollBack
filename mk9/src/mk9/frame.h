@@ -23,4 +23,11 @@ using Hook = void (*)(PPCContext& ctx, uint8_t* base);
 void SetTopHook(Hook hook);
 void SetEndHook(Hook hook);
 
+// Rollback: from the top hook, after putting the game back to an earlier frame (and the count
+// with SetCount), run one frame again: the engine's tick and the end hook, no top hook. Frames
+// run this way are unseen catch-up work.
+void RunAgain(PPCContext& ctx, uint8_t* base);
+void SetCount(uint64_t n);
+bool Replaying();
+
 }  // namespace mk9::frame

@@ -81,6 +81,29 @@ python -I tools\netcmp.py a\net.log b\net.log                  # frame logs of t
 python -I tools\randcmp.py a\rand.txt b\rand.txt               # MK9_TRACE_RAND random draw traces
 ```
 
+## Rollback: where it stands
+
+`net/rollback.cpp` snapshots guest memory copy-on-write per frame (pages write-protected at the
+top of each frame; the first write copies the page into that frame's undo log) and
+`net/synctest.cpp` checks that a frame run again writes what it wrote the first time. On MK9 the
+first restore crashes the game. What was found (`tools/synctest.ps1`, `MK9_RB_TRACE_FOREIGN=1`):
+
+1. The rendering thread runs the main thread's render commands up to a frame later; a restore
+   under it made it read stale commands. Fixed: the frame top waits for it to drain
+   (`engine::WaitRenderIdle`), and the command ring and the D3D device are never put back.
+2. The general heap mixes objects of every thread on the same pages. A page another thread
+   wrote first in a frame is "foreign" (never logged), yet the main and rendering threads keep
+   writing their own objects on such pages (traced in dozens of functions: allocator internals
+   around `0x82A4F700`, game code, FMOD's event system on the main thread). Those writes are not
+   undone, so a restore leaves freed or half-updated objects behind (null and garbage pointers).
+3. `-ONETHREAD` rendering (no rendering thread) crashes at boot: other threads queue render work.
+
+What a working rollback needs, in order: the fight's allocations from a heap of their own that
+only the simulation threads touch (MK9's MK MemoryManager, `sub_829AFB28` and its pools, routes
+by thread), FMOD's memory left alone and its event starts muted while frames run again, and the
+rendering thread's memory restored with the rest (it is idle at frame tops). Until then,
+lockstep is the netcode to use.
+
 ## Known gaps
 
 - Rollback restores crash (see above); lockstep is what works.

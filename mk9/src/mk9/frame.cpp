@@ -1,7 +1,13 @@
 // The frame boundary, see frame.h.
 
 #include "mk9/frame.h"
+#include "mk9/diag.h"
+#include "mk9/game.h"
 #include "mk9/snap.h"
+
+namespace mk9::fibers {
+uint64_t Switches();
+}
 
 #include <atomic>
 #include <chrono>
@@ -52,6 +58,7 @@ REX_HOOK_RAW(sub_823621F8) {
   const uint64_t n = g_frames.fetch_add(1, std::memory_order_relaxed) + 1;
   if (g_end) g_end(ctx, base);
   mk9::snap::OnFrame(n);
+  mk9::diag::OnFrame(n);
 
   // the frame rate, every ten seconds of frames
   static auto since = std::chrono::steady_clock::now();
@@ -59,7 +66,8 @@ REX_HOOK_RAW(sub_823621F8) {
   if (n - since_frames >= 600) {
     auto now = std::chrono::steady_clock::now();
     double s = std::chrono::duration<double>(now - since).count();
-    REXLOG_INFO("mk9: frame {}: {:.1f} frames/s", n, double(n - since_frames) / s);
+    REXLOG_INFO("mk9: frame {}: {:.1f} frames/s, timer {}, {} fiber switches", n,
+                double(n - since_frames) / s, mk9::game::RoundTimer(), mk9::fibers::Switches());
     since = now;
     since_frames = n;
   }

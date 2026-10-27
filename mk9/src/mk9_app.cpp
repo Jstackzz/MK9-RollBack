@@ -13,6 +13,8 @@
 #include <rex/ui/window.h>
 
 #include "mk9/controls.h"
+#include "mk9/diag.h"
+#include "mk9/net/netplay.h"
 #include "mk9/snap.h"
 #include "mk9/testinput.h"
 
@@ -70,6 +72,8 @@ void Mk9App::OnPostSetup() {
   REXLOG_INFO("mk9: game data {}, saves {}", game_data_root().string(), user_data_root().string());
   mk9::controls::Poll();
   mk9::testinput::Init();
+  mk9::net::InitFromEnvironment();
+  mk9::diag::Init();
   mk9::snap::Init();
   mk9::snap::SetCapture([this](mk9::snap::Image& out) {
     auto* presenter = WindowPresenter::Of(window());

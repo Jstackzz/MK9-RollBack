@@ -17,6 +17,7 @@
 #include <rex/system/xtypes.h>
 
 #include "mk9/controls.h"
+#include "mk9/frame.h"
 
 namespace mk9::input {
 namespace {
@@ -102,7 +103,11 @@ uint32_t Mk9XamInputGetState(rex::u32 user_index, rex::u32 flags,
   if ((flags & 0xFF) && (flags & kFlagGamepad) == 0) return kErrorDeviceNotConnected;
   const uint32_t user = UserIndex(user_index, flags);
   if (user >= 4) return kErrorDeviceNotConnected;
-  g_polls[user].fetch_add(1, std::memory_order_relaxed);
+  if (g_polls[user].fetch_add(1, std::memory_order_relaxed) == 0) {
+    // netplay needs the pads read by the game's main thread, inside the frame
+    REXLOG_INFO("mk9: user {} first polled on the {} thread (frame {})", user,
+                mk9::frame::OnMainThread() ? "main" : "another", mk9::frame::Count());
+  }
   const Pad pad = Current(user);
   if (!pad.connected) return kErrorDeviceNotConnected;
   if (input_state) {

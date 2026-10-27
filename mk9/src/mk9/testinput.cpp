@@ -27,6 +27,7 @@ struct Step {
 std::array<std::vector<Step>, 4> g_script;
 std::array<bool, 4> g_scripted{};
 int g_pads = 0;
+bool g_no_physical = false;
 bool g_active = false;
 
 bool ParseButtons(const std::string& s, Pad& pad) {
@@ -91,22 +92,29 @@ bool ParseScript(const char* text, std::vector<Step>& out) {
   return true;
 }
 
+Pad ScriptAt(uint32_t user, uint64_t now) {
+  Pad pad{};
+  pad.connected = true;
+  for (const Step& s : g_script[user]) {
+    if (s.frame > now) break;
+    pad = s.pad;
+  }
+  return pad;
+}
+
 bool Source(uint32_t user, Pad& out) {
   if (user >= 4) return false;
   if (g_scripted[user]) {
-    const uint64_t now = frame::Count();
-    Pad pad{};
-    pad.connected = true;
-    for (const Step& s : g_script[user]) {
-      if (s.frame > now) break;
-      pad = s.pad;
-    }
-    out = pad;
+    out = ScriptAt(user, frame::Count());
     return true;
   }
   if (int(user) < g_pads) {
-    out = input::ReadPhysical(user);
+    out = g_no_physical ? Pad{} : input::ReadPhysical(user);
     out.connected = true;
+    return true;
+  }
+  if (g_no_physical) {
+    out = Pad{};
     return true;
   }
   return false;
@@ -133,9 +141,19 @@ void Init() {
     g_pads = std::atoi(p);
     g_active = true;
   }
+  if (const char* p = std::getenv("MK9_NO_PHYSICAL"); p && *p == '1') {
+    g_no_physical = true;
+    g_active = true;
+  }
   if (g_active) input::SetSource(&Source);
 }
 
 bool Active() { return g_active; }
+
+bool ScriptedPad(uint32_t user, Pad& out) {
+  if (user >= 4 || !g_scripted[user]) return false;
+  out = ScriptAt(user, frame::Count());
+  return true;
+}
 
 }  // namespace mk9::testinput

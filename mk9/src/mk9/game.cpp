@@ -28,12 +28,12 @@ constexpr uint32_t kGameRand = 0x834161D8;
 uint32_t g_last_rand = 0, g_last_timer = 0;
 uint32_t g_agreed_seed = 0;  // the last barrier's
 
-// Outside fights a draw must not depend on when it happens: loading takes longer on one PC than
-// another, and what draws every frame (sub_82382E40) then draws more often on one before, say,
-// the arena variant is picked. So there each call site draws from a stream of its own: the agreed
-// seed, the site, and how many times it drew since the barrier. Fights draw from the game's one
-// generator (every frame of a fight runs the same everywhere). The journal lets a rollback take
-// back the counts of the frames it puts back.
+// A draw must not depend on when it happens: loading takes longer on one PC than another, and
+// what draws every frame (sub_82382E40) then draws more often on one before, say, the arena
+// variant is picked; in a fight Test Your Luck's screens draw a frame earlier or later from one PC
+// to the next. So in a match each call site draws from a stream of its own: the agreed seed, the
+// site, and how many times it drew since the barrier. The journal lets a rollback take back the
+// counts of the frames it puts back.
 std::unordered_map<uint64_t, uint32_t> g_site_draws;
 struct SiteDraw {
   uint32_t frame;
@@ -125,7 +125,7 @@ uint64_t DrawSite(const PPCContext& ctx) {
 }
 
 void BeforeDraw(PPCContext& ctx) {
-  if (!net::InSync() || Phase() == kPhaseFight || !frame::OnMainThread()) return;
+  if (!net::InSync() || !frame::OnMainThread()) return;
   const uint64_t site = DrawSite(ctx);
   const uint32_t n = g_site_draws[site]++;
   g_site_journal.push_back({net::Frame(), site});
@@ -170,7 +170,9 @@ uint32_t StateHash(PPCContext& ctx, uint8_t* base) {
   (void)ctx, (void)base;
   g_last_rand = GameRandState();
   g_last_timer = ReadU32(kRoundTimer);
-  uint32_t v[1] = {g_last_timer};
+  // with the round and the rounds each player won: a fight that went differently (a different
+  // winner, a round more) shows at the next check. Not the phase: loading ends on its own time
+  uint32_t v[4] = {g_last_timer, uint32_t(Round()), uint32_t(RoundsWon(0)), uint32_t(RoundsWon(1))};
   return Fnv(reinterpret_cast<const uint8_t*>(v), sizeof v);
 }
 
@@ -196,15 +198,15 @@ REX_HOOK_RAW(sub_826D3088) {
 }
 
 REX_HOOK_RAW(sub_826D91C0) {
-  const uint32_t caller = uint32_t(ctx.lr);
+  const uint64_t site = mk9::game::DrawSite(ctx);
   mk9::game::BeforeDraw(ctx);
   __imp__sub_826D91C0(ctx, base);
-  mk9::randtrace::Log('G', caller, mk9::game::GameRandState());
+  mk9::randtrace::Log('G', uint32_t(site >> 32), mk9::game::GameRandState(), uint32_t(site));
 }
 
 REX_HOOK_RAW(sub_826D91E8) {
-  const uint32_t caller = uint32_t(ctx.lr);
+  const uint64_t site = mk9::game::DrawSite(ctx);
   mk9::game::BeforeDraw(ctx);
   __imp__sub_826D91E8(ctx, base);
-  mk9::randtrace::Log('F', caller, mk9::game::GameRandState());
+  mk9::randtrace::Log('F', uint32_t(site >> 32), mk9::game::GameRandState(), uint32_t(site));
 }

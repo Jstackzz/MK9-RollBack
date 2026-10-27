@@ -5,11 +5,12 @@
 # checked, -Rematch plays a second match from the CONTINUE? menu, and -Park sends both back to the
 # hold point at the end. For testing the game's side of the launcher link without the launcher.
 #   . tools\link-local.ps1; Start-LinkLocal -Out <folder> [-Mode versus|tag|tyl] [-Netcode lockstep]
-#     [-Picks cursor] [-Snaps "match:frame,..."] [-Spectator] [-Attack] [-Rematch] [-Park]
+#     [-Picks cursor] [-Snaps "match:frame,..."] [-Spectator] [-Attack] [-Rematch] [-Park] [-TraceRand]
 function Start-LinkLocal {
     param([Parameter(Mandatory = $true)][string]$Out, [string]$Mode = "versus", [string]$Netcode = "lockstep",
           [int]$Delay = 2, [string]$Picks = "cursor", [string]$Snaps = "2:300", [int]$TimeoutS = 240,
-          [switch]$Spectator, [switch]$Attack, [switch]$Rematch, [switch]$Park, [string]$Extra = "")
+          [switch]$Spectator, [switch]$Attack, [switch]$Rematch, [switch]$Park, [switch]$TraceRand,
+          [string]$Extra = "")
     $root = Split-Path $PSScriptRoot -Parent
     if (-not $root) { $root = "C:\Users\Owner\source\repos\mk9-rollback" }
     $bin = Join-Path $root "mk9\out\build\win-amd64-release"
@@ -31,6 +32,7 @@ function Start-LinkLocal {
                    MK9_NET_LOG = (Join-Path $d "net-{match}.log"); MK9_NET_SNAPS = $Snaps;
                    MK9_SNAP_DIR = $d; MK9_SNAP_WIDTH = "480" }
         if ($Attack) { $envs["MK9_AUTOPILOT_ATTACK"] = "1" }
+        if ($TraceRand) { $envs["MK9_TRACE_RAND"] = (Join-Path $d "rand.txt") }
         foreach ($e in ($Extra -split ";")) { if ($e -match "^(\w+)=(.*)$") { $envs[$Matches[1]] = $Matches[2] } }
         foreach ($k in $envs.Keys) { Set-Item "Env:$k" $envs[$k] }
         $procs += Start-Process -FilePath (Join-Path $bin "mk9.exe") -WorkingDirectory $bin -PassThru -ArgumentList `
@@ -51,7 +53,8 @@ function Start-LinkLocal {
             if ($ok.Count -eq @($who).Count) { return $true }
             Start-Sleep -Milliseconds 250
         }
-        "timed out waiting for '$pattern': " + (($who | ForEach-Object { "$($_.dir)=$(Status $_)" }) -join ", ")
+        # Write-Host: anything written to the output would become part of the function's value
+        Write-Host ("timed out waiting for '$pattern': " + (($who | ForEach-Object { "$($_.dir)=$(Status $_)" }) -join ", "))
         return $false
     }
     if (-not (WaitAll "^ready$" $inst $TimeoutS)) { return }

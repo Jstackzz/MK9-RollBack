@@ -80,8 +80,11 @@ void WriteU32(uint32_t a, uint32_t value) {
 }
 
 int32_t RoundTimer() { return int32_t(ReadU32(kRoundTimer)); }
-int32_t Screen() { return int32_t(ReadU32(0x833CF0CC)); }
+int32_t Phase() { return int32_t(ReadU32(0x833C6C58)); }
+uint32_t UiScreen() { return ReadU32(0x833AEA80); }
 bool TitleUp() { return ReadU32(0x833C77B8) == 1; }
+int RoundsWon(int player) { return int(ReadU32(0x833C7A38 + 4 * uint32_t(player & 1))); }
+int Round() { return int(ReadU32(0x833CED28)); }
 
 std::vector<uint32_t> ReadyWords() { return {uint32_t(RoundTimer())}; }
 
@@ -122,7 +125,7 @@ uint64_t DrawSite(const PPCContext& ctx) {
 }
 
 void BeforeDraw(PPCContext& ctx) {
-  if (!net::InSync() || RoundTimer() != 0 || !frame::OnMainThread()) return;
+  if (!net::InSync() || Phase() == kPhaseFight || !frame::OnMainThread()) return;
   const uint64_t site = DrawSite(ctx);
   const uint32_t n = g_site_draws[site]++;
   g_site_journal.push_back({net::Frame(), site});
@@ -152,12 +155,12 @@ void Agree(PPCContext& ctx, uint8_t* base, const mk9::net::Agreement& agreed) {
 }
 
 bool SyncPoint() {
-  static int32_t last = 0;
-  const int32_t now = RoundTimer();
-  const bool fight_set_up = last == 0 && now != 0;
+  static int32_t last = -1;
+  const int32_t now = Phase();
+  const bool begins = now == kPhaseFight && last != kPhaseFight && last != -1;
   last = now;
-  if (fight_set_up) REXLOG_INFO("mk9 game: a fight was set up (round timer {})", now);
-  return fight_set_up;
+  if (begins) REXLOG_INFO("mk9 game: a fight begins (round timer {})", RoundTimer());
+  return begins;
 }
 
 uint32_t StateHash(PPCContext& ctx, uint8_t* base) {

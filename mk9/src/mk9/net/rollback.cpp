@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -17,6 +18,7 @@
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/thread_state.h>
 #include <rex/system/xmemory.h>
 
 #include "mk9/frame.h"
@@ -41,6 +43,16 @@ bool g_armed = false;
 bool g_restoring = false;
 DWORD g_main_tid = 0;
 std::vector<DWORD> g_sim_tids;  // other threads whose writes are the simulation's (the rendering thread)
+
+// MK9_RB_TRACE_FOREIGN=1 (diagnostics): pages another thread wrote first stay protected, and every
+// write a simulation thread makes to one of them is counted and the first ones logged with the
+// guest's last call: what a restore would miss
+const bool g_trace_foreign = [] {
+  const char* v = std::getenv("MK9_RB_TRACE_FOREIGN");
+  return v && *v == '1';
+}();
+std::vector<uint32_t> g_foreign_list;  // to protect again at each CloseFrame
+uint64_t g_foreign_hits = 0;
 
 bool SimThread(DWORD tid) {
   return tid == g_main_tid || std::find(g_sim_tids.begin(), g_sim_tids.end(), tid) != g_sim_tids.end();
@@ -133,6 +145,7 @@ void Take(uint32_t page) {
   } else {
     g_page[page >> 12] = kForeign;
     g_stats.foreign_pages++;
+    if (g_trace_foreign) g_foreign_list.push_back(page);
   }
   Protect(page, false);
 }
@@ -160,6 +173,14 @@ LONG CALLBACK OnFault(EXCEPTION_POINTERS* ep) {
   if (st == kClean) {
     Take(page);
   } else {
+    if (g_trace_foreign && st == kForeign && SimThread(GetCurrentThreadId())) {
+      if (g_foreign_hits++ < 60) {
+        uint32_t lr = 0;
+        if (auto* ts = rex::runtime::ThreadState::Get(); ts && ts->context()) lr = uint32_t(ts->context()->lr);
+        REXLOG_WARN("mk9 rollback: {} wrote {:08X} on a page another thread wrote first (guest lr {:08X})",
+                    GetCurrentThreadId() == g_main_tid ? "the main thread" : "a simulation thread", va, lr);
+      }
+    }
     Protect(page, false);
   }
   return EXCEPTION_CONTINUE_EXECUTION;
@@ -301,6 +322,8 @@ void CloseFrame() {
   g_stats.last_pages = uint32_t(f.pages.size());
   f.closed = true;
   ProtectDirty();
+  if (g_trace_foreign)
+    for (uint32_t p : g_foreign_list) Protect(p, true);
   while (g_frames.size() > size_t(kKeepFrames)) g_frames.pop_front();
   g_stats.close_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }

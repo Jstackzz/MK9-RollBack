@@ -27,11 +27,23 @@ void WriteU32(uint32_t guest_address, uint32_t value);
 
 // the round timer as the HUD shows it (0 outside fights)
 int32_t RoundTimer();
-// where the game is, an MKScript global at 0x833CF0CC: -1 booting or loading, 0 the title, 3 the
-// front end's menus, 10 the select screens (fighters, arena), 25 a fight
-int32_t Screen();
+// the game's phase (0x833C6C58): 2 boot and title, 3 the front end's menus, 7 the select screens
+// (fighters, arena), 1 the VS screen while the fight loads, 8 a fight (its intros and every round),
+// 11 the match is over (finisher, victory, the CONTINUE? menu)
+enum : int32_t {
+  kPhaseLoading = 1, kPhaseTitle = 2, kPhaseMenus = 3, kPhaseSelect = 7, kPhaseFight = 8, kPhaseOver = 11
+};
+int32_t Phase();
+// the front end's screen (0x833AEA80): 0x18C the title, 0x190-0x198 the main menu and its submenus,
+// 0x250-0x284 the select screens, 0x4C the VS screen, 2 a fight, 0x62 the CONTINUE? menu after a match
+uint32_t UiScreen();
+constexpr uint32_t kUiContinue = 0x62;
 // the title screen is up (0x833C77B8, 1 only there)
 bool TitleUp();
+// rounds won in the current fight by player 1 (0) or 2 (1) (0x833C7A38, 0x833C7A3C; final once the
+// CONTINUE? menu is up), and the round being fought (0x833CED28, from 1)
+int RoundsWon(int player);
+int Round();
 
 // what the barrier tells the other players (the match's settings this game would use)
 std::vector<uint32_t> ReadyWords();
@@ -55,7 +67,7 @@ uint32_t StateHash(PPCContext& ctx, uint8_t* base);
 void LastCheckDetail(uint32_t& timer, uint32_t& rand_state);
 
 // at the top of a frame in sync: true once when every PC must meet again before going on (a fight
-// has been set up: its round timer was given its first value)
+// begins: the phase turned to kPhaseFight)
 bool SyncPoint();
 
 }  // namespace mk9::game

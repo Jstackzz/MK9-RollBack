@@ -19,6 +19,10 @@
 //   MK9_NET_MODE=lockstep|rollback
 //   MK9_NET_LOG=<path>                   every frame's inputs and checks
 //   MK9_NET_LAG=<ms>, _JITTER=<ms>, _LOSS=<percent>   simulated network on what this game sends
+//   MK9_NET_FEED=<ip:port>               the launcher's spectator feed (TCP): a player's game writes
+//                                        its barriers, inputs and checks there; with
+//   MK9_NET_WATCH=1                      this game is a spectator: it reads every player from the
+//                                        feed and plays the match without a player of its own
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -44,6 +48,8 @@ struct Settings {
   bool loopback_only = false;
   std::string log;
   int lag_ms = 0, jitter_ms = 0, loss_percent = 0;
+  std::string feed;    // ip:port of the launcher's spectator feed, or empty
+  bool watch = false;  // a spectator (slot and peers unused: every player comes from the feed)
 };
 
 enum class Status { Off, Connecting, Barrier, InSync, Desynced, Disconnected };

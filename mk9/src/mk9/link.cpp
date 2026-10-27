@@ -6,11 +6,15 @@
 //   start mode=versus|tag|tyl|practice slot=0 players=2 local_port=7001 peers=1@1.2.3.4:7002[,...]
 //         delay=2 netcode=rollback|lockstep seed=N match=<id> [p1=..] [p2=..] [p3=..] [p4=..]
 //         (remote=ip:port with side=1|2 is taken for a two-player match too)
+//         [feed=127.0.0.1:port]  the launcher's spectator feed: this game writes its part there
+//   start mode=... watch=1 feed=127.0.0.1:port players=2 seed=N match=<id>
+//            a spectator: every player's inputs come from the feed, the game plays the match
 //            the players meet at the hold point (netplay's first barrier), then the autopilot of
 //            slot 0 takes both games through the menus to the mode's select screen, where each
 //            player picks with their own controller (or the autopilot picks a given fighter)
-//   park     back to the hold point
-//   rematch  the next match with the same settings (new seed and id when given)
+//   park     back to the hold point (from the CONTINUE? menu: QUIT TO THE MAIN MENU)
+//   rematch  from the CONTINUE? menu: REMATCH (the same fighters); with select=1 (or p1=- p2=-)
+//            SELECT A NEW FIGHTER (both pick again). New seed and id when given
 //   quit     exit
 //
 // status.txt: booting, ready, in_match match=<id>, result winner=N p1_rounds=.. p2_rounds=..
@@ -123,9 +127,10 @@ void Start(const Command& c) {
     if (pick == "-") pick.clear();
     plan.picks[i] = pick;
   }
+  const bool watch = Key(c, "watch") == "1";
   int slot = std::atoi(Key(c, "slot", "-1").c_str());
   if (slot < 0) slot = Key(c, "side", "1") == "2" ? 1 : 0;
-  plan.slot = slot;
+  plan.slot = watch ? -1 : slot;
   g_match = Key(c, "match", plan.mode == autopilot::Mode::Practice ? "practice" : "none");
 
   // the network: peers=<slot>@ip:port,... or remote=ip:port (the other side of a two-player match)
@@ -146,12 +151,18 @@ void Start(const Command& c) {
     st.peers.push_back({1 - slot, remote});
   }
   st.loopback_only = !st.peers.empty() && st.peers[0].address.rfind("127.", 0) == 0;
+  st.feed = Key(c, "feed");
+  st.watch = watch && !st.feed.empty();
+  if (watch && st.feed.empty()) {
+    WriteStatus("error watch needs feed");
+    return;
+  }
   if (const char* log = std::getenv("MK9_NET_LOG"); log && *log) {
     st.log = log;  // "{match}" becomes the match id, "{slot}" this player's slot
     if (size_t at = st.log.find("{match}"); at != std::string::npos) st.log.replace(at, 7, g_match);
     if (size_t at = st.log.find("{slot}"); at != std::string::npos) st.log.replace(at, 6, std::to_string(slot));
   }
-  g_online = plan.mode != autopilot::Mode::Practice && !st.peers.empty();
+  g_online = plan.mode != autopilot::Mode::Practice && (!st.peers.empty() || st.watch);
   if (g_online) {
     net::Configure(st);
     net::RequestMeet();  // at the hold point, every player's game at its next frame
@@ -163,9 +174,10 @@ void Start(const Command& c) {
   g_in_match = true;
   g_reported = false;
   autopilot::Begin(plan, g_online);
-  REXLOG_INFO("mk9 link: start {} slot {} of {}, match {}, {} {}", Key(c, "mode", "versus"), slot, st.players,
-              g_match, g_online ? (st.rollback ? "rollback" : "lockstep") : "offline",
-              g_online ? std::to_string(st.peers.size()) + " peers" : std::string());
+  REXLOG_INFO("mk9 link: start {} {} of {}, match {}, {} {}", Key(c, "mode", "versus"),
+              st.watch ? std::string("watching") : "slot " + std::to_string(slot), st.players, g_match,
+              g_online ? (st.rollback ? "rollback" : "lockstep") : "offline",
+              st.watch ? "feed " + st.feed : std::to_string(st.peers.size()) + " peers");
 }
 
 void Park() {
@@ -184,8 +196,11 @@ void Rematch(const Command& c) {
   if (std::string m = Key(c, "match"); !m.empty()) g_match = m;
   if (std::string seed = Key(c, "seed"); !seed.empty()) g_plan.seed = uint32_t(std::strtoul(seed.c_str(), nullptr, 10));
   g_reported = false;
-  autopilot::Rematch(g_plan);
-  REXLOG_INFO("mk9 link: rematch, match {}", g_match);
+  // select=1 (or the fighters given as "-"): both players pick again
+  const bool select = Key(c, "select") == "1" || Key(c, "p1") == "-" || Key(c, "p2") == "-";
+  if (select) autopilot::SelectAgain(g_plan);
+  else autopilot::Rematch(g_plan);
+  REXLOG_INFO("mk9 link: rematch{}, match {}", select ? " (new picks)" : "", g_match);
 }
 
 }  // namespace
@@ -229,6 +244,11 @@ void OnFrame(uint64_t frame) {
     return;
   }
   if (g_reported) return;
+  int winner = 0, p1 = 0, p2 = 0;
+  if (autopilot::MatchOver(winner, p1, p2)) {
+    ReportResult(winner, p1, p2);
+    return;
+  }
   if (g_online) {
     const net::Status s = net::GetStatus();
     if (s == net::Status::Desynced) {

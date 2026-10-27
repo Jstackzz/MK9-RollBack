@@ -11,6 +11,16 @@
 //   4 CHECK  u32 frame, u32 hash                the sender's state hash at the top of that frame
 //   5 BYE    u32 frame                          the sender left the match
 //
+// The spectator feed (TCP to the launcher on this PC, each packet after its u16 length; the header's
+// slot is the sender's): a player's game writes
+//   6 MEET   u32 seed, u8 n, n x u32            its READY at a barrier
+//   7 OWN    u32 first, u8 n, n x 8 bytes       its own inputs, frames first..first+n-1
+//   8 CHECK  u32 frame, u32 hash                its checks
+//   9 END    u32 frame                          it left the match
+// and a spectator's game reads every player's from it (the launcher sends a spectator everything
+// again when it connects again: duplicates are taken as they come) and plays the match in lockstep
+// with no player of its own.
+//
 // Rollback (from match 2, while a round runs): a frame runs as soon as it is due, with a guess for
 // the inputs that have not come yet (the player's last one). Inputs that come in for frames that
 // ran on a wrong guess put the game back to the first of them (mk9/net/rollback.h), and the frames
@@ -54,6 +64,7 @@ using Clock = std::chrono::steady_clock;
 
 constexpr uint32_t kMagic = 0x4E394B4D;  // "MK9N"
 enum : uint8_t { kHello = 1, kReady = 2, kInput = 3, kCheck = 4, kBye = 5 };
+enum : uint8_t { kFeedMeet = 6, kFeedOwn = 7, kFeedCheck = 8, kFeedEnd = 9 };
 constexpr int kWindow = 24;               // inputs repeated in every INPUT packet
 constexpr int kMaxWords = 64;
 constexpr auto kPeerTimeout = std::chrono::seconds(10);
@@ -224,8 +235,173 @@ void SendInputs(PeerState& p) {
   Send(p, w);
 }
 
+// what a spectator's feed brought for matches it has not reached yet (the feed sends each once)
+std::map<uint16_t, std::vector<std::string>> g_feed_later;
+
+void TakeInputs(PeerState* p, uint32_t first, int count, const uint8_t* at, int room) {
+  for (int i = 0; i < count && i * 8 + 8 <= room; i++) {
+    Wire in;
+    std::memcpy(&in, at + i * 8, 8);
+    p->inputs.emplace(first + uint32_t(i), in);
+  }
+  while (p->inputs.count(p->contiguous)) p->contiguous++;
+}
+
+// one packet from a peer (UDP) or, for a spectator, from the feed
+void HandlePacket(const uint8_t* b, int n) {
+  if (n < 8) return;
+  uint32_t magic;
+  std::memcpy(&magic, b, 4);
+  if (magic != kMagic) return;
+  const uint8_t type = b[4];
+  const int slot = b[5];
+  uint16_t match;
+  std::memcpy(&match, b + 6, 2);
+  PeerState* p = PeerBySlot(slot);
+  if (!p) return;
+  p->seen = true;
+  p->last_heard = Clock::now();
+  auto u32 = [&](int o) {
+    uint32_t v;
+    std::memcpy(&v, b + o, 4);
+    return v;
+  };
+  const bool feed_type = type >= kFeedMeet && type <= kFeedEnd;
+  // the feed sends each packet once: what is for a match this spectator has not reached waits
+  const bool later = feed_type && int16_t(match - g_match) > (type == kFeedMeet ? 1 : 0);
+  if (later) {
+    g_feed_later[match].emplace_back(reinterpret_cast<const char*>(b), size_t(n));
+    return;
+  }
+  if ((type == kReady || type == kFeedMeet) && n >= 13) {
+    // the barrier of this match, or the next one when they got there first (they then need nothing more
+    // of this match from us, and we play their part of it as neutral input until we get there too)
+    if (match != g_match && match != uint16_t(g_match + 1)) return;
+    if (match == p->ready_match) return;
+    p->ready_match = match;
+    p->seed = u32(8);
+    p->words.clear();
+    for (int i = 0; i < b[12] && 13 + i * 4 + 4 <= n; i++) p->words.push_back(u32(13 + i * 4));
+  } else if (type == kInput && n >= 25) {
+    if (match == uint16_t(g_match - 1)) {
+      // they are still in the match we left for the next barrier: our part of it is neutral from here on
+      p->old_ack = std::max(p->old_ack, u32(8));
+      p->old_now = std::max(p->old_now, u32(12));
+      return;
+    }
+    if (match != g_match) return;
+    p->ack = std::max(p->ack, u32(8));
+    p->now = std::max(p->now, u32(12));
+    p->heard = std::max(p->heard, u32(16));
+    TakeInputs(p, u32(20), b[24], b + 25, n - 25);
+  } else if (type == kFeedOwn && n >= 13 && match == g_match) {
+    TakeInputs(p, u32(8), b[12], b + 13, n - 13);
+  } else if ((type == kCheck || type == kFeedCheck) && n >= 16 && match == g_match) {
+    p->checks[u32(8)] = u32(12);
+  } else if ((type == kBye || type == kFeedEnd) && match == g_match) {
+    p->left = true;
+  }
+}
+
+// --- the spectator feed: a TCP connection to the launcher on this PC, each packet after its u16
+// length. A player's game writes to it, a spectator's reads every player's packets from it.
+SOCKET g_feed = INVALID_SOCKET;
+bool g_feed_connected = false;
+Clock::time_point g_feed_retry{};
+sockaddr_in g_feed_addr{};
+std::string g_feed_out, g_feed_in;
+constexpr size_t kFeedOutMax = size_t(4) << 20;  // what may wait for a launcher that does not read
+
+void FeedClose() {
+  if (g_feed != INVALID_SOCKET) closesocket(g_feed);
+  g_feed = INVALID_SOCKET;
+  g_feed_connected = false;
+  g_feed_in.clear();
+}
+
+void FeedPump() {
+  if (g_cfg.feed.empty()) return;
+  if (g_feed == INVALID_SOCKET) {
+    if (Clock::now() < g_feed_retry) return;
+    g_feed_retry = Clock::now() + std::chrono::milliseconds(500);
+    g_feed = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (g_feed == INVALID_SOCKET) return;
+    u_long nb = 1;
+    ioctlsocket(g_feed, FIONBIO, &nb);
+    BOOL nodelay = TRUE;
+    setsockopt(g_feed, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof nodelay);
+    if (connect(g_feed, reinterpret_cast<const sockaddr*>(&g_feed_addr), sizeof g_feed_addr) == 0) {
+      g_feed_connected = true;
+    } else if (WSAGetLastError() != WSAEWOULDBLOCK) {
+      FeedClose();
+      return;
+    }
+  }
+  if (!g_feed_connected) {
+    fd_set w, e;
+    FD_ZERO(&w);
+    FD_ZERO(&e);
+    FD_SET(g_feed, &w);
+    FD_SET(g_feed, &e);
+    timeval t{0, 0};
+    if (select(0, nullptr, &w, &e, &t) <= 0) return;
+    if (FD_ISSET(g_feed, &e) || !FD_ISSET(g_feed, &w)) {
+      FeedClose();
+      return;
+    }
+    g_feed_connected = true;
+    REXLOG_INFO("mk9 net: the spectator feed is connected");
+  }
+  while (!g_feed_out.empty()) {
+    const int n = send(g_feed, g_feed_out.data(), int(std::min<size_t>(g_feed_out.size(), 1 << 16)), 0);
+    if (n > 0) {
+      g_feed_out.erase(0, size_t(n));
+      continue;
+    }
+    if (WSAGetLastError() != WSAEWOULDBLOCK) FeedClose();
+    break;
+  }
+  if (!g_cfg.watch || g_feed == INVALID_SOCKET) return;
+  char buf[8192];
+  for (;;) {
+    const int n = recv(g_feed, buf, sizeof buf, 0);
+    if (n > 0) {
+      g_feed_in.append(buf, size_t(n));
+      continue;
+    }
+    if (n == 0 || WSAGetLastError() != WSAEWOULDBLOCK) FeedClose();
+    break;
+  }
+  size_t at = 0;
+  while (g_feed_in.size() - at >= 2) {
+    uint16_t len;
+    std::memcpy(&len, g_feed_in.data() + at, 2);
+    if (g_feed_in.size() - at - 2 < len) break;
+    HandlePacket(reinterpret_cast<const uint8_t*>(g_feed_in.data()) + at + 2, len);
+    at += 2 + size_t(len);
+  }
+  g_feed_in.erase(0, at);
+}
+
+void FeedSend(const Writer& w) {
+  if (g_cfg.feed.empty() || g_cfg.watch || g_feed_out.size() > kFeedOutMax) return;
+  const uint16_t len = uint16_t(w.n);
+  g_feed_out.append(reinterpret_cast<const char*>(&len), 2);
+  g_feed_out.append(reinterpret_cast<const char*>(w.b), size_t(w.n));
+}
+
+void FeedOwn(uint32_t frame, const Wire& in) {
+  if (g_cfg.feed.empty()) return;
+  Writer w = Header(kFeedOwn);
+  w.U32(frame);
+  w.U8(1);
+  w.Bytes(&in, sizeof in);
+  FeedSend(w);
+}
+
 void Receive() {
   Pump();
+  FeedPump();
   if (g_sock == INVALID_SOCKET) return;
   uint8_t b[1500];
   for (;;) {
@@ -233,55 +409,7 @@ void Receive() {
     int fl = sizeof from;
     int n = recvfrom(g_sock, reinterpret_cast<char*>(b), sizeof b, 0, reinterpret_cast<sockaddr*>(&from), &fl);
     if (n < 8) return;
-    uint32_t magic;
-    std::memcpy(&magic, b, 4);
-    if (magic != kMagic) continue;
-    const uint8_t type = b[4];
-    const int slot = b[5];
-    uint16_t match;
-    std::memcpy(&match, b + 6, 2);
-    PeerState* p = PeerBySlot(slot);
-    if (!p) continue;
-    p->seen = true;
-    p->last_heard = Clock::now();
-    auto u32 = [&](int o) {
-      uint32_t v;
-      std::memcpy(&v, b + o, 4);
-      return v;
-    };
-    if (type == kReady && n >= 13) {
-      // the barrier of this match, or the next one when they got there first (they then need nothing more
-      // of this match from us, and we play their part of it as neutral input until we get there too)
-      if (match != g_match && match != uint16_t(g_match + 1)) continue;
-      if (match == p->ready_match) continue;
-      p->ready_match = match;
-      p->seed = u32(8);
-      p->words.clear();
-      for (int i = 0; i < b[12] && 13 + i * 4 + 4 <= n; i++) p->words.push_back(u32(13 + i * 4));
-    } else if (type == kInput && n >= 25) {
-      if (match == uint16_t(g_match - 1)) {
-        // they are still in the match we left for the next barrier: our part of it is neutral from here on
-        p->old_ack = std::max(p->old_ack, u32(8));
-        p->old_now = std::max(p->old_now, u32(12));
-        continue;
-      }
-      if (match != g_match) continue;
-      p->ack = std::max(p->ack, u32(8));
-      p->now = std::max(p->now, u32(12));
-      p->heard = std::max(p->heard, u32(16));
-      const uint32_t first = u32(20);
-      const int count = b[24];
-      for (int i = 0; i < count && 25 + i * 8 + 8 <= n; i++) {
-        Wire in;
-        std::memcpy(&in, b + 25 + i * 8, 8);
-        p->inputs.emplace(first + uint32_t(i), in);
-      }
-      while (p->inputs.count(p->contiguous)) p->contiguous++;
-    } else if (type == kCheck && n >= 16 && match == g_match) {
-      p->checks[u32(8)] = u32(12);
-    } else if (type == kBye && match == g_match) {
-      p->left = true;
-    }
+    HandlePacket(b, n);
   }
 }
 
@@ -297,6 +425,31 @@ bool Open(const Settings& st) {
   }();
   if (!wsa) return false;
   CloseSocket();
+  FeedClose();
+  g_feed_out.clear();
+  g_feed_later.clear();
+  if (!st.feed.empty() && !ParseAddress(st.feed, g_feed_addr)) {
+    REXLOG_ERROR("mk9 net: bad spectator feed address {}", st.feed);
+    return false;
+  }
+  if (st.watch) {
+    // a spectator: no socket of its own, every player comes from the feed
+    if (st.feed.empty()) return false;
+    g_cfg = st;
+    g_peers.clear();
+    for (int slot = 0; slot < st.players; slot++) {
+      PeerState p;
+      p.slot = slot;
+      p.last_heard = Clock::now();
+      g_peers.push_back(p);
+    }
+    if (g_log) std::fclose(g_log);
+    g_log = st.log.empty() ? nullptr : std::fopen(st.log.c_str(), "w");
+    g_match = 0;
+    g_status = Status::Connecting;
+    REXLOG_INFO("mk9 net: watching {} players from the feed {}", st.players, st.feed);
+    return true;
+  }
   g_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (g_sock == INVALID_SOCKET) return false;
   u_long nb = 1;
@@ -340,9 +493,17 @@ void ApplyPending() {
     if (g_status != Status::Off) {
       Writer w = Header(kBye);
       w.U32(g_frame);
-      SendAll(w);
+      if (!g_cfg.watch) SendAll(w);
+      Writer end = Header(kFeedEnd);
+      end.U32(g_frame);
+      FeedSend(end);
+      for (int i = 0; i < 20 && !g_feed_out.empty() && g_feed != INVALID_SOCKET; i++) {
+        FeedPump();
+        Sleep(5);
+      }
     }
     CloseSocket();
+    FeedClose();
     g_status = Status::Off;
     input::SetSource(nullptr);
   }
@@ -396,7 +557,7 @@ bool WaitForInputs(uint32_t f) {
     }
     waited = true;
     // ask again: our latest inputs (theirs may wait on ours)
-    if (Clock::now() - started > std::chrono::milliseconds(8)) {
+    if (!g_cfg.watch && Clock::now() - started > std::chrono::milliseconds(8)) {
       for (PeerState& p : g_peers) SendInputs(p);
       g_stats.resent++;
       started = Clock::now();
@@ -436,7 +597,7 @@ Wire Guess(const PeerState& p, uint32_t f) {
 }
 
 void SetFrameInputs(uint32_t f) {
-  g_now[g_cfg.slot] = g_mine[f];
+  if (!g_cfg.watch) g_now[g_cfg.slot] = g_mine[f];
   for (PeerState& p : g_peers) {
     const Wire w = Guess(p, f);
     p.used[f] = w;
@@ -565,11 +726,11 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
   if (g_rolling) {
     rb::CloseFrame();  // the frame that just ran
     if (!CorrectGuesses(ctx, base)) return Lost(Status::Desynced);
-    // the round is over: lockstep again once every frame so far ran with the real inputs
-    if (game::RoundTimer() == 0) {
+    // the fight is over: lockstep again once every frame so far ran with the real inputs
+    if (game::Phase() != game::kPhaseFight) {
       if (g_frame && !WaitForInputs(g_frame - 1)) return Lost(Status::Disconnected);
       if (!CorrectGuesses(ctx, base)) return Lost(Status::Desynced);
-      if (game::RoundTimer() == 0) StopRolling();
+      if (game::Phase() != game::kPhaseFight) StopRolling();
     }
   }
   // The game reached a point where everyone must start alike (a fight, once it is loaded): meet again there,
@@ -580,18 +741,23 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
     game::Agree(ctx, base, agreed);
   }
   // this frame's local input waits `delay` frames (a test's script for this slot stands in for the pad)
-  input::Pad local;
-  if (!autopilot::LocalPad(local) && !testinput::ScriptedPad(uint32_t(g_cfg.slot), local))
-    local = input::ReadPhysical(0);
-  g_mine[g_frame + uint32_t(Delay())] = Pack(local);
-  for (PeerState& p : g_peers) SendInputs(p);
+  if (!g_cfg.watch) {
+    input::Pad local;
+    if (!autopilot::LocalPad(local) && !testinput::ScriptedPad(uint32_t(g_cfg.slot), local))
+      local = input::ReadPhysical(0);
+    const uint32_t at = g_frame + uint32_t(Delay());
+    g_mine[at] = Pack(local);
+    FeedOwn(at, g_mine[at]);
+    for (PeerState& p : g_peers) SendInputs(p);
+  }
   if (g_rolling) {
     // never further ahead of what anyone sent than kMaxPredict frames
     if (g_frame >= kMaxPredict && !WaitForInputs(g_frame - kMaxPredict)) return Lost(Status::Disconnected);
     if (!CorrectGuesses(ctx, base)) return Lost(Status::Desynced);
     Pace();
     rb::OpenFrame(g_frame, ctx);
-  } else if (!(g_cfg.rollback && g_match >= 2 && game::RoundTimer() != 0 && StartRolling(ctx))) {
+  } else if (!(g_cfg.rollback && !g_cfg.watch && g_match >= 2 && game::Phase() == game::kPhaseFight &&
+               StartRolling(ctx))) {
     if (!WaitForInputs(g_frame)) return Lost(Status::Disconnected);
     for (PeerState& p : g_peers) p.confirmed = g_frame + 1;
   }
@@ -681,6 +847,8 @@ void InitFromEnvironment() {
     }
   }
   st.loopback_only = std::getenv("MK9_NET_LOOPBACK") != nullptr;
+  if (const char* v = std::getenv("MK9_NET_FEED")) st.feed = v;
+  st.watch = std::getenv("MK9_NET_WATCH") != nullptr && !st.feed.empty();
   if (const char* v = std::getenv("MK9_NET_MEET_FRAME")) g_meet_frame = std::strtoull(v, nullptr, 10);
   Configure(st);
 }
@@ -704,7 +872,7 @@ uint32_t Frame() { return g_frame; }
 
 bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agreed) {
   ApplyPending();
-  if (g_status == Status::Off || g_sock == INVALID_SOCKET) return false;
+  if (g_status == Status::Off || (g_sock == INVALID_SOCKET && !g_cfg.watch)) return false;
   StopRolling();
   g_match++;
   g_status = Status::Barrier;
@@ -732,10 +900,31 @@ bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agree
   w.U8(n);
   for (uint8_t i = 0; i < n; i++) w.U32(words[i]);
   REXLOG_INFO("mk9 net: meeting for match {} ({} words) at frame {}", g_match, n, frame::Count());
+  {
+    Writer meet = Header(kFeedMeet);
+    meet.U32(my_seed);
+    meet.U8(n);
+    for (uint8_t i = 0; i < n; i++) meet.U32(words[i]);
+    FeedSend(meet);
+  }
+  // what the feed brought for this match before this spectator got here
+  if (auto later = g_feed_later.find(g_match); later != g_feed_later.end()) {
+    std::vector<std::string> packets = std::move(later->second);
+    g_feed_later.erase(later);
+    for (const std::string& pk : packets) HandlePacket(reinterpret_cast<const uint8_t*>(pk.data()), int(pk.size()));
+  }
+  if (auto later = g_feed_later.find(uint16_t(g_match + 1)); later != g_feed_later.end()) {
+    std::vector<std::string> packets;
+    for (auto& pk : later->second) {
+      if (pk.size() > 4 && uint8_t(pk[4]) == kFeedMeet) HandlePacket(reinterpret_cast<const uint8_t*>(pk.data()), int(pk.size()));
+      else packets.push_back(std::move(pk));
+    }
+    later->second = std::move(packets);
+  }
   const auto started = Clock::now();
   auto last_send = Clock::time_point{};
   for (;;) {
-    if (Clock::now() - last_send > std::chrono::milliseconds(50)) {
+    if (!g_cfg.watch && Clock::now() - last_send > std::chrono::milliseconds(50)) {
       SendAll(w);
       // a player still in the match we left plays our part of it as neutral input until it gets here
       for (PeerState& p : g_peers) {
@@ -773,17 +962,21 @@ bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agree
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   // a few more READYs so a peer that lost ours leaves the barrier too
-  for (int i = 0; i < 3; i++) SendAll(w);
+  if (!g_cfg.watch)
+    for (int i = 0; i < 3; i++) SendAll(w);
   agreed = Agreement{};
-  agreed.words[g_cfg.slot] = std::vector<uint32_t>(words.begin(), words.begin() + n);
-  agreed.seed = g_cfg.slot == 0 ? my_seed : 0;
+  if (!g_cfg.watch) agreed.words[g_cfg.slot] = std::vector<uint32_t>(words.begin(), words.begin() + n);
+  agreed.seed = g_cfg.slot == 0 && !g_cfg.watch ? my_seed : 0;
   for (const PeerState& p : g_peers) {
     agreed.words[p.slot] = p.words;
     if (p.slot == 0) agreed.seed = p.seed;
   }
   // the first `delay` frames run on neutral inputs for everyone
   g_frame = 0;
-  for (int f = 0; f < Delay(); f++) g_mine[uint32_t(f)] = Wire{};
+  for (int f = 0; f < Delay(); f++) {
+    g_mine[uint32_t(f)] = Wire{};
+    FeedOwn(uint32_t(f), Wire{});
+  }
   for (PeerState& p : g_peers)
     for (int f = 0; f < Delay(); f++) p.inputs[uint32_t(f)] = Wire{};
   for (PeerState& p : g_peers) p.contiguous = uint32_t(Delay());
@@ -811,7 +1004,11 @@ void Check(uint32_t frame, uint32_t hash) {
   Writer w = Header(kCheck);
   w.U32(frame);
   w.U32(hash);
-  SendAll(w);
+  if (!g_cfg.watch) SendAll(w);
+  Writer fc = Header(kFeedCheck);
+  fc.U32(frame);
+  fc.U32(hash);
+  FeedSend(fc);
 }
 
 Stats GetStats() { return g_stats; }

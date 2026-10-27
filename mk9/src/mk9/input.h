@@ -31,6 +31,10 @@ Pad ReadPhysical(uint32_t user);
 // controllers. Installed by netplay on the main thread at the top of a frame.
 using Source = bool (*)(uint32_t user, Pad& out);
 void SetSource(Source source);
+// asked first, before the source: the launcher's autopilot outside netplay (it presses for player
+// 1 and keeps everyone else's controller out of the menus it steers; in a match it answers nothing
+// and feeds its presses into netplay instead)
+void SetOverride(Source override_source);
 
 // how often the game polled each user this run (diagnostics)
 uint64_t Polls(uint32_t user);

@@ -40,6 +40,11 @@ std::mutex g_lock;
 bool g_armed = false;
 bool g_restoring = false;
 DWORD g_main_tid = 0;
+std::vector<DWORD> g_sim_tids;  // other threads whose writes are the simulation's (the rendering thread)
+
+bool SimThread(DWORD tid) {
+  return tid == g_main_tid || std::find(g_sim_tids.begin(), g_sim_tids.end(), tid) != g_sim_tids.end();
+}
 uint8_t* g_base = nullptr;
 PVOID g_veh = nullptr;
 std::vector<uint32_t> g_dirty;  // pages made writable since the last CloseFrame
@@ -114,7 +119,7 @@ void MarkVolatile(uint32_t va, uint32_t size) {
 // the first write of a page since it was protected; g_lock held
 void Take(uint32_t page) {
   g_stats.faults++;
-  const bool main = GetCurrentThreadId() == g_main_tid;
+  const bool main = SimThread(GetCurrentThreadId());
   if (main || g_shared[page >> 12]) {
     std::vector<uint32_t>& pages = g_frames.empty() || g_frames.back().closed ? g_pending_pages : g_frames.back().pages;
     std::vector<uint8_t>& data = g_frames.empty() || g_frames.back().closed ? g_pending_data : g_frames.back().data;
@@ -151,7 +156,7 @@ LONG CALLBACK OnFault(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
   // another thread writing a page the main thread uses: those bytes are that thread's from now on
-  if (GetCurrentThreadId() != g_main_tid && st != kForeign && st == kDirty) MarkVolatile(va & ~7u, 8);
+  if (!SimThread(GetCurrentThreadId()) && st != kForeign && st == kDirty) MarkVolatile(va & ~7u, 8);
   if (st == kClean) {
     Take(page);
   } else {
@@ -225,22 +230,23 @@ bool Arm(PPCContext& ctx, uint32_t frame) {
       }
       uint32_t end = uint32_t(std::min<uint64_t>(uint64_t(info.base_address) + info.region_size, s.hi));
       if ((info.state & 1) && (info.protect & rex::memory::kMemoryProtectWrite)) {
-        uint32_t run = 0, count = 0;
-        for (uint32_t p = std::max(addr, info.base_address) & ~(kPage - 1); p < end; p += kPage) {
+        // the host's view, one query per run of pages alike
+        uint32_t p = std::max(addr, info.base_address) & ~(kPage - 1);
+        while (p < end) {
           MEMORY_BASIC_INFORMATION mbi{};
-          const bool writable = VirtualQuery(g_base + p, &mbi, sizeof mbi) && mbi.State == MEM_COMMIT &&
-                                (mbi.Protect & PAGE_READWRITE) && !(mbi.Protect & PAGE_GUARD);
-          if (writable) {
-            if (!count) run = p;
-            count++;
-            g_page[p >> 12] = kClean;
-            g_stats.tracked_pages++;
-          } else if (count) {
-            ProtectRun(run, count, true);
-            count = 0;
+          if (!VirtualQuery(g_base + p, &mbi, sizeof mbi)) break;
+          const uint64_t region_end = uint64_t(reinterpret_cast<uint8_t*>(mbi.BaseAddress) - g_base) + mbi.RegionSize;
+          const uint32_t run_end = uint32_t(std::min<uint64_t>(region_end, end));
+          const bool writable =
+              mbi.State == MEM_COMMIT && (mbi.Protect & PAGE_READWRITE) && !(mbi.Protect & PAGE_GUARD);
+          if (writable && run_end > p) {
+            const uint32_t count = (run_end - p) / kPage;
+            std::fill(g_page.begin() + (p >> 12), g_page.begin() + (p >> 12) + count, uint8_t(kClean));
+            g_stats.tracked_pages += count;
+            ProtectRun(p, count, true);
           }
+          p = std::max(run_end, p + kPage);
         }
-        if (count) ProtectRun(run, count, true);
       }
       addr = std::max(end, addr + kPage);
     }
@@ -383,6 +389,11 @@ std::vector<uint32_t> LastFramePageList() {
 void AddVolatile(uint32_t va, uint32_t size) {
   std::lock_guard<std::mutex> lock(g_lock);
   MarkVolatile(va, size);
+}
+
+void AddSimulationThread(uint32_t host_tid) {
+  std::lock_guard<std::mutex> lock(g_lock);
+  if (!SimThread(host_tid)) g_sim_tids.push_back(host_tid);
 }
 
 Stats GetStats() { return g_stats; }

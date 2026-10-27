@@ -80,6 +80,8 @@ void WriteU32(uint32_t a, uint32_t value) {
 }
 
 int32_t RoundTimer() { return int32_t(ReadU32(kRoundTimer)); }
+int32_t Screen() { return int32_t(ReadU32(0x833CF0CC)); }
+bool TitleUp() { return ReadU32(0x833C77B8) == 1; }
 
 std::vector<uint32_t> ReadyWords() { return {uint32_t(RoundTimer())}; }
 

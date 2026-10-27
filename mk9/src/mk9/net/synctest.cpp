@@ -12,6 +12,7 @@
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
+#include "mk9/engine.h"
 #include "mk9/frame.h"
 #include "mk9/net/rollback.h"
 
@@ -33,10 +34,14 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
   if (n < g_from) return;
   if (n == g_from) {
     rb::SetHashing(true);
+    engine::WaitRenderIdle(100);
     rb::Arm(ctx, uint32_t(n));
+    engine::ExcludeFromRollback();
     return;
   }
   if (!rb::Armed()) return;
+  // the rendering thread done with what the frame queued: nothing of it runs while memory goes back
+  if (!engine::WaitRenderIdle(100)) REXLOG_WARN("mk9 synctest: the rendering thread is still busy at frame {}", n);
   rb::CloseFrame();
   g_hash[n - 1] = rb::LastFrameHash();
   g_pages[n - 1] = rb::LastFramePageList();
@@ -55,6 +60,7 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
         ctx = top;
         rb::OpenFrame(uint32_t(f), ctx);
         frame::RunAgain(ctx, base);
+        engine::WaitRenderIdle(100);
         rb::CloseFrame();
         const uint64_t again = rb::LastFrameHash();
         g_checked++;

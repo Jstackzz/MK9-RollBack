@@ -46,6 +46,9 @@ std::vector<uint32_t> LastFramePageList();
 
 // bytes another thread owns on pages that otherwise hold simulation state
 void AddVolatile(uint32_t va, uint32_t size);
+// a thread whose writes are part of the simulation like the main thread's (logged and put back):
+// one that only runs what the main thread hands it and is idle at the top of every frame
+void AddSimulationThread(uint32_t host_tid);
 
 struct Stats {
   uint64_t faults = 0, foreign_pages = 0, tracked_pages = 0, logged_bytes = 0;

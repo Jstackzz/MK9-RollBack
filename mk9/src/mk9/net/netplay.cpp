@@ -38,6 +38,7 @@
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
+#include "mk9/autopilot.h"
 #include "mk9/frame.h"
 #include "mk9/game.h"
 #include "mk9/net/rollback.h"
@@ -539,12 +540,15 @@ void Pace() {
 }
 
 uint64_t g_meet_frame = 0;  // tests: meet at the top of this frame (counted from boot)
+std::atomic<bool> g_meet_asked{false};  // the launcher's start
 
 void OnTop(PPCContext& ctx, uint8_t* base) {
   ApplyPending();
   if (g_status == Status::Off) return StopRolling();
   Receive();
-  if (g_meet_frame && frame::Count() == g_meet_frame && g_status == Status::Connecting) {
+  const bool meet_now = g_status == Status::Connecting &&
+                        ((g_meet_frame && frame::Count() == g_meet_frame) || g_meet_asked.exchange(false));
+  if (meet_now) {
     Agreement agreed;
     Meet(game::ReadyWords(), 0x1234567u + uint32_t(g_cfg.slot), agreed);
     if (g_status == Status::InSync) game::Agree(ctx, base, agreed);
@@ -577,7 +581,8 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
   }
   // this frame's local input waits `delay` frames (a test's script for this slot stands in for the pad)
   input::Pad local;
-  if (!testinput::ScriptedPad(uint32_t(g_cfg.slot), local)) local = input::ReadPhysical(0);
+  if (!autopilot::LocalPad(local) && !testinput::ScriptedPad(uint32_t(g_cfg.slot), local))
+    local = input::ReadPhysical(0);
   g_mine[g_frame + uint32_t(Delay())] = Pack(local);
   for (PeerState& p : g_peers) SendInputs(p);
   if (g_rolling) {
@@ -644,6 +649,16 @@ const char* StatusName(Status s) {
 void InitFromEnvironment() {
   frame::SetTopHook(&OnTop);
   frame::SetEndHook(&OnEnd);
+  if (const char* v = std::getenv("MK9_NET_SNAPS")) {
+    std::stringstream ss(v);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+      auto colon = item.find(':');
+      if (colon == std::string::npos) continue;
+      g_sync_snaps.push_back({uint16_t(std::atoi(item.substr(0, colon).c_str())),
+                              uint32_t(std::strtoul(item.c_str() + colon + 1, nullptr, 10))});
+    }
+  }
   const char* bind = std::getenv("MK9_NET_BIND");
   if (!bind || !*bind) return;
   Settings st;
@@ -667,16 +682,6 @@ void InitFromEnvironment() {
   }
   st.loopback_only = std::getenv("MK9_NET_LOOPBACK") != nullptr;
   if (const char* v = std::getenv("MK9_NET_MEET_FRAME")) g_meet_frame = std::strtoull(v, nullptr, 10);
-  if (const char* v = std::getenv("MK9_NET_SNAPS")) {
-    std::stringstream ss(v);
-    std::string item;
-    while (std::getline(ss, item, ',')) {
-      auto colon = item.find(':');
-      if (colon == std::string::npos) continue;
-      g_sync_snaps.push_back({uint16_t(std::atoi(item.substr(0, colon).c_str())),
-                              uint32_t(std::strtoul(item.c_str() + colon + 1, nullptr, 10))});
-    }
-  }
   Configure(st);
 }
 
@@ -690,6 +695,8 @@ void Disable() {
   std::lock_guard<std::mutex> lock(g_cfg_lock);
   g_pending_off = true;
 }
+
+void RequestMeet() { g_meet_asked = true; }
 
 Status GetStatus() { return g_status.load(); }
 bool InSync() { return g_status == Status::InSync; }

@@ -3,6 +3,7 @@
 #include "mk9/frame.h"
 #include "mk9/diag.h"
 #include "mk9/game.h"
+#include "mk9/link.h"
 #include "mk9/snap.h"
 
 namespace mk9::fibers {
@@ -71,6 +72,7 @@ REX_HOOK_RAW(sub_823621F8) {
   if (g_end) g_end(ctx, base);
   mk9::snap::OnFrame(n);
   mk9::diag::OnFrame(n);
+  mk9::link::OnFrame(n);
 
   // the frame rate, every ten seconds of frames
   static auto since = std::chrono::steady_clock::now();

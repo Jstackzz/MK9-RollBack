@@ -85,12 +85,24 @@ bool DumpMemory(const std::string& path) {
   if (!f) return false;
   auto* mem = REX_KERNEL_STATE()->memory();
   uint64_t total = 0;
+  // MK9_DIAG_DUMP_RANGE=0xLO-0xHI: only that part of the address space (the executable's data, say)
+  static const auto range = [] {
+    std::pair<uint64_t, uint64_t> r{0, 1ull << 32};
+    if (const char* v = std::getenv("MK9_DIAG_DUMP_RANGE"); v && *v) {
+      char* dash = nullptr;
+      r.first = std::strtoull(v, &dash, 0);
+      if (dash && *dash == '-') r.second = std::strtoull(dash + 1, nullptr, 0);
+    }
+    return r;
+  }();
   ForEachCommitted([&](const rex::memory::HeapAllocationInfo& info) {
     // each physical heap (0xA0000000 64 KB pages, 0xC0000000 16 MB, 0xE0000000 4 KB) holds its
     // own allocations: all of them are written; pages without read access (stack guards) not
     if (!(info.protect & rex::memory::kMemoryProtectRead)) return;
     // and only what the host can read (guard pages, regions committed in the guest's books only)
-    uint32_t a = info.base_address, end = info.base_address + info.region_size;
+    uint32_t a = uint32_t(std::max<uint64_t>(info.base_address, range.first));
+    uint32_t end = uint32_t(std::min<uint64_t>(uint64_t(info.base_address) + info.region_size, range.second));
+    if (uint64_t(a) >= uint64_t(info.base_address) + info.region_size || a >= end) return;
     while (a < end) {
       MEMORY_BASIC_INFORMATION mbi{};
       uint8_t* host = mem->TranslateVirtual<uint8_t*>(a);

@@ -27,6 +27,11 @@ void WriteU32(uint32_t guest_address, uint32_t value);
 
 // the round timer as the HUD shows it (0 outside fights)
 int32_t RoundTimer();
+// where the game is, an MKScript global at 0x833CF0CC: -1 booting or loading, 0 the title, 3 the
+// front end's menus, 10 the select screens (fighters, arena), 25 a fight
+int32_t Screen();
+// the title screen is up (0x833C77B8, 1 only there)
+bool TitleUp();
 
 // what the barrier tells the other players (the match's settings this game would use)
 std::vector<uint32_t> ReadyWords();

@@ -2,6 +2,7 @@
 # rollback sync test on from frame -From: every -Every frames the game goes back -Depth frames and
 # runs them again; each frame run again must write what it wrote the first time (mk9/net/synctest.cpp).
 #   . tools\synctest.ps1; Start-Synctest -Out <folder> [-Depth 4] [-From 6200] [-Every 10] [-Snaps "6300"]
+# -Depth 0 runs the same scripted match without the sync test (dumps, snapshots: -Extra "K=V;...").
 function Start-Synctest {
     param([Parameter(Mandatory = $true)][string]$Out, [int]$Depth = 4, [int]$From = 6200, [int]$Every = 10,
           [string]$Snaps = "", [string]$Extra = "")
@@ -17,6 +18,7 @@ function Start-Synctest {
     $envs = @{ MK9_NO_PHYSICAL = "1"; MK9_PADS = "2"; MK9_INPUT_P1 = "$nav,$atk"; MK9_INPUT_P2 = "3750:A,+8:-,4150:A,+8:-,4550:A,+8:-";
                MK9_SYNCTEST = "$Depth"; MK9_SYNCTEST_FROM = "$From"; MK9_SYNCTEST_EVERY = "$Every";
                MK9_SNAP_FRAMES = $Snaps; MK9_SNAP_DIR = $Out; MK9_SNAP_WIDTH = "480" }
+    if ($Depth -le 0) { $envs.Remove("MK9_SYNCTEST"); $envs.Remove("MK9_SYNCTEST_FROM"); $envs.Remove("MK9_SYNCTEST_EVERY") }
     foreach ($e in ($Extra -split ";")) { if ($e -match "^(\w+)=(.*)$") { $envs[$Matches[1]] = $Matches[2] } }
     foreach ($k in $envs.Keys) { Set-Item "Env:$k" $envs[$k] }
     $proc = Start-Process -FilePath (Join-Path $bin "mk9.exe") -WorkingDirectory $bin -PassThru -ArgumentList `

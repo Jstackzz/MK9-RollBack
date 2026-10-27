@@ -14,6 +14,7 @@
 
 #include "mk9/controls.h"
 #include "mk9/diag.h"
+#include "mk9/link.h"
 #include "mk9/net/netplay.h"
 #include "mk9/snap.h"
 
@@ -77,6 +78,7 @@ void Mk9App::OnPostSetup() {
   mk9::controls::Poll();
   mk9::testinput::Init();
   mk9::net::InitFromEnvironment();
+  mk9::link::Init();
   mk9::synctest::Init();  // a sync test takes the frame hooks over from netplay
   mk9::diag::Init();
   mk9::snap::Init();

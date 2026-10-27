@@ -29,6 +29,7 @@ constexpr uint32_t kErrorDeviceNotConnected = 0x48F;
 constexpr uint32_t kErrorBadArguments = 0xA0;
 
 std::atomic<Source> g_source{nullptr};
+std::atomic<Source> g_override{nullptr};
 std::array<std::atomic<uint64_t>, 4> g_polls{};
 
 // the packet number XInput reports changes whenever the state does
@@ -56,6 +57,8 @@ bool Same(const Pad& a, const Pad& b) {
 Pad Current(uint32_t user) {
   Pad pad;
   if (user >= 4) return pad;
+  Source over = g_override.load(std::memory_order_acquire);
+  if (over && over(user, pad)) return pad;
   Source source = g_source.load(std::memory_order_acquire);
   if (source && source(user, pad)) return pad;
   return ReadPhysical(user);
@@ -87,6 +90,7 @@ Pad ReadPhysical(uint32_t user) {
 }
 
 void SetSource(Source source) { g_source.store(source, std::memory_order_release); }
+void SetOverride(Source over) { g_override.store(over, std::memory_order_release); }
 
 uint64_t Polls(uint32_t user) { return user < 4 ? g_polls[user].load() : 0; }
 

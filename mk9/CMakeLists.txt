@@ -14,12 +14,15 @@ include(generated/rexglue.cmake)
 set(MK9_SOURCES
     src/main.cpp
     src/mk9_app.cpp
+    src/mk9/autopilot.cpp
     src/mk9/controls.cpp
     src/mk9/diag.cpp
+    src/mk9/engine.cpp
     src/mk9/fibers.cpp
     src/mk9/frame.cpp
     src/mk9/game.cpp
     src/mk9/input.cpp
+    src/mk9/link.cpp
     src/mk9/net/netplay.cpp
     src/mk9/net/rollback.cpp
     src/mk9/net/synctest.cpp

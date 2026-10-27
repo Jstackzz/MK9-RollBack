@@ -68,6 +68,8 @@ struct Agreement {
   std::vector<uint32_t> words[kMaxSlots];
 };
 bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agreed);
+// the launcher's start: meet the others at the top of a frame once connected (the hold point)
+void RequestMeet();
 
 // the frame's inputs for the game's pads: installed as mk9::input's source while in sync
 bool FrameInput(uint32_t user, input::Pad& out);

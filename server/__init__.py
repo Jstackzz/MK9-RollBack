@@ -4,4 +4,4 @@ One asyncio process, standard library only (sqlite3, ssl, hashlib). The wire pro
 specified in docs/PROTOCOL.md.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"  # 0.2.0: tunnels and crash reports

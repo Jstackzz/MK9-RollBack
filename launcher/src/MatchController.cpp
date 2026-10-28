@@ -8,6 +8,7 @@
 #include <QTimer>
 
 #include "AppPaths.h"
+#include "CrashReports.h"
 #include "FeedLink.h"
 #include "GameData.h"
 #include "GameProcess.h"
@@ -66,10 +67,20 @@ MatchController::MatchController(ServerClient* server, QObject* parent)
         }
     });
     connect(udp_, &UdpRendezvous::punchDone, this, &MatchController::onPunchDone);
+    connect(udp_, &UdpRendezvous::helloAcked, this, [this] {
+        udpAcked_ = true;
+        udpBlocked_ = false;
+    });
     connect(udp_, &UdpRendezvous::helloTimedOut, this, [this] {
-        if (phase_ == Phase::Found || phase_ == Phase::Connecting)
+        udpBlocked_ = true;
+        if ((phase_ == Phase::Found || phase_ == Phase::Connecting) && !tunnel_ && !server_->canTunnel())
             log(tr("The server did not answer on UDP; is UDP port %1 blocked by a firewall?").arg(cfg::gamePort()));
     });
+    // a tunnel's punches and pings go out through the server connection, and what comes back from it goes on
+    udp_->setTunnelSender([this](const QByteArray& datagram) { server_->sendTunnel({datagram}); });
+    connect(server_, &ServerClient::tunneled, this, &MatchController::onTunneled);
+    tunnelAsk_.setSingleShot(true);
+    connect(&tunnelAsk_, &QTimer::timeout, this, &MatchController::askForTunnel);
 
     parkTimer_.setSingleShot(true);
     connect(&parkTimer_, &QTimer::timeout, this, [this] {
@@ -141,6 +152,7 @@ MatchController::~MatchController() = default;
 
 void MatchController::log(const QString& text) {
     applog::write(QStringLiteral("match: ") + text);
+    CrashReports::instance().setActivity(text);
     emit logLine(text);
 }
 
@@ -248,6 +260,7 @@ bool MatchController::openUdp(QString* error) {
     // every interface, so a player across the internet reaches this one, even when the server runs on this PC
     const QHostAddress bind = cfg::udpLoopback() ? QHostAddress(QHostAddress::LocalHost)
                                                  : QHostAddress(QHostAddress::AnyIPv4);
+    udp_->setBlocked(cfg::get(QStringLiteral("dev/block_udp")).toBool());  // development: a network without UDP
     return udp_->open(static_cast<quint16>(cfg::gamePort()), bind, error);
 }
 
@@ -518,6 +531,9 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
         go_ = {};
         resultSent_ = false;
         closeFeed();
+        closeBridge();
+        tunnel_ = false;
+        udpAcked_ = false;
         QString err;
         // standby: the match's game waits for the accept, which sets single player aside
         const bool standby = solo_ && !soloFrozen_ && msg.value(QStringLiteral("accept_required")).toBool();
@@ -530,6 +546,8 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
         openUdpThen([this, msg, match] {
             udp_->startHello(server_->serverAddress(), server_->serverUdpPort(), server_->udpToken(), match,
                              lanEndpoint(), 10000);
+            // sooner when the hellos while searching went unanswered already
+            if (server_->canTunnel()) tunnelAsk_.start(udpBlocked_ ? 1000 : 3000);
             if (msg.value(QStringLiteral("accept_required")).toBool()) {
                 setPhase(Phase::Found, tr("Match found"));
                 emit matchFound(msg);
@@ -544,6 +562,15 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
         if (match != str(found_, "match")) return;
         found_.insert(QStringLiteral("opponent"), msg.value(QStringLiteral("opponent")));
         const int punchMs = msg.value(QStringLiteral("punch_timeout")).toInt(10) * 1000;
+        tunnel_ = msg.value(QStringLiteral("tunnel")).toBool();
+        if (tunnel_) {
+            // UDP gets nowhere from here: the opponent's packets come and go through the server connection
+            tunnelAsk_.stop();
+            setPhase(Phase::Connecting, tr("Connecting to %1 through the server connection (no UDP here)...")
+                                            .arg(opponentName()));
+            udp_->startTunnelPunch(match, str(msg, "key"), msg.value(QStringLiteral("side")).toInt(), punchMs);
+            return;
+        }
         if (msg.value(QStringLiteral("relay")).toBool()) {
             // no direct route between the two: the server passes the packets on, its UDP port is the opponent now
             setPhase(Phase::Connecting, tr("Connecting to %1 through the server...").arg(opponentName()));
@@ -563,8 +590,21 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
         }
         if (match != str(found_, "match")) return;
         go_ = msg;
+        tunnelAsk_.stop();
         releaseUdp();  // the game binds the same port right away
         openFeed(msg);
+        if (tunnel_) {
+            // the game's peer is on this PC: what it sends goes through the server connection
+            auto* bridge = new TunnelBridge(static_cast<quint16>(cfg::gamePort()), this);
+            QString err;
+            if (bridge->open(&err)) {
+                connect(bridge, &TunnelBridge::outgoing, server_, &ServerClient::sendTunnel);
+                bridge_ = bridge;
+            } else {
+                log(err);
+                delete bridge;
+            }
+        }
         pendingStart_ = startLine(go_);
         setPhase(Phase::Starting, tr("Starting the match against %1 (%2 ms, %3, delay %4%5)...")
                                       .arg(opponentName()).arg(msg.value(QStringLiteral("rtt_ms")).toInt())
@@ -582,6 +622,8 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
         const bool requeued = msg.value(QStringLiteral("requeued")).toBool();
         const QString reason = str(msg, "reason");
         found_ = {};
+        tunnelAsk_.stop();
+        tunnel_ = false;
         releaseUdp();
         emit matchCancelled(reason, requeued);
         if (requeued) {
@@ -803,12 +845,35 @@ void MatchController::stopWatching() {
     if (phase_ == Phase::Watching) endWatch(tr("Stopped watching"));
 }
 
+void MatchController::askForTunnel() {
+    if (udpAcked_ || tunnel_ || found_.isEmpty() || (phase_ != Phase::Found && phase_ != Phase::Connecting)) return;
+    server_->send({{QStringLiteral("type"), QStringLiteral("tunnel")}, {QStringLiteral("match"), str(found_, "match")}});
+    log(tr("The server does not answer over UDP (this network may block it): the match goes through the server "
+           "connection instead"));
+}
+
+void MatchController::onTunneled(const QList<QByteArray>& datagrams) {
+    for (const QByteArray& d : datagrams) {
+        if (bridge_) bridge_->toGame(d);
+        else udp_->deliverTunneled(d);
+    }
+}
+
+void MatchController::closeBridge() {
+    if (!bridge_) return;
+    log(tr("Through the server connection: %1 packets went out, %2 came in").arg(bridge_->sent()).arg(bridge_->received()));
+    bridge_->deleteLater();
+    bridge_ = nullptr;
+}
+
 void MatchController::onPunchDone(bool ok, int rtt, const QString& remote, const QString& via) {
     if (found_.isEmpty()) return;
+    // the attempt's key: a report the server gets after it moved on to another attempt is left aside there
     QJsonObject report{{QStringLiteral("type"), QStringLiteral("ping_report")},
                        {QStringLiteral("match"), str(found_, "match")},
                        {QStringLiteral("ok"), ok},
-                       {QStringLiteral("rtt_ms"), rtt}};
+                       {QStringLiteral("rtt_ms"), rtt},
+                       {QStringLiteral("key"), udp_->key()}};
     if (ok) {
         report.insert(QStringLiteral("remote"), remote);
         report.insert(QStringLiteral("via"), via);
@@ -828,7 +893,7 @@ QString MatchController::startLine(const QJsonObject& go) const {
         QStringLiteral("slot=%1").arg(slot),
         QStringLiteral("players=2"),
         QStringLiteral("local_port=%1").arg(cfg::gamePort()),
-        QStringLiteral("peers=%1@%2").arg(1 - slot).arg(str(go, "remote")),
+        QStringLiteral("peers=%1@%2").arg(1 - slot).arg(bridge_ ? bridge_->endpoint() : str(go, "remote")),
         QStringLiteral("delay=%1").arg(go.value(QStringLiteral("delay")).toInt()),
         QStringLiteral("netcode=") + netcodeOf(go),
         QStringLiteral("seed=%1").arg(go.value(QStringLiteral("seed")).toInteger()),
@@ -1012,6 +1077,12 @@ void MatchController::reportResult(QJsonObject fields) {
 void MatchController::finishMatch(const QString& status) {
     parkTimer_.stop();
     startTimeout_.stop();
+    if (bridge_) {  // the games' last packets of the match (their goodbyes) still go through it for a while
+        QPointer<TunnelBridge> bridge = bridge_;
+        QTimer::singleShot(20000, this, [this, bridge] {
+            if (bridge && bridge == bridge_) closeBridge();
+        });
+    }
     const bool fromLobby = go_.value(QStringLiteral("lobby")).isString();
     const bool keep = !fromLobby && status == QLatin1String("agreed") && game_ && game_->isRunning() &&
                       game_->state() == QLatin1String("result");
@@ -1228,6 +1299,7 @@ void MatchController::stopGame() {
 }
 
 void MatchController::shutdown() {
+    closeBridge();
     stopLocalTest();
     if (phase_ == Phase::Searching) cancelSearch();
     thawSolo();  // frozen games would not see their quit

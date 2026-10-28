@@ -1,6 +1,6 @@
 #pragma once
-// Account sign-in/registration, the match-found accept prompt, the Kasual rematch prompt, lobby creation, and the
-// update offer.
+// Account sign-in/registration, the match-found accept prompt, the Kasual rematch prompt, lobby creation, the
+// update offer, and what a crashed game left (its report).
 
 #include <QDialog>
 #include <QJsonObject>
@@ -101,6 +101,24 @@ private:
     QPushButton* now_;
     QPushButton* later_;
     bool running_ = false;
+};
+
+// A game crashed: what happened and where its report is (CrashReports), SEND REPORT (to the MK9 Online server),
+// OPEN FOLDER and CLOSE
+class CrashDialog : public QDialog {
+    Q_OBJECT
+public:
+    CrashDialog(const QString& reportDir, const QString& summary, bool canSend, QWidget* parent = nullptr);
+    QString reportDir() const { return reportDir_; }
+    void setSent(bool ok, const QString& text);  // how sending went; a report that did not go may be sent again
+
+signals:
+    void sendRequested();
+
+private:
+    QString reportDir_;
+    QLabel* status_;
+    QPushButton* send_;
 };
 
 class CreateLobbyDialog : public QDialog {

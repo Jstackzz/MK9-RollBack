@@ -34,6 +34,7 @@ set(MK9_SOURCES
     src/mk9_app.cpp
     src/mk9/autopilot.cpp
     src/mk9/controls.cpp
+    src/mk9/crash.cpp
     src/mk9/diag.cpp
     src/mk9/engine.cpp
     src/mk9/fibers.cpp

@@ -46,9 +46,9 @@ async def connect(server: Server) -> AsyncIterator[Connector]:
     conns: list[Connection] = []
 
     async def factory(name: str | None = None, *, password: str = PASSWORD, register: bool = True,
-                      fingerprint: str | None = None) -> Connection:
+                      fingerprint: str | None = None, tunnel: bool = False) -> Connection:
         conn = Connection("127.0.0.1", server.tcp_port, fingerprint=fingerprint or server.fingerprint)
-        await conn.connect()
+        await conn.connect(tunnel=tunnel)
         conns.append(conn)
         if name is not None:
             if register:

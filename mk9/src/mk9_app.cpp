@@ -8,11 +8,13 @@
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
 #include <rex/logging.h>
+#include <rex/ui/flags.h>
 
 #include <rex/ui/presenter.h>
 #include <rex/ui/window.h>
 
 #include "mk9/controls.h"
+#include "mk9/crash.h"
 #include "mk9/diag.h"
 #include "mk9/link.h"
 #include "mk9/net/netplay.h"
@@ -23,11 +25,24 @@ bool Init();
 }
 #include "mk9/testinput.h"
 
+// after the SDK's headers: Windows' macros stay out of them
+#include <windows.h>
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#pragma comment(lib, "dxgi.lib")
+
 REXCVAR_DECLARE(std::string, game_data_root);
 REXCVAR_DECLARE(std::string, user_data_root);
 REXCVAR_DECLARE(std::string, cache_root);
 
 namespace fs = std::filesystem;
+
+// The game on a laptop's fast graphics card: NVIDIA's and AMD's drivers for PCs with two (Optimus, PowerXpress) look
+// for these in the exe (the SDK has them in rexgpu-xenos.dll, where they do nothing)
+extern "C" {
+__declspec(dllexport) unsigned long NvOptimusEnablement = 1;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
 
 namespace {
 
@@ -41,6 +56,47 @@ struct WindowPresenter : rex::ui::Window {
 fs::path EnvPath(const char* name) {
   const char* v = std::getenv(name);
   return v && *v ? fs::path(v) : fs::path();
+}
+
+std::string Narrow(const wchar_t* w) {
+  char out[256];
+  return WideCharToMultiByte(CP_UTF8, 0, w, -1, out, sizeof out, nullptr, nullptr) ? std::string(out) : std::string();
+}
+
+// The SDK draws on the first graphics adapter in Windows' list, which on a laptop with two is most often the slow one
+// in the processor (the one its screen hangs off): the one Windows counts as the high-performance one instead, when it
+// can run the game (Direct3D 12), unless d3d12_adapter says which
+void PickFastAdapter() {
+  if (rex::cvar::HasNonDefaultValue("d3d12_adapter")) return;
+  using CreateDevice = HRESULT(WINAPI*)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
+  HMODULE d3d12 = LoadLibraryW(L"d3d12.dll");
+  const auto create = d3d12 ? reinterpret_cast<CreateDevice>(reinterpret_cast<void*>(GetProcAddress(d3d12, "D3D12CreateDevice")))
+                            : nullptr;
+  IDXGIFactory6* factory = nullptr;
+  if (!create || FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)))) return;
+  IDXGIAdapter1* fast = nullptr;
+  DXGI_ADAPTER_DESC1 want{};
+  if (SUCCEEDED(factory->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&fast)))) {
+    if (SUCCEEDED(fast->GetDesc1(&want)) && !(want.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
+        SUCCEEDED(create(fast, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), nullptr))) {
+      IDXGIAdapter1* a = nullptr;
+      for (UINT i = 0; factory->EnumAdapters1(i, &a) == S_OK; i++) {
+        DXGI_ADAPTER_DESC1 d{};
+        const bool same = SUCCEEDED(a->GetDesc1(&d)) && d.AdapterLuid.LowPart == want.AdapterLuid.LowPart &&
+                          d.AdapterLuid.HighPart == want.AdapterLuid.HighPart;
+        a->Release();
+        if (!same) continue;
+        if (i != 0) {
+          REXCVAR_SET(d3d12_adapter, int32_t(i));
+          REXLOG_INFO("mk9: graphics on {} (Windows' high-performance adapter, number {} in its list)",
+                      Narrow(want.Description), i);
+        }
+        break;
+      }
+    }
+    fast->Release();
+  }
+  factory->Release();
 }
 
 }  // namespace
@@ -71,10 +127,12 @@ void Mk9App::OnPreSetup(rex::RuntimeConfig& config) {
   if (config.gpu_plugin.empty()) {
     config.gpu_plugin = "xenos";
   }
+  PickFastAdapter();
 }
 
 void Mk9App::OnPostSetup() {
   REXLOG_INFO("mk9: game data {}, saves {}", game_data_root().string(), user_data_root().string());
+  mk9::crash::Install();  // again: the runtime's libraries are loaded now, and one may have put its own in
   mk9::controls::Poll();
   mk9::testinput::Init();
   mk9::net::InitFromEnvironment();

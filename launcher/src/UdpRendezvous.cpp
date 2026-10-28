@@ -74,8 +74,16 @@ void UdpRendezvous::close() {
 bool UdpRendezvous::isOpen() const { return sock_ != nullptr; }
 
 void UdpRendezvous::sendJson(const QJsonObject& obj, const QHostAddress& addr, quint16 port) {
-    if (!sock_ || addr.isNull() || port == 0) return;
+    if (!sock_ || blocked_ || addr.isNull() || port == 0) return;
     sock_->writeDatagram(QJsonDocument(obj).toJson(QJsonDocument::Compact), addr, port);
+}
+
+void UdpRendezvous::sendTo(const QJsonObject& obj, const Candidate& to) {
+    if (to.via == QLatin1String("tunnel")) {
+        if (tunnelSend_) tunnelSend_(QJsonDocument(obj).toJson(QJsonDocument::Compact));
+        return;
+    }
+    sendJson(obj, to.addr, to.port);
 }
 
 void UdpRendezvous::startHello(const QHostAddress& server, quint16 serverPort, const QString& token,
@@ -135,6 +143,18 @@ void UdpRendezvous::startRelayPunch(const QString& match, const QString& key, in
     beginPunch(timeoutMs);
 }
 
+// the relay through the server connection: one candidate, the tunnel (its address, the server's UDP endpoint, is what
+// the report names)
+void UdpRendezvous::startTunnelPunch(const QString& match, const QString& key, int side, int timeoutMs) {
+    match_ = match;
+    key_ = key;
+    side_ = side;
+    candidates_ = {Candidate{QStringLiteral("tunnel"), server_, serverPort_}};
+    beginPunch(timeoutMs);
+}
+
+void UdpRendezvous::deliverTunneled(const QByteArray& datagram) { handleDatagram(datagram, server_, serverPort_, true); }
+
 void UdpRendezvous::beginPunch(int timeoutMs) {
     punchTimeoutMs_ = timeoutMs;
     punchStarted_ = clock_.elapsed();
@@ -158,15 +178,15 @@ void UdpRendezvous::onPunchTick() {
             return;
         }
         for (const auto& c : candidates_)
-            sendJson({{QStringLiteral("type"), QStringLiteral("punch")}, {QStringLiteral("match"), match_},
-                      {QStringLiteral("key"), key_}, {QStringLiteral("side"), side_}},
-                     c.addr, c.port);
+            sendTo({{QStringLiteral("type"), QStringLiteral("punch")}, {QStringLiteral("match"), match_},
+                    {QStringLiteral("key"), key_}, {QStringLiteral("side"), side_}},
+                   c);
     } else if (phase_ == Phase::Pinging) {
         if (pingsSent_ < kPings) {
             pingSentAt_.insert(pingsSent_, now);
-            sendJson({{QStringLiteral("type"), QStringLiteral("ping")}, {QStringLiteral("match"), match_},
-                      {QStringLiteral("key"), key_}, {QStringLiteral("seq"), pingsSent_}, {QStringLiteral("t"), now}},
-                     working_.addr, working_.port);
+            sendTo({{QStringLiteral("type"), QStringLiteral("ping")}, {QStringLiteral("match"), match_},
+                    {QStringLiteral("key"), key_}, {QStringLiteral("seq"), pingsSent_}, {QStringLiteral("t"), now}},
+                   working_);
             ++pingsSent_;
             lastPingAt_ = now;
         } else if (rtts_.size() >= kPings || now - lastPingAt_ > 500) {
@@ -192,51 +212,85 @@ void UdpRendezvous::finishPunch(bool ok) {
 void UdpRendezvous::onReadyRead() {
     while (sock_ && sock_->hasPendingDatagrams()) {
         const QNetworkDatagram d = sock_->receiveDatagram(2048);
-        const QHostAddress from = plainV4(d.senderAddress());
-        const quint16 fromPort = static_cast<quint16>(d.senderPort());
-        QJsonParseError err{};
-        const QJsonObject o = QJsonDocument::fromJson(d.data(), &err).object();
-        if (err.error != QJsonParseError::NoError) continue;
-        const QString type = o.value(QStringLiteral("type")).toString();
-        if (type == QLatin1String("hello_ack")) {
-            if (!helloTimer_.isActive()) continue;
-            helloTimer_.stop();
-            serverRtt_ = static_cast<int>(qMax<qint64>(0, clock_.elapsed() - o.value(QStringLiteral("t")).toInteger()));
-            const QString pub = o.value(QStringLiteral("public")).toString();
-            applog::write(QStringLiteral("udp: hello_ack public %1, server rtt %2 ms").arg(pub).arg(serverRtt_));
-            emit helloAcked(pub, serverRtt_);
-            continue;
-        }
-        if (key_.isEmpty() || o.value(QStringLiteral("match")).toString() != match_ ||
-            o.value(QStringLiteral("key")).toString() != key_)
-            continue;  // not our match: ignore
-        if (type == QLatin1String("punch") && phase_ == Phase::Punching &&
-            std::none_of(candidates_.cbegin(), candidates_.cend(),
-                         [&](const Candidate& c) { return c.addr == from && c.port == fromPort; })) {
-            // the peer's router sends it from another public port than the server saw: punch that one too, or
-            // only one side would ever hear back
-            candidates_.append(Candidate{QStringLiteral("public"), from, fromPort});
-            applog::write(QStringLiteral("udp: punch from %1:%2, added as a candidate").arg(from.toString()).arg(fromPort));
-        }
-        if (type == QLatin1String("punch") || type == QLatin1String("ping")) {
-            QJsonObject reply = o;
-            reply.insert(QStringLiteral("type"), type == QLatin1String("punch") ? QStringLiteral("punch_ack")
-                                                                                : QStringLiteral("pong"));
-            reply.insert(QStringLiteral("side"), side_);
-            sendJson(reply, from, fromPort);
-        } else if (type == QLatin1String("punch_ack") && phase_ == Phase::Punching) {
-            working_ = Candidate{QStringLiteral("public"), from, fromPort};
-            for (const auto& c : candidates_)
-                if (c.addr == from && c.port == fromPort) working_.via = c.via;
-            phase_ = Phase::Pinging;
-            pingsSent_ = 0;
-            lastPingAt_ = clock_.elapsed();
-        } else if (type == QLatin1String("pong") && phase_ == Phase::Pinging) {
-            const int seq = o.value(QStringLiteral("seq")).toInt(-1);
-            if (pingSentAt_.contains(seq)) {
-                rtts_.append(clock_.elapsed() - pingSentAt_.take(seq));
-                if (rtts_.size() >= kPings) finishPunch(true);
-            }
+        handleDatagram(d.data(), plainV4(d.senderAddress()), static_cast<quint16>(d.senderPort()), false);
+    }
+}
+
+// `tunneled`: it came through the server connection (a tunnel's punch or ping), and the answer goes back that way
+void UdpRendezvous::handleDatagram(const QByteArray& data, const QHostAddress& from, quint16 fromPort, bool tunneled) {
+    QJsonParseError err{};
+    const QJsonObject o = QJsonDocument::fromJson(data, &err).object();
+    if (err.error != QJsonParseError::NoError) return;
+    const QString type = o.value(QStringLiteral("type")).toString();
+    if (type == QLatin1String("hello_ack")) {
+        if (tunneled || !helloTimer_.isActive()) return;
+        helloTimer_.stop();
+        serverRtt_ = static_cast<int>(qMax<qint64>(0, clock_.elapsed() - o.value(QStringLiteral("t")).toInteger()));
+        const QString pub = o.value(QStringLiteral("public")).toString();
+        applog::write(QStringLiteral("udp: hello_ack public %1, server rtt %2 ms").arg(pub).arg(serverRtt_));
+        emit helloAcked(pub, serverRtt_);
+        return;
+    }
+    if (key_.isEmpty() || o.value(QStringLiteral("match")).toString() != match_ ||
+        o.value(QStringLiteral("key")).toString() != key_)
+        return;  // not our match (or an attempt before this one): ignore
+    const Candidate source{tunneled ? QStringLiteral("tunnel") : QStringLiteral("public"), from, fromPort};
+    if (!tunneled && type == QLatin1String("punch") && phase_ == Phase::Punching &&
+        std::none_of(candidates_.cbegin(), candidates_.cend(),
+                     [&](const Candidate& c) { return c.addr == from && c.port == fromPort; })) {
+        // the peer's router sends it from another public port than the server saw: punch that one too, or
+        // only one side would ever hear back
+        candidates_.append(source);
+        applog::write(QStringLiteral("udp: punch from %1:%2, added as a candidate").arg(from.toString()).arg(fromPort));
+    }
+    if (type == QLatin1String("punch") || type == QLatin1String("ping")) {
+        QJsonObject reply = o;
+        reply.insert(QStringLiteral("type"), type == QLatin1String("punch") ? QStringLiteral("punch_ack")
+                                                                            : QStringLiteral("pong"));
+        reply.insert(QStringLiteral("side"), side_);
+        sendTo(reply, source);
+    } else if (type == QLatin1String("punch_ack") && phase_ == Phase::Punching) {
+        working_ = source;
+        for (const auto& c : candidates_)
+            if (!tunneled && c.addr == from && c.port == fromPort) working_.via = c.via;
+        phase_ = Phase::Pinging;
+        pingsSent_ = 0;
+        lastPingAt_ = clock_.elapsed();
+    } else if (type == QLatin1String("pong") && phase_ == Phase::Pinging) {
+        const int seq = o.value(QStringLiteral("seq")).toInt(-1);
+        if (pingSentAt_.contains(seq)) {
+            rtts_.append(clock_.elapsed() - pingSentAt_.take(seq));
+            if (rtts_.size() >= kPings) finishPunch(true);
         }
     }
+}
+
+TunnelBridge::TunnelBridge(quint16 gamePort, QObject* parent)
+    : QObject(parent), sock_(new QUdpSocket(this)), gamePort_(gamePort) {}
+
+bool TunnelBridge::open(QString* error) {
+    // on loopback: only this PC's game talks to it (no firewall prompt), on a port Windows picks
+    if (!sock_->bind(QHostAddress(QHostAddress::LocalHost), 0)) {
+        if (error) *error = tr("Cannot open the match's tunnel on this PC: %1").arg(sock_->errorString());
+        return false;
+    }
+    connect(sock_, &QUdpSocket::readyRead, this, [this] {
+        QList<QByteArray> batch;
+        while (sock_->hasPendingDatagrams()) {
+            const QNetworkDatagram d = sock_->receiveDatagram(2048);
+            if (d.senderPort() != gamePort_) continue;  // the game's packets only
+            batch << d.data();
+        }
+        sent_ += batch.size();
+        if (!batch.isEmpty()) emit outgoing(batch);
+    });
+    applog::write(QStringLiteral("tunnel: the game's peer is %1").arg(endpoint()));
+    return true;
+}
+
+QString TunnelBridge::endpoint() const { return QStringLiteral("127.0.0.1:%1").arg(sock_->localPort()); }
+
+void TunnelBridge::toGame(const QByteArray& datagram) {
+    received_++;
+    sock_->writeDatagram(datagram, QHostAddress(QHostAddress::LocalHost), gamePort_);
 }

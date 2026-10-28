@@ -24,7 +24,8 @@ SDK: `git -C external\rexglue-sdk apply ..\..\patches\rexglue-sdk-v0.10.0.patch`
 
 | file | what |
 |---|---|
-| `frame.cpp` | the frame boundary: FEngineLoop::Tick (`sub_823621F8`), top/end hooks, frames run again |
+| `frame.cpp` | the frame boundary: FEngineLoop::Tick (`sub_823621F8`), top/end hooks, frames run again, the 60 frames/s cap |
+| `crash.cpp` | crash reports: `crash.txt` and `crash.dmp` in the session folder when the game crashes (see "Crash reports") |
 | `input.cpp` | XamInputGetState / GetCapabilities / GetKeystrokeEx answered from one pad source chain: autopilot override (offline) > netplay or test scripts > the PC's controllers (remapped, `controls.cpp`) |
 | `game.cpp` | what netplay and the launcher read from MK9 (addresses below), the random generator agreement, per-call-site menu streams |
 | `net/netplay.cpp` | UDP netplay for 2-4 slots: barriers, lockstep, rollback mode, checks, the spectator feed |
@@ -46,6 +47,34 @@ SDK: `git -C external\rexglue-sdk apply ..\..\patches\rexglue-sdk-v0.10.0.patch`
 | `0x834161D8` | the game's random generator (UE3 LCG; `sub_826D91C0` int, `sub_826D91E8` float, `sub_826D3088` seed) |
 
 The C runtime's `rand()` is used only by FMOD (sound variations) and is not part of the simulation.
+
+## Frame rate
+
+At most 60 frames a second start (`frame.cpp`, `MK9_FRAME_CAP=<n>` for another cap, 0 for none), as on the Xbox 360.
+The frames the game draws already wait for the GPU's vertical blank (the SDK's 60 Hz timer); the cap holds back
+those that do not (loading screens and some menus ran at up to 69 a second) and never waits on one that did (it runs
+a few microseconds faster than the blank, and makes up at most 2 ms of a late frame, so frames netplay holds back on
+purpose stay held back). The game asks Windows for 1 ms timers: with the default 15.6 ms the SDK's blank thread,
+which sleeps 1 ms at a time, delivered the blanks in uneven bursts. Measured on the boot to the title and the attract
+fight: 62.7-70.4 frames/s and about 75 frames a minute off by more than 2 ms before, 59.3-60.1 and none after, with
+the attract fight starting at the same second. The frame rate line every 600 frames counts frames under 15 ms and
+over 20 ms after the one before, and the longest gap.
+
+The SDK draws on Windows' first graphics adapter, and its Optimus/PowerXpress exports sit in `rexgpu-xenos.dll`,
+where the drivers do not look: on a laptop with two the game ran on the slow one in the processor. `mk9.exe` exports
+them itself, and sets `d3d12_adapter` to the one Windows counts as high-performance (unless it is set already).
+
+## Crash reports
+
+`crash.cpp` hands an unhandled exception (any thread), a stack overflow (caught first, before the SDK's handler, with
+64 KB of each guest thread's 16 MB stack kept back for it), `abort()`, `std::terminate`, a pure virtual call or an
+invalid parameter to a thread made for it at start, which writes `crash.txt` (the exception and where: module and
+offset, and `sub_82xxxxxx+off` when the address is in a recompiled function; host registers and call stack; the
+crashed guest thread's registers and guest call stack; frames run, the launcher link's status and match, netplay's
+state, the game's phase, screen and round; the modules) and `crash.dmp` (a minidump, about 1 MB, more after a stack
+overflow) into `MK9_SESSION_DIR` (else `crashes\` beside the exe). The process then ends with the crash's code; the
+launcher builds the player's report from these (LAUNCHER.md, "Crash reports"). `MK9_CRASH_TEST=<frame>[:abort|
+:overflow|:throw]` crashes on purpose; all four kinds were tested.
 
 ## Netplay
 
@@ -157,7 +186,17 @@ call site at every check; `-Sites` in `netplay-local.ps1`).
 ## Known gaps
 
 - Rollback is tested on one PC over loopback with simulated lag (see "Rollback"), not yet over the
-  internet. Frames run again also render; a long rollback costs about 17 ms a frame.
+  internet. Frames run again also render; a long rollback costs about 17 ms a frame (16.5 ms measured by
+  the sync test, which now logs it; 13 ms with the SDK's vsync off while they run, not kept: unproven).
+- **Rollback can go out of step** (found 2026-10-28, in 0.3.x builds as in 0.4.0): the two-game test above
+  with `-Lag 50 -Jitter 30 -AttackB` stopped with DESYNC in 9 of 11 runs, 8 of them in the fight (four at
+  fight frame 1590, a fifth going wrong there first), the 0.3.x build in 2 of its 3. At 1590 one game's
+  scripts drew 20 numbers through the script native `sub_824790A8` (a random number in a range: the script
+  VM's context at `0x8342CDF0`, its arguments at `+60`, through `sub_8239C2A8` and the range helper
+  `sub_82A234E0`; draw site `82A23504/824790DC` in `MK9_NET_SITES_LOG`) between frames 1560 and 1590, and the
+  other game none; whichever game rolled back across that moment lost them. Suspected: a script that
+  waits on something a rollback does not take back (FMOD's sounds). One run also stopped before the fight, in
+  lockstep at the end of loading, a script drawing on one PC a frame before the other.
 - Sounds started in frames a rollback takes back keep playing (FMOD is not rolled back).
 - Four-player TWO VS TWO (slots 2-3) is in the netplay core but untested.
 - The autopilot steers menus by fixed steps from a fresh save's cursor; the roster grid is not

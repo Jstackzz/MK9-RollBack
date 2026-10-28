@@ -71,6 +71,8 @@ private:
     bool netMode_ = true;
     bool windowed_ = false;
     bool quitting_ = false;
+    bool standIn_ = false;
+    QElapsedTimer ran_;  // since it started: a crash report says how long it ran
     QByteArray outBuf_;
     QHash<QString, QString> extraEnv_;
 };

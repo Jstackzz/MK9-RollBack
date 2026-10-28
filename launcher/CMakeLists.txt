@@ -39,6 +39,7 @@ qt_add_executable(MK9Launcher WIN32
     src/ServerClient.cpp src/ServerClient.h
     src/UdpRendezvous.cpp src/UdpRendezvous.h
     src/GameProcess.cpp src/GameProcess.h
+    src/CrashReports.cpp src/CrashReports.h
     src/MatchController.cpp src/MatchController.h
     src/FeedLink.cpp src/FeedLink.h
     src/GamepadNav.cpp src/GamepadNav.h

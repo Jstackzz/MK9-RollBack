@@ -22,6 +22,7 @@ class SinglePlayerPage;
 class ServerClient;
 class SettingsPage;
 class UpdateDialog;
+class CrashDialog;
 class Updater;
 class GitHubUpdates;
 
@@ -52,6 +53,7 @@ struct LaunchOptions {
     bool upnpProbe = false;  // find the router and its public address, open nothing
     QString updatedFrom;     // --updated: the version this launcher just replaced (Updater)
     bool autoUpdate = false; // development: an update offered installs at once, without asking
+    bool sendCrashReports = false;  // development: a crash report goes to the server at once, without asking
 };
 
 class MainWindow : public QMainWindow {
@@ -85,6 +87,7 @@ private:
     void focusGame();             // the game's window in front again: the player is back in it
     void frontSoloWhenUp();       // single player's (practice's) new game window in front once it has one
     void showNotice(const QString& text, bool warn);
+    void showCrashReport(const QString& reportDir, const QString& summary);  // a game crashed (CrashReports)
     // a release newer than this launcher (welcome, an update push, or the reply turning away a launcher too old)
     void offerUpdate(const QJsonValue& release, bool required);
     void showUpdateDialog(bool required);
@@ -130,6 +133,7 @@ private:
     Updater* updater_ = nullptr;
     GitHubUpdates* github_ = nullptr;  // the project's GitHub releases, asked at start and every few hours
     QPointer<UpdateDialog> updateDialog_;
+    QPointer<CrashDialog> crashDialog_;  // the last crash report shown, for the server's answer to sending it
     QPushButton* updateButton_ = nullptr;  // the footer's, once a release is offered (LATER leaves it)
     QJsonObject update_;                   // the release offered
     QString updateDismissed_;              // the version LATER was chosen for this run

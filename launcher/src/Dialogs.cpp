@@ -4,6 +4,7 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDesktopServices>
+#include <QDir>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -390,6 +391,67 @@ void UpdateDialog::setFailed(const QString& text) {
 }
 
 // --- CreateLobbyDialog -----------------------------------------------------------------------------
+
+CrashDialog::CrashDialog(const QString& reportDir, const QString& summary, bool canSend, QWidget* parent)
+    : QDialog(parent), reportDir_(reportDir) {
+    setWindowTitle(tr("MK9 Online crashed"));
+    setModal(false);
+    setMinimumWidth(520);
+    auto* v = new QVBoxLayout(this);
+    v->setContentsMargins(28, 22, 28, 22);
+    v->setSpacing(10);
+    auto* title = ui::label(tr("THE GAME CRASHED"), "CardTitle");
+    title->setAlignment(Qt::AlignCenter);
+    v->addWidget(title);
+    auto* what = new QLabel(summary);
+    what->setWordWrap(true);
+    what->setAlignment(Qt::AlignCenter);
+    v->addWidget(what);
+    auto* info = ui::label(tr("A crash report was saved in %1. Sending it to the MK9 Online server lets the people who "
+                              "run it see what went wrong: what the game and the launcher were doing, where the game "
+                              "crashed, the end of their logs, and this PC's Windows version, processor, memory and "
+                              "graphics card. Your files are not in it, and your Windows user name is taken out of the "
+                              "paths in it.")
+                               .arg(QDir::toNativeSeparators(reportDir)),
+                           "Muted");
+    info->setWordWrap(true);
+    info->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    v->addWidget(info);
+    status_ = ui::label(canSend ? QString() : tr("Not connected to the server: sign in to send it, or send the folder "
+                                                 "yourself."),
+                        "Muted");
+    status_->setWordWrap(true);
+    status_->setVisible(!canSend);
+    v->addWidget(status_);
+    auto* buttons = new QHBoxLayout;
+    send_ = new QPushButton(tr("SEND REPORT"));
+    send_->setObjectName(QStringLiteral("Primary"));
+    send_->setProperty("compact", true);
+    send_->setMinimumHeight(40);
+    send_->setEnabled(canSend);
+    send_->setDefault(canSend);
+    auto* open = new QPushButton(tr("OPEN FOLDER"));
+    open->setMinimumHeight(40);
+    auto* close = new QPushButton(tr("CLOSE"));
+    close->setMinimumHeight(40);
+    buttons->addWidget(send_, 1);
+    buttons->addWidget(open, 1);
+    buttons->addWidget(close, 1);
+    v->addLayout(buttons);
+    connect(send_, &QPushButton::clicked, this, [this] {
+        send_->setEnabled(false);
+        emit sendRequested();
+    });
+    connect(open, &QPushButton::clicked, this, [this] { QDesktopServices::openUrl(QUrl::fromLocalFile(reportDir_)); });
+    connect(close, &QPushButton::clicked, this, &QDialog::close);
+}
+
+void CrashDialog::setSent(bool ok, const QString& text) {
+    status_->setText(text);
+    status_->show();
+    send_->setEnabled(!ok);
+    if (ok) send_->setText(tr("SENT"));
+}
 
 CreateLobbyDialog::CreateLobbyDialog(const Game& game, const QString& defaultName, QWidget* parent) : QDialog(parent) {
     setWindowTitle(tr("Create lobby"));

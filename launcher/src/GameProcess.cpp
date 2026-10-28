@@ -11,6 +11,7 @@
 
 #include "AppPaths.h"
 #include "Controls.h"
+#include "CrashReports.h"
 #include "WinUtil.h"
 
 namespace {
@@ -152,12 +153,16 @@ bool GameProcess::start(const QString& exe, QString* error, bool netMode) {
         poll_.stop();
         applog::write(QStringLiteral("game %1/%2: exited with code %3%4")
                           .arg(gameId_).arg(instance_).arg(code).arg(st == QProcess::CrashExit ? " (crash)" : ""));
+        // ended by itself with an error (not asked to quit, not killed): a crash report
+        if (!quitting_ && code != 0 && !standIn_) CrashReports::instance().gameEnded(gameId_, sessionDir_, code, ran_.elapsed());
         const QString last = quitting_ ? QStringLiteral("exited") : QStringLiteral("error exited");
         status_ = last;
         emit statusChanged(last);
         emit exited(code, st == QProcess::CrashExit);
     });
+    standIn_ = standIn;
     proc_->start(program, args);
+    ran_.start();
     if (!proc_->waitForStarted(10000)) {
         if (error) {
             *error = tr("Could not start %1: %2").arg(native(program), proc_->errorString());

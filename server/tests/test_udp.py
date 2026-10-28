@@ -108,7 +108,9 @@ async def test_failed_punch_falls_back_to_the_relay(server, connect, udp_peers):
     a.send({"type": "ping_report", "match": pa["match"], "ok": False, "rtt_ms": 0})
     b.send({"type": "ping_report", "match": pb["match"], "ok": False, "rtt_ms": 0})
     ra, rb = await a.expect("match_peer"), await b.expect("match_peer")
-    assert ra["relay"] is True and rb["relay"] is True and ra["key"] == pa["key"]
+    # the relay is an attempt of its own, with a key of its own
+    assert ra["relay"] is True and rb["relay"] is True and ra["key"] == rb["key"] != pa["key"]
+    assert not ra["tunnel"] and not rb["tunnel"]
     ga, gb = await relay_to_go(server, a, b, ua, ub, ra, rb)
     assert ga["remote"] == gb["remote"] == f"127.0.0.1:{server.udp_port}"
     assert ga["seed"] == gb["seed"]

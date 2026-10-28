@@ -30,7 +30,7 @@ bool g_verify = false;
 std::map<uint64_t, uint64_t> g_hash;  // frame -> its page hash the first time it ran
 std::map<uint64_t, std::vector<uint32_t>> g_pages;
 uint64_t g_checked = 0, g_bad = 0, g_rollbacks = 0;
-double g_worst_ms = 0;
+double g_worst_ms = 0, g_rerun_ms = 0;  // the worst rollback, and all of them together
 
 void OnTop(PPCContext& ctx, uint8_t* base) {
   const uint64_t n = frame::Count();
@@ -89,6 +89,7 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
       }
       const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
       g_worst_ms = std::max(g_worst_ms, ms);
+      g_rerun_ms += ms;
     }
     ctx = top;
   }
@@ -100,8 +101,9 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
     auto st = rb::GetStats();
     REXLOG_INFO(
         "mk9 synctest: frame {}: {} rollbacks, {} frames checked, {} differed; last frame {} pages, {} foreign "
-        "pages, close {:.2f} ms, restore {:.2f} ms, worst rollback {:.1f} ms",
-        n, g_rollbacks, g_checked, g_bad, st.last_pages, st.foreign_pages, st.close_ms, st.restore_ms, g_worst_ms);
+        "pages, close {:.2f} ms, restore {:.2f} ms, worst rollback {:.1f} ms, {:.1f} ms a frame run again",
+        n, g_rollbacks, g_checked, g_bad, st.last_pages, st.foreign_pages, st.close_ms, st.restore_ms, g_worst_ms,
+        g_checked ? g_rerun_ms / double(g_checked) : 0.0);
   }
 }
 

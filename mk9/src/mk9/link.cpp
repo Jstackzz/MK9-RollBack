@@ -33,9 +33,11 @@
 #include <sstream>
 #include <string>
 
+#include <fmt/format.h>
 #include <rex/logging.h>
 
 #include "mk9/autopilot.h"
+#include "mk9/crash.h"
 #include "mk9/net/netplay.h"
 
 namespace mk9::link {
@@ -61,6 +63,7 @@ std::wstring Widen(const std::string& s) {
 void WriteStatus(const std::string& line) {
   if (!g_on || line == g_last_status) return;
   g_last_status = line;
+  crash::SetNote(crash::Note::Status, line.c_str());
   g_error_shown = line.rfind("error", 0) == 0;
   const std::wstring tmp = g_status + L".tmp";
   FILE* f = _wfopen(tmp.c_str(), L"wb");
@@ -176,10 +179,12 @@ void Start(const Command& c) {
   g_in_match = true;
   g_reported = false;
   autopilot::Begin(plan, g_online);
-  REXLOG_INFO("mk9 link: start {} {} of {}, match {}, {} {}", Key(c, "mode", "versus"),
-              st.watch ? std::string("watching") : "slot " + std::to_string(slot), st.players, g_match,
-              g_online ? (st.rollback ? "rollback" : "lockstep") : "offline",
-              st.watch ? "feed " + st.feed : std::to_string(st.peers.size()) + " peers");
+  const std::string what = fmt::format("{} {} of {}, match {}, {} {}", Key(c, "mode", "versus"),
+                                       st.watch ? std::string("watching") : "slot " + std::to_string(slot),
+                                       st.players, g_match, g_online ? (st.rollback ? "rollback" : "lockstep") : "offline",
+                                       st.watch ? "feed " + st.feed : std::to_string(st.peers.size()) + " peers");
+  crash::SetNote(crash::Note::Match, what.c_str());
+  REXLOG_INFO("mk9 link: start {}", what);
 }
 
 void Park() {
@@ -187,6 +192,7 @@ void Park() {
   autopilot::Park();
   g_in_match = false;
   g_online = false;
+  crash::SetNote(crash::Note::Match, "");
   REXLOG_INFO("mk9 link: park");
 }
 

@@ -64,6 +64,54 @@ every ranked set's next match: both pick again). The launcher writes `rematch ma
 `accept_required: false` and `series`, then hello, punch, `match_go`), and a launcher whose game still waits at
 CONTINUE? parks it first.
 
+## A match through the server connection (a tunnel)
+
+A player whose network lets no UDP through (or lets it out and never back) plays through their TLS connection
+instead. A launcher's `hello` says it can (`"tunnel": true`, launchers from 0.4.0), and a server that carries matches
+that way says so in `welcome` (`"tunnel": true`, unless it runs with `--no-relay`).
+
+- After `match_found` a launcher that has no `hello_ack` within 3 s (1 s when its hellos while searching went
+  unanswered too) asks for one:
+
+  ```json
+  C: {"type": "tunnel", "match": "5f2c9a01d4e3"}
+  ```
+
+  The server marks that player. Once both accepted, the match goes to the relay at once (no direct punch), and the
+  player who asked gets `"tunnel": true` in its `match_peer` (`"relay": true` as for any relayed match; the other
+  player's says `"tunnel": false` when it has UDP). A `tunnel` that comes while the two punch each other directly
+  starts the relay right away when both launchers send keys with their reports (below), else once both reported.
+- No UDP heard from a player by the 10 s after both accepted: a player whose launcher can play through its connection
+  does so, instead of the match being cancelled (`no_udp` for one that cannot).
+- The relay failed for a player (UDP that gets out and never back, a router that drops it): the server tries once
+  more with every player whose launcher can play through its connection doing so, before `punch_failed`.
+- Datagrams go both ways as `{"type": "tun", "d": ["<base64>", ...]}`, no `id`: one or more each (from a launcher at
+  most 64, each at most 2,000 base64 characters, the line under 16 KB; the server's take at most 32 KB of base64).
+  The server passes them on byte for byte, as the relay does, at the relay's rate: to the other player's UDP endpoint
+  (the one their hellos came from) or into their connection. The punch and the pings go this way, then the games'
+  packets; `ping_report` says `"via": "tunnel"` and names the server's UDP endpoint as `remote`.
+- The game knows nothing of it: it binds its port as usual, and its start line names as its peer a socket of the
+  launcher on 127.0.0.1, which passes what the game sends into the connection and what comes from it to the game.
+- Each relay attempt (the first relay, one with tunnels) gets a `key` of its own in its `match_peer`. `ping_report`
+  sends the attempt's key back (launchers from 0.4.0), and a report with another key, one of an attempt before, is
+  left aside.
+
+## Crash reports
+
+A launcher whose player chose to send a crashed game's report (docs/LAUNCHER.md, "Crash reports"), signed in or not:
+
+```json
+C: {"type": "crash_report", "report": "0123456789abcdef", "part": 0, "parts": 3, "data": "<base64>"}
+S: {"type": "crash_report_ack", "report": "0123456789abcdef"}
+```
+
+`data` is a part of the report's text packed as Qt's `qCompress` (its size, 4 bytes big-endian, then zlib), in base64,
+cut in parts of at most 12,000 characters (the launcher sends 9,000). Once every part came the server keeps the text
+in `crashes\` beside its database as `<yyyyMMdd-hhmmss>-<account>-<id>.txt`, after a line saying when it came, from
+which account and launcher version, and answers `crash_report_ack`. Two reports may be on their way on a connection
+at once (`busy`), six an hour from one address (`rate_limited`), each at most 2 MB unpacked (`bad_request`); the
+newest 500 are kept.
+
 ## King of the Hill lobbies
 
 `lobby_create` may carry `"koth": true`: up to 8 players (`max_players`, server option `koth_max_players`) besides

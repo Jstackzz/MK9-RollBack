@@ -89,10 +89,12 @@ int main(int argc, char* argv[]) {
         QStringLiteral("version"));
     const QCommandLineOption autoUpdateOpt(QStringLiteral("auto-update"),
                                            QStringLiteral("Development: install an update offered at once, without asking."));
+    const QCommandLineOption sendCrashOpt(QStringLiteral("send-crash-reports"),
+                                          QStringLiteral("Development: send a crash report to the server at once, without asking."));
     for (const auto* o : {&configOpt, &serverOpt, &fpOpt, &userOpt, &pwEnvOpt, &regOpt, &queueOpt, &gameOpt, &modeOpt,
                           &charOpt, &pageOpt, &acceptOpt, &localTestOpt, &extractOpt, &lobbyOpt, &lobbyNameOpt, &kothOpt,
                           &lobbyMatchesOpt, &upnpProbeOpt, &rematchesOpt, &rematchChoiceOpt, &leaveSeriesOpt, &soloOpt,
-                          &soloWaitOpt, &netcodeOpt, &updatedOpt, &autoUpdateOpt})
+                          &soloWaitOpt, &netcodeOpt, &updatedOpt, &autoUpdateOpt, &sendCrashOpt})
         cli.addOption(*o);
     cli.process(app);
 
@@ -156,6 +158,7 @@ int main(int argc, char* argv[]) {
     opts.upnpProbe = cli.isSet(upnpProbeOpt);
     opts.updatedFrom = cli.value(updatedOpt);
     opts.autoUpdate = cli.isSet(autoUpdateOpt);
+    opts.sendCrashReports = cli.isSet(sendCrashOpt);
 
     MainWindow window(opts);
     window.show();

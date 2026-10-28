@@ -20,6 +20,7 @@
 
 #include "AppPaths.h"
 #include "ControlsPage.h"
+#include "CrashReports.h"
 #include "Dialogs.h"
 #include "GameData.h"
 #include "GamepadNav.h"
@@ -245,6 +246,7 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
         gameText_->setText(tr("Game: %1").arg(s));
     });
     connect(controller_, &MatchController::notice, this, [this](const QString& text) { showNotice(text, false); });
+    connect(&CrashReports::instance(), &CrashReports::written, this, &MainWindow::showCrashReport);
     // the series' next match from the games' CONTINUE? menu comes without a match found: back to the game for it
     connect(controller_, &MatchController::matchStarted, this, [this](const QJsonObject& go) {
         if (go.value(QStringLiteral("rematch")).toString().isEmpty() || !rematchDialog_) return;
@@ -583,6 +585,12 @@ void MainWindow::onServerMessage(const QJsonObject& msg) {
         server_->send({{QStringLiteral("type"), QStringLiteral("online")}});
     } else if (type == QLatin1String("notice")) {
         showNotice(msg.value(QStringLiteral("text")).toString(), msg.value(QStringLiteral("level")).toString() == QLatin1String("warn"));
+    } else if (type == QLatin1String("crash_report_ack")) {
+        applog::write(QStringLiteral("crash report: the server kept %1").arg(msg.value(QStringLiteral("report")).toString()));
+        if (crashDialog_) crashDialog_->setSent(true, tr("Sent. Thank you: it helps get this fixed."));
+    } else if (type == QLatin1String("error") && msg.value(QStringLiteral("re")).toString() == QLatin1String("crash_report")) {
+        applog::write(QStringLiteral("crash report: the server turned it down: %1").arg(msg.value(QStringLiteral("message")).toString()));
+        if (crashDialog_) crashDialog_->setSent(false, tr("The server did not take it: %1").arg(msg.value(QStringLiteral("message")).toString()));
     } else if (cliLoginId_ >= 0 && msg.value(QStringLiteral("id")).toInt(-2) == cliLoginId_) {
         cliLoginId_ = -1;
         if (type == QLatin1String("error")) {
@@ -764,6 +772,22 @@ void MainWindow::installUpdateWhenFree() {
     installPending_ = false;
     controller_->shutdown();
     updater_->install();
+}
+
+void MainWindow::showCrashReport(const QString& reportDir, const QString& summary) {
+    if (crashDialog_) crashDialog_->close();  // a newer crash: its report instead
+    auto* dialog = new CrashDialog(reportDir, summary, server_->isOnline(), this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dialog, &CrashDialog::sendRequested, this, [this, dialog] {
+        if (CrashReports::send(server_, dialog->reportDir()))
+            dialog->setSent(false, tr("Sending..."));
+        else
+            dialog->setSent(false, tr("Not connected to the server: the report stays in its folder."));
+    });
+    crashDialog_ = dialog;
+    dialog->show();
+    popUp(dialog);
+    if (opts_.sendCrashReports) emit dialog->sendRequested();
 }
 
 void MainWindow::showNotice(const QString& text, bool warn) {

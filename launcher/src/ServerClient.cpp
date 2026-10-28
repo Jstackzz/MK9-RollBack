@@ -1,6 +1,7 @@
 #include "ServerClient.h"
 
 #include <QCryptographicHash>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QSslCertificate>
 #include <QSslConfiguration>
@@ -9,6 +10,7 @@
 
 namespace {
 constexpr int kMaxLine = 64 * 1024;
+constexpr int kTunnelLine = 8000;  // base64 characters in one tun message (the server takes lines of 16 KB)
 const char* kClientName = "mk9-launcher";
 
 QHostAddress plainV4(const QHostAddress& a) {
@@ -111,6 +113,8 @@ quint16 ServerClient::serverUdpPort() const {
 QHostAddress ServerClient::localAddress() const { return plainV4(sock_->localAddress()); }
 
 void ServerClient::onConnected() {
+    // no waiting to fill a segment: a tunnel's game packets go as they come, and so do the rest
+    sock_->setSocketOption(QAbstractSocket::LowDelayOption, 1);
     if (plain_) sendHello();  // TLS waits for encrypted()
 }
 
@@ -152,8 +156,26 @@ void ServerClient::sendHello() {
                       {QStringLiteral("proto"), 1},
                       {QStringLiteral("client"), QLatin1String(kClientName)},
                       {QStringLiteral("version"), QStringLiteral(MK9_LAUNCHER_VERSION)},
-                      {QStringLiteral("os"), QStringLiteral("windows")}};
+                      {QStringLiteral("os"), QStringLiteral("windows")},
+                      {QStringLiteral("tunnel"), true}};  // it can play a match through this connection
     send(hello);
+}
+
+void ServerClient::sendTunnel(const QList<QByteArray>& datagrams) {
+    if (sock_->state() != QAbstractSocket::ConnectedState) return;
+    QByteArray line;
+    const auto flush = [&] {
+        if (line.isEmpty()) return;
+        sock_->write(line + "]}\n");
+        line.clear();
+    };
+    for (const QByteArray& d : datagrams) {
+        const QByteArray b64 = d.toBase64();
+        if (!line.isEmpty() && line.size() + b64.size() > kTunnelLine) flush();
+        line += line.isEmpty() ? QByteArrayLiteral("{\"type\":\"tun\",\"d\":[\"") : QByteArrayLiteral(",\"");
+        line += b64 + '"';
+    }
+    flush();
 }
 
 int ServerClient::send(QJsonObject msg) {
@@ -199,6 +221,13 @@ void ServerClient::onReadyRead() {
 
 void ServerClient::handle(const QJsonObject& msg) {
     const QString type = msg.value(QStringLiteral("type")).toString();
+    if (type == QLatin1String("tun")) {  // a tunnel's packets, up to a hundred a second: for the match alone
+        QList<QByteArray> datagrams;
+        for (const QJsonValue& v : msg.value(QStringLiteral("d")).toArray())
+            datagrams << QByteArray::fromBase64(v.toString().toLatin1());
+        emit tunneled(datagrams);
+        return;
+    }
     if (type == QLatin1String("welcome")) {
         welcome_ = msg;
         setState(State::Online);

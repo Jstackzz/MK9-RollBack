@@ -16,9 +16,11 @@ import json
 import logging
 import os
 import random
+import re
 import secrets
 import ssl
 import time
+import zlib
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -36,8 +38,16 @@ PENDING_STATES = ("found", "accepted", "punching")
 NEEDS_LOGIN = {
     "logout", "queue_join", "queue_leave", "match_accept", "match_decline", "ping_report", "match_state",
     "result", "lobby_create", "lobby_list", "lobby_join", "lobby_leave", "lobby_chat", "lobby_character",
-    "lobby_ready", "lobby_start", "admin_notice", "series_ready", "lobby_role", "feed",
+    "lobby_ready", "lobby_start", "admin_notice", "series_ready", "lobby_role", "feed", "tunnel",
 }
+# a tunnel (docs/PROTOCOL.md): a tun message carries at most this many datagrams, each at most this much base64
+TUNNEL_BATCH = 64
+TUNNEL_ITEM_CHARS = 2000  # base64 of MAX_RELAY_DATAGRAM bytes, rounded up
+TUNNEL_OUT_CHARS = 32 * 1024  # what goes to a launcher in one tun message, at most (they take lines of 64 KB)
+# a crash report (docs/PROTOCOL.md): its parts, each part's base64, and its text unpacked, at most
+CRASH_PARTS = 64
+CRASH_PART_CHARS = 12000
+CRASH_MAX_BYTES = 2 << 20
 # the spectator feed's packets (mk9/src/mk9/net/netplay.cpp): u32 magic "MK9N", u8 type, u8 slot (the sender's), u16
 # match; types 6 MEET (its READY at a barrier), 7 OWN (its own inputs), 8 CHECK, 9 END
 FEED_MAGIC = b"MK9N"
@@ -94,6 +104,9 @@ class ServerConfig:
     relay_rate: float = 400.0     # packets a second each player may send through the relay (a game sends ~120)
     relay_burst: float = 800.0
     relay_linger: float = 15.0    # seconds a route outlives its match: the last packets of the end still arrive
+    crash_dir: str | None = None  # crash reports launchers send (default: crashes beside the database)
+    crash_keep: int = 500         # the newest kept
+    crash_rate: int = 6           # reports one address may send an hour
     max_spectators: int = 8       # a lobby's spectators, besides its players
     koth_max_players: int = 8     # a King of the Hill lobby's players (in line for the hill)
     feed_max_bytes: int = 8 << 20  # a lobby match's spectator feed, at most
@@ -126,6 +139,10 @@ class Session:
         self.udp_public: tuple[str, int] | None = None
         self.udp_lan = ""
         self.udp_seen = 0.0
+        self.can_tunnel = False  # its launcher can play a match through this connection (hello's tunnel)
+        self.tunnel: RelayRoute | None = None  # where what it sends through this connection (tun) goes
+        self.tunnel_out: list[str] = []  # datagrams for it (base64), sent together at the end of the loop's pass
+        self.crash_parts: dict[str, list[str | None]] = {}  # crash reports coming in, by id
         self.queue: QueueEntry | None = None
         self.lobby: Lobby | None = None
         self.match: Match | None = None
@@ -153,6 +170,26 @@ class Session:
             with suppress(Exception):
                 self.writer.close()
 
+    def tunnel_send(self, data: bytes) -> None:
+        """A datagram for this player's game, through its connection (a tunnel): what comes in one pass of the
+        event loop goes in one tun message."""
+        if not self.tunnel_out:
+            asyncio.get_running_loop().call_soon(self._flush_tunnel)
+        self.tunnel_out.append(base64.b64encode(data).decode("ascii"))
+
+    def _flush_tunnel(self) -> None:
+        out, self.tunnel_out = self.tunnel_out, []
+        batch: list[str] = []
+        size = 0
+        for item in out:
+            if batch and (size + len(item) > TUNNEL_OUT_CHARS or len(batch) >= TUNNEL_BATCH):
+                self.send({"type": "tun", "d": batch})
+                batch, size = [], 0
+            batch.append(item)
+            size += len(item)
+        if batch:
+            self.send({"type": "tun", "d": batch})
+
 
 @dataclass(eq=False)
 class MatchPlayer:
@@ -170,6 +207,7 @@ class MatchPlayer:
     ping: dict[str, Any] | None = None
     result: dict[str, Any] | None = None
     netcode: str = "lockstep"
+    tunnel: bool = False  # plays through its TLS connection: its network lets no UDP through (on_tunnel)
 
 
 @dataclass(eq=False)
@@ -190,7 +228,9 @@ class Match:
     rtt_ms: int = 0
     started: float | None = None
     game_state: str = ""
-    relay: tuple[tuple[str, int], tuple[str, int]] | None = None  # the two endpoints the relay joins
+    # the two players' ends the relay joins, by side: a UDP endpoint, or the session of one who plays through it
+    relay: list[tuple[str, int] | Session] | None = None
+    tunnel_tried: bool = False  # the relay failed and was tried again with tunnels (_decide)
     series: Series | None = None
     death_traps: bool = True
     netcode: str = "lockstep"  # rollback when both players asked for it (_go)
@@ -359,9 +399,10 @@ class Feed:
 
 @dataclass(eq=False)
 class RelayRoute:
-    """Where the relay sends what one player's endpoint sends: the other player's, for one match."""
+    """Where the relay sends what one player sends, for one match: to the other player's UDP endpoint, or through
+    their connection when they play through it (a tunnel)."""
 
-    partner: tuple[str, int]
+    partner: tuple[str, int] | Session
     match: str
     tokens: float
     last: float
@@ -396,7 +437,7 @@ class Rendezvous(asyncio.DatagramProtocol):
             return
         route = self.server.relay_routes.get((addr[0], addr[1]))
         if route is not None and not _is_hello(data):
-            self.server.relay_packet(route, data, self.transport)
+            self.server.relay_packet(route, data)
             return
         if len(data) > P.MAX_DATAGRAM:
             return
@@ -439,6 +480,7 @@ class Server:
         self.relay_routes: dict[tuple[str, int], RelayRoute] = {}
         self.ping_cache = PingCache()
         self.login_failures: dict[str, collections.deque[float]] = {}
+        self.crash_sent: dict[str, collections.deque[float]] = {}  # by address: when its crash reports came
         self.tcp_port = self.cfg.port
         self.udp_port = self.cfg.udp_port
         self.fingerprint: str | None = None
@@ -485,6 +527,9 @@ class Server:
             "feed": self.on_feed,
             "series_ready": self.on_series_ready,
             "leaderboard": self.on_leaderboard,
+            "tunnel": self.on_tunnel,
+            "tun": self.on_tun,
+            "crash_report": self.on_crash_report,
         }
 
     # --- lifecycle --------------------------------------------------------------------------------
@@ -602,7 +647,18 @@ class Server:
             if m.state == "found":
                 self._cancel_match(m, "accept_timeout", blame={p.side for p in m.players if not p.accepted})
             elif m.state == "accepted":
-                self._cancel_match(m, "no_udp", blame={p.side for p in m.players if not self._fresh_udp(m, p)})
+                # no UDP heard from a player: one whose launcher can play through its connection does that rather
+                # than the match being called off
+                late = [p for p in m.players if not self._reachable(m, p)]
+                if not late:
+                    self._maybe_send_peers(m, now)
+                elif self.cfg.relay and all(p.session is not None and p.session.can_tunnel for p in late):
+                    for p in late:
+                        p.tunnel = True
+                        log.info("match %s: no UDP from %s, through its connection", m.id, p.name)
+                    self._maybe_send_peers(m, now)
+                else:
+                    self._cancel_match(m, "no_udp", blame={p.side for p in late})
             elif m.state == "punching":
                 self._cancel_match(m, "ping_timeout", blame={p.side for p in m.players if p.ping is None})
             elif m.state == "playing":
@@ -610,6 +666,9 @@ class Server:
         self._tick_series(now)
         for ep in [ep for ep, r in self.relay_routes.items() if r.expires is not None and r.expires < now]:
             del self.relay_routes[ep]
+        for sess in self.sessions:
+            if sess.tunnel is not None and sess.tunnel.expires is not None and sess.tunnel.expires < now:
+                sess.tunnel = None
         for feed in [f for f in self.feeds.values() if f.expires is not None and f.expires < now]:
             del self.feeds[feed.match]
             if feed.lobby.feed is feed:
@@ -622,6 +681,8 @@ class Server:
         window = self.cfg.login_fail_window
         for ip in [ip for ip, q in self.login_failures.items() if not q or q[-1] < now - window]:
             del self.login_failures[ip]
+        for ip in [ip for ip, q in self.crash_sent.items() if not q or q[-1] < now - 3600]:
+            del self.crash_sent[ip]
         self.ping_cache.prune(now)
 
     # --- connection handling ----------------------------------------------------------------------
@@ -663,6 +724,8 @@ class Server:
         if s not in self.sessions:
             return
         self.sessions.discard(s)
+        s.tunnel = None
+        s.crash_parts.clear()
         if s.account_id is not None:
             log.info("disconnect %s", s.name)
         self._detach_account(s)
@@ -731,12 +794,13 @@ class Server:
             return
         s.hello = True
         s.client_version = version
+        s.can_tunnel = msg.get("tunnel") is True
         welcome = {
             "type": "welcome", "proto": P.PROTO, "server": P.SERVER_NAME, "version": P.SERVER_VERSION,
             "udp_port": self.udp_port, "motd": self.cfg.motd, "online": len(self.by_account),
             "min_client": self.cfg.min_client, "games": {g: list(m) for g, m in P.GAMES.items()},
             "ranked": {g: list(m) for g, m in P.RANKED_MODES.items()}, "netcodes": list(P.NETCODES),
-            "regions": list(P.REGIONS),
+            "regions": list(P.REGIONS), "tunnel": self.cfg.relay,
         }
         if update:
             welcome["update"] = update
@@ -997,6 +1061,76 @@ class Server:
         self.broadcast_notice(text, level)
         log.info("notice from %s: %s", s.name, text)
 
+    # --- crash reports -----------------------------------------------------------------------------
+
+    def on_crash_report(self, s: Session, msg: dict[str, Any]) -> None:
+        """A crashed game's report from a launcher whose player chose to send it, in parts (docs/PROTOCOL.md): kept in
+        crash_dir, the newest crash_keep of them."""
+        report = P.get_str(msg, "report", max_len=32)
+        if not re.fullmatch(r"[0-9a-f]{8,32}", report):
+            raise P.ProtocolError("bad_request", "Bad report id.")
+        part = P.get_int(msg, "part", lo=0, hi=CRASH_PARTS - 1)
+        parts = P.get_int(msg, "parts", lo=1, hi=CRASH_PARTS)
+        data = P.get_str(msg, "data", max_len=CRASH_PART_CHARS)
+        pending = s.crash_parts.get(report)
+        if pending is None:
+            if len(s.crash_parts) >= 2:
+                raise P.ProtocolError("busy", "Two crash reports are on their way already.")
+            sent = self.crash_sent.setdefault(s.ip, collections.deque())
+            now = time.time()
+            while sent and sent[0] < now - 3600:
+                sent.popleft()
+            if len(sent) >= self.cfg.crash_rate:
+                raise P.ProtocolError("rate_limited", "Too many crash reports from here this hour.")
+            sent.append(now)
+            pending = s.crash_parts[report] = [None] * parts
+        if part >= len(pending) or len(pending) != parts:
+            raise P.ProtocolError("bad_request", "Bad report part.")
+        pending[part] = data
+        if any(x is None for x in pending):
+            return
+        del s.crash_parts[report]
+        try:
+            packed = base64.b64decode("".join(x for x in pending if x is not None), validate=True)
+        except ValueError as exc:
+            raise P.ProtocolError("bad_request", "Not a crash report.") from exc
+        text = self._unpack_crash(packed)
+        path = self._save_crash(s, report, text)
+        log.info("crash report %s from %s: %s, %d bytes", report, s.name or "a guest", path, len(text))
+        self._reply(s, msg, {"type": "crash_report_ack", "report": report})
+
+    @staticmethod
+    def _unpack_crash(packed: bytes) -> bytes:
+        """Qt's qCompress: the size, 4 bytes big-endian, then zlib."""
+        if len(packed) < 4 or int.from_bytes(packed[:4], "big") > CRASH_MAX_BYTES:
+            raise P.ProtocolError("bad_request", "Not a crash report, or too large.")
+        z = zlib.decompressobj()
+        try:
+            text = z.decompress(packed[4:], CRASH_MAX_BYTES + 1)
+        except zlib.error as exc:
+            raise P.ProtocolError("bad_request", "Not a crash report.") from exc
+        if len(text) > CRASH_MAX_BYTES or z.unconsumed_tail:
+            raise P.ProtocolError("too_long", "Crash report too large.")
+        return text
+
+    def _crash_dir(self) -> str:
+        return self.cfg.crash_dir or os.path.join(os.path.dirname(os.path.abspath(self.cfg.db_path)), "crashes")
+
+    def _save_crash(self, s: Session, report: str, text: bytes) -> str:
+        folder = self._crash_dir()
+        os.makedirs(folder, exist_ok=True)
+        who = re.sub(r"[^A-Za-z0-9_-]", "_", s.name or "guest")
+        path = os.path.join(folder, f"{time.strftime('%Y%m%d-%H%M%S')}-{who}-{report[:8]}.txt")
+        header = (f"received {time.strftime('%Y-%m-%d %H:%M:%S %z')} from "
+                  f"{s.name or 'a launcher not signed in'}, launcher {s.client_version}\n\n")
+        with open(path, "wb") as f:
+            f.write(header.encode("utf-8") + text)
+        kept = sorted(n for n in os.listdir(folder) if n.endswith(".txt"))
+        for old in kept[:max(0, len(kept) - self.cfg.crash_keep)]:
+            with suppress(OSError):
+                os.remove(os.path.join(folder, old))
+        return path
+
     def broadcast_notice(self, text: str, level: str = "info") -> None:
         for other in list(self.sessions):
             if other.hello:
@@ -1135,6 +1269,44 @@ class Server:
         sess = p.session
         return sess is not None and sess.udp_public is not None and sess.udp_seen >= m.created
 
+    def _reachable(self, m: Match, p: MatchPlayer) -> bool:
+        """UDP heard from the player since the match was found, or it plays through its connection."""
+        return p.tunnel or self._fresh_udp(m, p)
+
+    def on_tunnel(self, s: Session, msg: dict[str, Any]) -> None:
+        """The launcher hears nothing from this server's UDP port (no hello_ack): its match goes through its
+        connection, a tunnel (docs/PROTOCOL.md)."""
+        m, p = self._my_match(s, msg)
+        if not s.can_tunnel or not self.cfg.relay or m.state not in PENDING_STATES or p.tunnel:
+            return
+        p.tunnel = True
+        log.info("match %s: %s plays through its connection (no UDP)", m.id, p.name)
+        now = time.time()
+        if m.state == "accepted":
+            self._maybe_send_peers(m, now)
+        elif m.state == "punching" and all(pl.session is not None and pl.session.can_tunnel for pl in m.players):
+            # both launchers send the attempt's key with their reports: the other's report of this attempt, still on
+            # its way, is left aside
+            self._start_relay(m, now)
+        # still "found": once both accepted; "punching" with a launcher that does not send keys: once both reported
+
+    def on_tun(self, s: Session, msg: dict[str, Any]) -> None:
+        """Game packets through the connection of a player who plays through it: on to the other player."""
+        route = s.tunnel
+        data = msg.get("d")
+        if route is None or not isinstance(data, list) or len(data) > TUNNEL_BATCH:
+            return
+        for item in data:
+            if not isinstance(item, str) or len(item) > TUNNEL_ITEM_CHARS:
+                route.dropped += 1
+                continue
+            try:
+                packet = base64.b64decode(item, validate=True)
+            except ValueError:
+                route.dropped += 1
+                continue
+            self.relay_packet(route, packet)
+
     def on_udp_hello(self, s: Session, addr: tuple[str, int], msg: dict[str, Any]) -> None:
         now = time.time()
         s.udp_public = addr
@@ -1145,17 +1317,17 @@ class Server:
             self._maybe_send_peers(m, now)
 
     def _maybe_send_peers(self, m: Match, now: float) -> None:
-        if m.state != "accepted" or not all(self._fresh_udp(m, p) for p in m.players):
+        if m.state != "accepted" or not all(self._reachable(m, p) for p in m.players):
             return
         m.state = "punching"
         m.key = secrets.token_hex(16)
         m.deadline = now + self.cfg.ping_report_timeout
         a, b = m.players
         assert a.session is not None and b.session is not None
-        assert a.session.udp_public is not None and b.session.udp_public is not None
-        if self.cfg.relay_only:
+        if self.cfg.relay_only or a.tunnel or b.tunnel:
             self._start_relay(m, now)
             return
+        assert a.session.udp_public is not None and b.session.udp_public is not None
         same_nat = a.session.udp_public[0] == b.session.udp_public[0]
         for p in m.players:
             o = m.other(p)
@@ -1173,10 +1345,13 @@ class Server:
         m, p = self._my_match(s, msg)
         if m.state != "punching":
             return
+        key = msg.get("key")
+        if isinstance(key, str) and key != m.key:
+            return  # a report of an attempt before this one (launchers since 0.4.0 send the attempt's key)
         ok = P.get_bool(msg, "ok")
         rtt = P.get_int(msg, "rtt_ms", lo=0, hi=60_000, default=0)
         remote = P.format_endpoint(P.parse_endpoint(msg.get("remote")))
-        via = msg.get("via") if msg.get("via") in ("lan", "public", "relay") else ""
+        via = msg.get("via") if msg.get("via") in ("lan", "public", "relay", "tunnel") else ""
         p.ping = {"ok": ok and bool(remote), "rtt_ms": rtt, "remote": remote, "via": via}
         if all(pl.ping is not None for pl in m.players):
             self._decide(m, time.time())
@@ -1185,7 +1360,18 @@ class Server:
         a, b = m.players
         assert a.ping is not None and b.ping is not None
         if not (a.ping["ok"] and b.ping["ok"]):
-            if self.cfg.relay and m.relay is None and all(self._fresh_udp(m, p) for p in m.players):
+            if self.cfg.relay and m.relay is None and all(self._reachable(m, p) for p in m.players):
+                self._start_relay(m, now)
+                return
+            # the relay failed as well (UDP that goes out and never comes back, a router that drops it): whoever can
+            # plays through their connection, once
+            movable = [p for p in m.players if not p.tunnel and p.session is not None and p.session.can_tunnel]
+            if self.cfg.relay and m.relay is not None and movable and not m.tunnel_tried:
+                m.tunnel_tried = True
+                for p in movable:
+                    p.tunnel = True
+                log.info("match %s: the relay failed, %s through their connections", m.id,
+                         ", ".join(p.name for p in movable))
                 self._start_relay(m, now)
                 return
             self.ping_cache.put_unreachable(a.account_id, b.account_id, now)
@@ -1200,32 +1386,59 @@ class Server:
         self._go(m, rtt, now)
 
     def _start_relay(self, m: Match, now: float) -> None:
-        """The two cannot reach each other (or relay_only): this server's UDP port carries their packets from now
-        on, between the endpoints their hellos came from. Their launchers punch and ping through it as they would
-        each other, and the games send to it."""
-        a, b = m.players
-        assert a.session is not None and b.session is not None
-        ea, eb = a.session.udp_public, b.session.udp_public
-        assert ea is not None and eb is not None
-        m.relay = (ea, eb)
+        """The two cannot reach each other (or relay_only, or a player's network lets no UDP through): this server
+        carries their packets from now on, between the endpoints their hellos came from, or through the connection
+        of a player who plays through it (a tunnel). Their launchers punch and ping through it as they would each
+        other, and the games send to it. Each attempt has a key of its own."""
+        self._drop_routes(m)
+        ends: list[tuple[str, int] | Session] = []
+        for p in m.players:
+            assert p.session is not None
+            if p.tunnel:
+                ends.append(p.session)
+            else:
+                assert p.session.udp_public is not None
+                ends.append(p.session.udp_public)
+        m.relay = ends
+        m.key = secrets.token_hex(16)
         m.state = "punching"
         m.deadline = now + self.cfg.ping_report_timeout
         for p in m.players:
             p.ping = None
-        for src, dst in ((ea, eb), (eb, ea)):
-            self.relay_routes[src] = RelayRoute(dst, m.id, tokens=self.cfg.relay_burst, last=time.monotonic())
+        for src, dst in ((ends[0], ends[1]), (ends[1], ends[0])):
+            route = RelayRoute(dst, m.id, tokens=self.cfg.relay_burst, last=time.monotonic())
+            if isinstance(src, Session):
+                src.tunnel = route
+            else:
+                self.relay_routes[src] = route
         for p in m.players:
             o = m.other(p)
             assert p.session is not None
             p.session.send({
                 "type": "match_peer", "match": m.id, "side": p.side, "key": m.key,
-                "punch_timeout": self.cfg.punch_timeout, "same_nat": False, "relay": True,
+                "punch_timeout": self.cfg.punch_timeout, "same_nat": False, "relay": True, "tunnel": p.tunnel,
                 "peer": {"public": "", "lan": ""}, "opponent": self._opponent(m, o),
             })
-        log.info("match %s relayed through this server: %s %s / %s %s", m.id, a.name, P.format_endpoint(ea),
-                 b.name, P.format_endpoint(eb))
+        a, b = m.players
+        log.info("match %s relayed through this server: %s %s / %s %s", m.id, a.name, self._end_name(ends[0]),
+                 b.name, self._end_name(ends[1]))
 
-    def relay_packet(self, route: RelayRoute, data: bytes, transport: asyncio.DatagramTransport) -> None:
+    @staticmethod
+    def _end_name(end: tuple[str, int] | Session) -> str:
+        return "(through its connection)" if isinstance(end, Session) else P.format_endpoint(end)
+
+    def _drop_routes(self, m: Match) -> None:
+        """The routes of the match's last relay attempt, gone before the next."""
+        for end in m.relay or ():
+            if isinstance(end, Session):
+                if end.tunnel is not None and end.tunnel.match == m.id:
+                    end.tunnel = None
+            else:
+                route = self.relay_routes.get(end)
+                if route is not None and route.match == m.id:
+                    del self.relay_routes[end]
+
+    def relay_packet(self, route: RelayRoute, data: bytes) -> None:
         """Passes one packet on, byte for byte: never more than came in, only between a match's two players, and
         no faster than relay_rate."""
         if len(data) > P.MAX_RELAY_DATAGRAM:
@@ -1239,18 +1452,21 @@ class Server:
             return
         route.tokens -= 1.0
         route.packets += 1
-        transport.sendto(data, route.partner)
+        if isinstance(route.partner, Session):
+            route.partner.tunnel_send(data)
+        elif self._udp is not None:
+            self._udp.sendto(data, route.partner)
 
     def _end_relay(self, m: Match) -> None:
         if m.relay is None:
             return
         expires = time.time() + self.cfg.relay_linger
         counts = []
-        for ep in m.relay:
-            route = self.relay_routes.get(ep)
+        for end in m.relay:
+            route = end.tunnel if isinstance(end, Session) else self.relay_routes.get(end)
             if route is not None and route.match == m.id:
                 route.expires = expires
-                counts.append(f"{P.format_endpoint(ep)} sent {route.packets} ({route.dropped} dropped)")
+                counts.append(f"{self._end_name(end)} sent {route.packets} ({route.dropped} dropped)")
         log.info("match %s relay: %s", m.id, ", ".join(counts))
 
     def _go(self, m: Match, rtt: int, now: float, *, rematch: str | None = None) -> None:

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hashlib
 import itertools
 import json
@@ -77,7 +78,7 @@ class Connection:
         self._task: asyncio.Task | None = None
         self._keepalive: asyncio.Task | None = None
 
-    async def connect(self, *, hello: bool = True, version: str = CLIENT_VERSION) -> dict[str, Any]:
+    async def connect(self, *, hello: bool = True, version: str = CLIENT_VERSION, tunnel: bool = False) -> dict[str, Any]:
         if self.plain:
             self.reader, self.writer = await asyncio.open_connection(self.host, self.port, limit=P.MAX_LINE + 2)
         else:
@@ -95,8 +96,10 @@ class Connection:
         self._task = asyncio.create_task(self._read_loop())
         self._keepalive = asyncio.create_task(self._ping_loop())
         if hello:
-            self.welcome = await self.request({"type": "hello", "proto": P.PROTO, "client": CLIENT_NAME,
-                                               "version": version, "os": sys.platform})
+            hello_msg = {"type": "hello", "proto": P.PROTO, "client": CLIENT_NAME, "version": version, "os": sys.platform}
+            if tunnel:
+                hello_msg["tunnel"] = True  # it can play a match through this connection
+            self.welcome = await self.request(hello_msg)
         return self.welcome
 
     async def _read_loop(self) -> None:
@@ -317,6 +320,86 @@ class UdpPeer(asyncio.DatagramProtocol):
         rtts.sort()
         return {"ok": True, "rtt_ms": int(round(rtts[len(rtts) // 2])), "remote": P.format_endpoint(working[1]),
                 "via": working[0]}
+
+
+class TunnelPeer:
+    """The launcher's side of a tunnel (a match through its connection, docs/PROTOCOL.md): punch and ping the peer,
+    and pass datagrams, as tun messages."""
+
+    def __init__(self, conn: Connection) -> None:
+        self.conn = conn
+        self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()  # JSON datagrams that came through
+        self.raw: asyncio.Queue[bytes] = asyncio.Queue()  # the others (game packets)
+        self.match = ""
+        self.key = ""
+        self.side = 0
+        self._task = asyncio.create_task(self._read())
+
+    async def _read(self) -> None:
+        while not self.conn.closed:
+            try:
+                msg = await self.conn.expect("tun", timeout=3600)
+            except (TimeoutError, ConnectionError):
+                return
+            for item in msg.get("d", []):
+                data = base64.b64decode(item)
+                try:
+                    obj = json.loads(data)
+                except ValueError:
+                    self.raw.put_nowait(data)
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                kind = obj.get("type")
+                if kind in ("punch", "ping") and self.key and obj.get("match") == self.match and obj.get("key") == self.key:
+                    self.send_json({**obj, "type": "punch_ack" if kind == "punch" else "pong", "side": self.side})
+                self.queue.put_nowait(obj)
+
+    def send(self, *datagrams: bytes) -> None:
+        self.conn.send({"type": "tun", "d": [base64.b64encode(d).decode("ascii") for d in datagrams]})
+
+    def send_json(self, obj: dict[str, Any]) -> None:
+        self.send(P.encode_datagram(obj))
+
+    async def recv(self, timeout: float, pred: Callable[[dict[str, Any]], bool]) -> dict[str, Any] | None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while (remaining := deadline - loop.time()) > 0:
+            try:
+                obj = await asyncio.wait_for(self.queue.get(), remaining)
+            except TimeoutError:
+                return None
+            if pred(obj):
+                return obj
+        return None
+
+    async def punch(self, *, match: str, key: str, side: int, server_udp: str, timeout: float = 10.0,
+                    pings: int = 5) -> dict[str, Any]:
+        """As UdpPeer.punch with the tunnel as the one candidate; returns the ping_report fields."""
+        self.match, self.key, self.side = match, key, side
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        acked = False
+        while not acked and loop.time() < deadline:
+            self.send_json({"type": "punch", "match": match, "key": key, "side": side})
+            acked = await self.recv(0.1, lambda m: m.get("type") == "punch_ack" and m.get("key") == key) is not None
+        if not acked:
+            return {"ok": False, "rtt_ms": 0, "key": key}
+        rtts: list[float] = []
+        for seq in range(pings):
+            t = loop.time() * 1000
+            self.send_json({"type": "ping", "match": match, "key": key, "seq": seq, "t": int(t)})
+            if await self.recv(0.5, lambda m, s=seq: m.get("type") == "pong" and m.get("seq") == s) is not None:
+                rtts.append(loop.time() * 1000 - t)
+            await asyncio.sleep(0.05)
+        if len(rtts) < 3:
+            return {"ok": False, "rtt_ms": 0, "key": key}
+        rtts.sort()
+        return {"ok": True, "rtt_ms": int(round(rtts[len(rtts) // 2])), "remote": server_udp, "via": "tunnel",
+                "key": key}
+
+    def close(self) -> None:
+        self._task.cancel()
 
 
 async def play_one_match(conn: Connection, udp: UdpPeer, *, server_host: str, lan_ip: str = "127.0.0.1",

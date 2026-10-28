@@ -33,6 +33,10 @@ public:
     QHostAddress serverAddress() const;
     quint16 serverUdpPort() const;
     QHostAddress localAddress() const;
+    // the server carries a match through this connection when UDP gets nowhere (a tunnel, docs/PROTOCOL.md)
+    bool canTunnel() const { return welcome_.value(QStringLiteral("tunnel")).toBool(); }
+    // a tunnel's game packets, in as few tun messages as fit the server's lines
+    void sendTunnel(const QList<QByteArray>& datagrams);
 
     int send(QJsonObject msg);  // adds and returns a request id; -1 when offline
     int login(const QString& name, const QString& password);
@@ -51,6 +55,7 @@ signals:
     void loggedOut();
     void resumeFailed();
     void kicked(const QString& text);
+    void tunneled(const QList<QByteArray>& datagrams);  // a tunnel's packets that came (tun: not a message())
 
 private:
     void setState(State s);

@@ -57,7 +57,10 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
   Fighters are always picked on the game's own select screen (the start line says `p1=- p2=-`). The game boots in
   the background to its hold point while the search runs; a match found has 15 s to be accepted; then the launcher
   punches the opponent on the game port, measures the ping, writes the start line and reports what the game writes
-  to `status.txt`. While a match runs the button is LEAVE MATCH (also in the footer): Kasual and lobby matches end
+  to `status.txt`. Two who cannot reach each other play through the server's UDP port, and a player whose network
+  lets no UDP through at all (no answer from the server's UDP port within 3 s) through the server connection
+  (PROTOCOL.md, "A match through the server connection"): the game's peer is then `TunnelBridge`, a socket of the
+  launcher on 127.0.0.1. While a match runs the button is LEAVE MATCH (also in the footer): Kasual and lobby matches end
   without counting, a ranked one counts as leaving the set (it asks first). After a queue match the series card
   offers REMATCH (the same fighters), SELECT (both pick again) and LEAVE for 60 s; a ranked set (first to 2) plays
   on by itself. When both games still wait at their CONTINUE? menu the next match starts right there with the
@@ -92,6 +95,23 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
 
 A controller steers the launcher as in MK3D (`GamepadNav`, SDL3): d-pad or stick moves the gold focus, A presses, B
 backs out of dialogs (never MATCH FOUND or the rematch prompt), LB/RB switch pages, START finds a match.
+
+## Crash reports
+
+A game the launcher started that ends by itself with an exit code other than 0 (not asked to quit, not killed) gets
+a report in `crashes\<yyyyMMdd-hhmmss>-mk9\` beside the launcher's log (`CrashReports`; the newest 20 are kept):
+
+- `report.txt`: the time, the launcher's and the game's versions, the exit code in words, this PC (Windows,
+  processor, memory, the graphics card the game's log names), the launcher's last match messages, the game's own
+  report (`crash.txt`, mk9/src/mk9/crash.h: the exception and where, as `sub_82xxxxxx` for recompiled code, both call
+  stacks, the guest registers, the game's state and modules), then the last 200 lines of the game's log and 60 of the
+  launcher's;
+- `crash.dmp`, the game's minidump, moved from its session, and `game.log`, its whole log.
+
+The launcher then shows THE GAME CRASHED: SEND REPORT (`crash_report`, PROTOCOL.md; only `report.txt`, with the
+user folder's path in it replaced by `%USERPROFILE%`; `sent.txt` in the folder records it), OPEN FOLDER, CLOSE. The
+server keeps what it gets in `crashes\` beside its database (`/var/lib/mk9/crashes` on the official one). The
+stand-in game (`.py`) gets no reports.
 
 ## The game contract
 
@@ -162,6 +182,18 @@ What was run for this version (2026-10-27), all on one PC with Qt's offscreen pl
 - `--extract <the Komplete Edition iso>` with a stand-in build script: XGD2 at 0xFD90000, 1265 files, 7.27 GB,
   `default.xex` SHA-1 as in `mk9.json`, every file byte-identical to `game\disc`, the script's output streamed.
 - `python -m pytest server\tests`: 88 passed.
+
+And for 0.4.0 (2026-10-28), the same way:
+
+- Two launchers and the stand-in against a local server, one with `[dev] block_udp=true` (every UDP datagram it
+  sends goes nowhere): after 3 s without a `hello_ack` it asked for a tunnel, punched and pinged through the
+  connection, its game's peer was `TunnelBridge`, and two matches (the series went on, set up anew) agreed with
+  the other launcher on the server's UDP relay, 73 packets each way, none dropped. Both blocked: the same through
+  two connections.
+- A launcher whose real game crashed on purpose (`MK9_CRASH_TEST=600`) while it searched: `crashes\<time>-mk9\`
+  with `report.txt` (26 KB), `crash.dmp` (1.2 MB) and `game.log`; `--send-crash-reports` sent it, and the server's
+  copy had no user folder path left in it.
+- `python -m pytest server\tests`: 95 passed (tunnels and crash reports: `test_tunnel.py`).
 
 Command-line options (development and automation) are MK3D's (`--config`, `--server`, `--fingerprint`, `--user`
 with `MK9_DEV_PASSWORD`, `--register`, `--queue casual|ranked`, `--mode versus|tag|tyl`, `--auto-accept N`,

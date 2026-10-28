@@ -4,6 +4,10 @@
 // is the top of each frame: no game code is on the guest stack below GuardedMain's own frame,
 // so the simulation can be saved and put back there (rollback.h), and inputs for the frame are
 // settled before the engine polls the pads.
+//
+// No more than 60 frames a second start there (MK9_FRAME_CAP=<n> caps at n instead, 0 not at all):
+// the frames the game draws wait for the GPU's 60 Hz vertical blank anyway, the cap holds back the
+// ones that do not (loading screens, some menus), and frames a rollback runs again are not capped.
 #include <cstdint>
 
 struct PPCContext;

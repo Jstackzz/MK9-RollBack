@@ -13,6 +13,7 @@
 
 class ServerClient;
 class UdpRendezvous;
+class TunnelBridge;
 class GameProcess;
 class FeedLink;
 
@@ -147,6 +148,11 @@ private:
     void thawGame();
     void maybeBackToSolo();  // standby: nothing more to play online, single player again
     void maybeStartSolo();   // a search waits with the match's game at its hold point: single player meanwhile
+    // a tunnel (docs/PROTOCOL.md): no hello_ack for the match, so the server is asked to carry it through the
+    // connection; its packets come and go there, to the punch and then to the game (bridge_)
+    void askForTunnel();
+    void onTunneled(const QList<QByteArray>& datagrams);
+    void closeBridge();
     void openFeed(const QJsonObject& go);  // a lobby match: what its spectators need, from the game to the server
     void closeFeed();
     void closeWatchFeed();
@@ -179,6 +185,11 @@ private:
     QTimer parkTimer_, keepaliveTimer_, startTimeout_, finishTimeout_, watchTimeout_, watchFeedCheck_, startCheck_;
     QTimer continueTimer_;  // no series' next match comes for the game held at CONTINUE?: it goes back to its menu
     QTimer parkWatch_;      // a park outside Finishing that did not bring the game back: it is started again
+    QTimer tunnelAsk_;      // the match's hellos unanswered this long: through the server connection
+    bool udpAcked_ = false;    // a hello_ack came for this match
+    bool udpBlocked_ = false;  // the last hellos to the server went unanswered
+    bool tunnel_ = false;      // this match goes through the server connection
+    TunnelBridge* bridge_ = nullptr;  // the game's peer on this PC in a match through the server connection
     // after a queue or series match with a result, the game waits at its CONTINUE? menu with the opponent's, so that
     // the series' next match can start there (the server's "rematch"); parked once nothing more comes
     bool atContinue_ = false;

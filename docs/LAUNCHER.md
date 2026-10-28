@@ -86,8 +86,8 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
   key names, `[buttons]`); every game started gets its path in `MK9_CONTROLS`. Online matches run on a fresh save,
   so they play with the game's default button layout: remap here.
 - **Settings**: server address and pinned fingerprint, region, max ping, **input delay** (Auto, the default: from
-  the ping measured when the match connects; or 0-6 frames), **netcode** (Lockstep,
-  the default, or Rollback (experimental): a match plays rollback only when both players chose it), game UDP port,
+  the ping measured when the match connects; or 0-6 frames), **netcode** (Rollback,
+  the default, or Lockstep: a match plays rollback only when both players chose it), game UDP port,
   UPnP, the game window (fullscreen or a window), the game's paths (table above), Python and local test ports.
 
 A controller steers the launcher as in MK3D (`GamepadNav`, SDL3): d-pad or stick moves the gold focus, A presses, B
@@ -179,7 +179,8 @@ with `MK9_DEV_PASSWORD`, `--register`, `--queue casual|ranked`, `--mode versus|t
   release zip; the updater code is MK3D's (renamed `MK9-Online-<version>-windows.zip`, `MK9Launcher.exe`) and the
   server's `RELEASES_PAGE` is empty until there is a releases page.
 - **Two vs two with four people**: the game takes `players=4`; the server and launcher pair two players only.
-- **Rollback**: selectable, experimental on the game side; lockstep is the default.
+- **Rollback**: the default; tested on one PC with simulated lag (see GAME.md), not yet between two PCs over the
+  internet. Lockstep stays in Settings.
 - **Display**: only fullscreen or a window; the resolution and v-sync settings of MK3D are gone (the game's own
   `mk9.toml` cvars apply).
 - The launcher was not run against the real `mk9.exe` here (it was being rebuilt); everything above used the

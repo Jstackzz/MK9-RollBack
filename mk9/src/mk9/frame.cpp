@@ -3,6 +3,7 @@
 #include "mk9/frame.h"
 #include "mk9/diag.h"
 #include "mk9/game.h"
+#include "mk9/gmalloc.h"
 #include "mk9/link.h"
 #include "mk9/snap.h"
 
@@ -12,6 +13,9 @@ uint64_t Switches();
 
 #include <atomic>
 #include <chrono>
+#include <string>
+
+#include <fmt/format.h>
 
 #include <rex/hook.h>
 #include <rex/logging.h>
@@ -65,7 +69,14 @@ REX_HOOK_RAW(sub_823621F8) {
   if (g_main_tid.load(std::memory_order_relaxed) == 0) {
     g_main_tid.store(CurrentTid());
     REXLOG_INFO("mk9: first frame on host thread {}", CurrentTid());
+    // UE3's GMalloc (0x833D9074): its object and vtable, for the allocator hooks (mk9/simheap)
+    const uint32_t gmalloc = mk9::game::ReadU32(0x833D9074);
+    const uint32_t vt = gmalloc ? mk9::game::ReadU32(gmalloc) : 0;
+    std::string entries;
+    for (int i = 0; vt && i < 12; i++) entries += fmt::format(" +{}={:08X}", i * 4, mk9::game::ReadU32(vt + 4 * i));
+    REXLOG_INFO("mk9: GMalloc {:08X} vtable {:08X}{}", gmalloc, vt, entries);
   }
+  mk9::gmalloc::OnFrameTop(ctx, base);
   if (g_top) g_top(ctx, base);
   __imp__sub_823621F8(ctx, base);
   const uint64_t n = g_frames.fetch_add(1, std::memory_order_relaxed) + 1;

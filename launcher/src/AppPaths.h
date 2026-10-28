@@ -53,8 +53,8 @@ QString inputDelayText(int delay);
 // what Auto comes to for a round trip: clamp(ceil((rtt / 2 + 8) / 16.67), 2, 8) frames, the one-way latency and a frame
 // on its way (the server's protocol.auto_delay)
 int autoDelay(int rttMs);
-// what the games keep a match in step with: "lockstep" (the default) or "rollback" (experimental); a match plays
-// rollback only when both players chose it (the server decides, match_go's netcode)
+// what the games keep a match in step with: "rollback" (the default) or "lockstep"; a match plays rollback only when
+// both players chose it (the server decides, match_go's netcode)
 QString netcode();
 int gamePort();
 bool fullscreen();  // the game's window: fullscreen (the game's own default) or a window

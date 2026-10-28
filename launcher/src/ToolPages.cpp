@@ -453,12 +453,12 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
                          "measured when the match connects, (ping / 2 + 8 ms) / 16.7 ms, 2 to 8 frames. A match "
                          "takes the larger delay of the two players."));
     auto* netcode = new QComboBox;
-    netcode->addItem(tr("Lockstep (default)"), QStringLiteral("lockstep"));
-    netcode->addItem(tr("Rollback (experimental)"), QStringLiteral("rollback"));
+    netcode->addItem(tr("Rollback (default)"), QStringLiteral("rollback"));
+    netcode->addItem(tr("Lockstep"), QStringLiteral("lockstep"));
     netcode->setCurrentIndex(qMax(0, netcode->findData(cfg::netcode())));
-    netcode->setToolTip(tr("Lockstep waits for the other player's input before each frame. Rollback runs ahead on a "
-                           "guess and corrects it: smoother over a long distance, still experimental. A match plays "
-                           "rollback only when both players chose it."));
+    netcode->setToolTip(tr("Rollback runs ahead on a guess of the other player's input and corrects it when the real "
+                           "input arrives: smooth over a long distance. Lockstep waits for the other player's input "
+                           "before each frame. A match plays rollback only when both players chose it."));
     auto* port = new QSpinBox;
     port->setRange(1024, 65535);
     port->setValue(cfg::gamePort());

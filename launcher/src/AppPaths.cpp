@@ -161,8 +161,8 @@ QString inputDelayText(int delay) {
 }
 int autoDelay(int rttMs) { return qBound(2, int(std::ceil((rttMs / 2.0 + 8.0) / 16.67)), 8); }
 QString netcode() {
-    return get(QStringLiteral("online/netcode")).toString() == QLatin1String("rollback") ? QStringLiteral("rollback")
-                                                                                         : QStringLiteral("lockstep");
+    return get(QStringLiteral("online/netcode")).toString() == QLatin1String("lockstep") ? QStringLiteral("lockstep")
+                                                                                         : QStringLiteral("rollback");
 }
 int gamePort() { return get(QStringLiteral("online/game_port"), 7001).toInt(); }
 bool fullscreen() { return get(QStringLiteral("display/fullscreen"), true).toBool(); }

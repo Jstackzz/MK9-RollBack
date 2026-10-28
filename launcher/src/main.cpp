@@ -77,7 +77,7 @@ int main(int argc, char* argv[]) {
         QStringLiteral("Development: with --queue, start single player first and search alongside it (standby)."));
     const QCommandLineOption netcodeOpt(
         QStringLiteral("netcode"),
-        QStringLiteral("The netcode this player asks for, saved: lockstep (default) or rollback (experimental)."),
+        QStringLiteral("The netcode this player asks for, saved: rollback (default) or lockstep."),
         QStringLiteral("lockstep|rollback"));
     const QCommandLineOption soloWaitOpt(
         QStringLiteral("solo-wait"),

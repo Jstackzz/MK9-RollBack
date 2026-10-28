@@ -24,6 +24,9 @@ using Clock = std::chrono::steady_clock;
 int g_depth = 0;
 uint64_t g_from = 0;
 int g_every = 10;
+// MK9_SYNCTEST_VERIFY=1: at the first rollback, every tracked page compared with a copy taken at
+// the top of the frame it goes back to
+bool g_verify = false;
 std::map<uint64_t, uint64_t> g_hash;  // frame -> its page hash the first time it ran
 std::map<uint64_t, std::vector<uint32_t>> g_pages;
 uint64_t g_checked = 0, g_bad = 0, g_rollbacks = 0;
@@ -34,14 +37,16 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
   if (n < g_from) return;
   if (n == g_from) {
     rb::SetHashing(true);
-    engine::WaitRenderIdle(100);
-    rb::Arm(ctx, uint32_t(n));
+    engine::Hold();
     engine::ExcludeFromRollback();
+    rb::Arm(ctx, uint32_t(n));
+    engine::Release();
     return;
   }
   if (!rb::Armed()) return;
-  // the rendering thread done with what the frame queued: nothing of it runs while memory goes back
-  if (!engine::WaitRenderIdle(100)) REXLOG_WARN("mk9 synctest: the rendering thread is still busy at frame {}", n);
+  // the rendering thread done with what the frame queued and the job workers in their idle waits:
+  // nothing of theirs runs while memory is kept or goes back
+  if (!engine::Hold()) REXLOG_WARN("mk9 synctest: the other simulation threads were not all idle at frame {}", n);
   rb::CloseFrame();
   g_hash[n - 1] = rb::LastFrameHash();
   g_pages[n - 1] = rb::LastFramePageList();
@@ -53,14 +58,19 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
     const PPCContext top = ctx;
     const uint64_t target = n - uint64_t(g_depth);
     const auto t0 = Clock::now();
+    // the second and third rollbacks: the frames' pages as they ran, against how they run again
+    const bool rerun_check = g_verify && g_depth == 1 && (g_rollbacks == 1 || g_rollbacks == 2 || g_rollbacks == 60 || g_rollbacks == 61);
+    if (rerun_check) rb::DebugSnapshotPages(g_pages[n - 1]);
     if (rb::Restore(uint32_t(target), ctx)) {
+      if (g_verify && g_rollbacks == 0) rb::DebugCompare();
       g_rollbacks++;
       frame::SetCount(target);
       for (uint64_t f = target; f < n; f++) {
         ctx = top;
         rb::OpenFrame(uint32_t(f), ctx);
+        engine::Release();
         frame::RunAgain(ctx, base);
-        engine::WaitRenderIdle(100);
+        engine::Hold();
         rb::CloseFrame();
         const uint64_t again = rb::LastFrameHash();
         g_checked++;
@@ -75,6 +85,7 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
         }
         g_hash[f] = again;
         g_pages[f] = rb::LastFramePageList();
+        if (rerun_check) rb::DebugComparePages("ran again");
       }
       const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
       g_worst_ms = std::max(g_worst_ms, ms);
@@ -82,6 +93,9 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
     ctx = top;
   }
   rb::OpenFrame(uint32_t(n), ctx);
+  // the frame the first rollback goes back to, as it starts
+  if (g_verify && n == g_from + uint64_t(g_every) - uint64_t(g_depth)) rb::DebugSnapshot();
+  engine::Release();
   if (n % 600 == 0) {
     auto st = rb::GetStats();
     REXLOG_INFO(
@@ -99,6 +113,7 @@ bool Init() {
   g_depth = std::max(1, std::atoi(d));
   if (const char* v = std::getenv("MK9_SYNCTEST_FROM")) g_from = std::strtoull(v, nullptr, 10);
   if (const char* v = std::getenv("MK9_SYNCTEST_EVERY")) g_every = std::max(1, std::atoi(v));
+  if (const char* v = std::getenv("MK9_SYNCTEST_VERIFY")) g_verify = *v == '1';
   frame::SetTopHook(&OnTop);
   REXLOG_INFO("mk9 synctest: depth {} every {} frames from frame {}", g_depth, g_every, g_from);
   return true;

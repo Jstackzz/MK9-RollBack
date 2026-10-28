@@ -50,6 +50,7 @@
 #include <rex/ppc/context.h>
 
 #include "mk9/autopilot.h"
+#include "mk9/engine.h"
 #include "mk9/frame.h"
 #include "mk9/game.h"
 #include "mk9/net/rollback.h"
@@ -154,6 +155,8 @@ FILE* g_log = nullptr;
 Clock::time_point g_last_hello{};
 bool g_rolling = false;                    // rollback armed: frames may run on guesses
 std::map<uint32_t, uint32_t> g_tentative;  // state hashes at frame tops, until every input before is known
+// what each check frame's hash was made of (the log's "timer" and "rand"), as of its last run
+std::map<uint32_t, std::pair<uint32_t, uint32_t>> g_check_detail;
 uint32_t g_paced_at = 0;                   // the last frame held back to let the others catch up
 
 // this side's own input delay, and the match's: the largest any side asked at the barrier (each
@@ -533,8 +536,13 @@ void LogFrame(bool again) {
   auto it = g_my_checks.find(g_frame);
   auto t = g_tentative.find(g_frame);
   if (it != g_my_checks.end() || t != g_tentative.end()) {
-    uint32_t timer, rand_state;
-    game::LastCheckDetail(timer, rand_state);
+    uint32_t timer = 0, rand_state = 0;
+    if (auto d = g_check_detail.find(g_frame); d != g_check_detail.end()) {
+      timer = d->second.first;
+      rand_state = d->second.second;
+    } else {
+      game::LastCheckDetail(timer, rand_state);
+    }
     std::fprintf(g_log, " check %08X timer %u rand %08X", it != g_my_checks.end() ? it->second : t->second,
                  timer, rand_state);
   }
@@ -617,7 +625,13 @@ void SetFrameInputs(uint32_t f) {
 // every 30 frames both sides compare what the game says its state is at the top of the frame; with
 // rollback the hash is sent once every input before the frame is known (and was used)
 void Tentative(uint32_t f, PPCContext& ctx, uint8_t* base) {
-  if (f % 30 == 0) g_tentative[f] = game::StateHash(ctx, base);
+  if (f % 30 == 0) {
+    g_tentative[f] = game::StateHash(ctx, base);
+    uint32_t timer, rand_state;
+    game::LastCheckDetail(timer, rand_state);
+    g_check_detail[f] = {timer, rand_state};
+    while (g_check_detail.size() > 64) g_check_detail.erase(g_check_detail.begin());
+  }
 }
 
 void SettleChecks() {
@@ -630,6 +644,8 @@ void SettleChecks() {
 }
 
 bool StartRolling(PPCContext& ctx) {
+  engine::Hold();
+  engine::ExcludeFromRollback();
   if (!rb::Arm(ctx, g_frame)) return false;
   g_rolling = true;
   for (PeerState& p : g_peers) p.confirmed = g_frame;
@@ -683,7 +699,9 @@ bool CorrectGuesses(PPCContext& ctx, uint8_t* base) {
     ctx = top;  // the registers at the top of a frame are GuardedMain's loop's, the same every frame
     rb::OpenFrame(f, ctx);
     Tentative(f, ctx, base);
+    engine::Release();
     frame::RunAgain(ctx, base);  // its end hook moves g_frame on
+    engine::Hold();
     rb::CloseFrame();
   }
   ctx = top;
@@ -714,6 +732,11 @@ std::atomic<bool> g_meet_asked{false};  // the launcher's start
 std::atomic<uint32_t> g_meet_seed{0};
 
 void OnTop(PPCContext& ctx, uint8_t* base) {
+  // the rendering thread and the job workers, held while rollback keeps or puts back memory, go
+  // on once the frame does
+  struct ReleaseAtEnd {
+    ~ReleaseAtEnd() { engine::Release(); }
+  } release_at_end;
   ApplyPending();
   if (g_status == Status::Off) return StopRolling();
   Receive();
@@ -736,6 +759,7 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
   }
   if (g_status != Status::InSync) return;
   if (g_rolling) {
+    engine::Hold();
     rb::CloseFrame();  // the frame that just ran
     if (!CorrectGuesses(ctx, base)) return Lost(Status::Desynced);
     // the fight is over: lockstep again once every frame so far ran with the real inputs
@@ -910,6 +934,7 @@ bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agree
   g_mine.clear();
   g_my_checks.clear();
   g_tentative.clear();
+  g_check_detail.clear();
   g_paced_at = 0;
   Writer w = Header(kReady);
   w.U32(my_seed);

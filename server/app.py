@@ -1263,10 +1263,10 @@ class Server:
         # the larger of the two players' input delays, an "auto" one from the match's round trip (the larger of the
         # two measured: the same for both games)
         auto = any(p.delay == P.DELAY_AUTO for p in m.players)
-        delay = max(P.auto_delay(rtt) if p.delay == P.DELAY_AUTO else p.delay for p in m.players)
+        m.netcode = "rollback" if all(p.netcode == "rollback" for p in m.players) else "lockstep"
+        delay = max(P.auto_delay(rtt, m.netcode) if p.delay == P.DELAY_AUTO else p.delay for p in m.players)
         if m.ranked:
             delay = max(1, delay)
-        m.netcode = "rollback" if all(p.netcode == "rollback" for p in m.players) else "lockstep"
         p1, p2 = m.players
         for p in m.players:
             assert p.session is not None and p.ping is not None

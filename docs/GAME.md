@@ -23,9 +23,10 @@ extracted ISO) and keeps saves in `--user_data_root` (default `<exe>\user`).
 | `input.cpp` | XamInputGetState / GetCapabilities / GetKeystrokeEx answered from one pad source chain: autopilot override (offline) > netplay or test scripts > the PC's controllers (remapped, `controls.cpp`) |
 | `game.cpp` | what netplay and the launcher read from MK9 (addresses below), the random generator agreement, per-call-site menu streams |
 | `net/netplay.cpp` | UDP netplay for 2-4 slots: barriers, lockstep, rollback mode, checks, the spectator feed |
-| `net/rollback.cpp`, `net/synctest.cpp` | copy-on-write guest memory snapshots and the single-PC sync test (experimental, see below) |
+| `net/rollback.cpp`, `net/synctest.cpp` | copy-on-write guest memory snapshots and the single-PC sync test (see "Rollback" below) |
+| `simheap.cpp`, `gmalloc.cpp` | the simulation heap and the audio heap, and GMalloc's routing to them |
 | `link.cpp`, `autopilot.cpp` | the launcher protocol (cmd.txt / status.txt) and the menu autopilot |
-| `engine.cpp` | UE3 thread facts for rollback (render command ring, D3D device), `MK9_ONETHREAD` |
+| `engine.cpp` | UE3's other simulation threads for rollback (rendering thread, job workers, PhysX, the thread pool): who they are, holding them still at a frame's top, what of theirs a restore leaves alone; `MK9_ONETHREAD` |
 | `diag.cpp`, `snap.cpp`, `testinput.cpp`, `randtrace.cpp` | diagnostics: thread/heap lists, memory dumps, in-game PNG snapshots, scripted pads, random draw traces |
 
 ## Game state used (all in the executable's data, stable across runs)
@@ -48,13 +49,16 @@ input for each frame is the same everywhere. Barriers: the launcher's start (at 
 and every time a fight begins (phase turns to 8). At a barrier the game's random generator is
 set from the agreed seed; outside fights each call site draws from its own stream (agreed seed,
 site, count), so loading-time differences between PCs cannot change menu picks (the arena
-variant, Test Your Luck's slots). Every 30 frames both sides compare a state hash.
+variant, Test Your Luck's slots; in fights every MK script process has a stream of its own, so a
+script drawing more often, an arena's ambience reacting to a sound ending, say, leaves the
+fighters' numbers alone). Every 30 frames both sides compare a state hash: the round timer, the
+round, the rounds won and the draws made at every call site so far (a fight that goes differently
+draws differently).
 
 - **Lockstep** (default): a frame runs once every player's input for it is there; input delay 2.
-- **Rollback** (`netcode=rollback`, experimental): frames of a fight run ahead on guessed inputs
-  and a wrong guess restores guest memory and runs the frames again. The restore is not safe yet
-  with UE3's other threads (the rendering thread, shared allocator pages): the single-PC sync
-  test still crashes after the first restore. Do not use it for real matches yet.
+- **Rollback** (`netcode=rollback`): frames of a fight run ahead on guessed inputs (up to 8) and a
+  wrong guess puts the game back to the top of that frame and runs the frames since again with
+  the real inputs (see "Rollback" below). Menus, loading and the match's end run in lockstep.
 
 Spectators: a player's game writes its barriers, inputs and checks to the launcher's local feed
 (TCP, `feed=127.0.0.1:port`); a spectator's game (`watch=1 feed=...`) reads every player from it
@@ -76,7 +80,8 @@ same fighters again, `rematch select=1` picks again, `park` quits to the main me
 ```
 . tools\netplay-local.ps1; Start-NetplayLocal -Out <dir>        # two games, scripted menus and fight
 . tools\link-local.ps1;    Start-LinkLocal -Out <dir> -Spectator -Attack -Rematch -Park
-. tools\synctest.ps1;      Start-Synctest -Out <dir> -Depth 1 -From 5400   # rollback restore test
+. tools\synctest.ps1;      Start-Synctest -Out <dir> -Depth 4 -From 5400   # rollback restore test
+. tools\netplay-local.ps1; Start-NetplayLocal -Out <dir> -Mode rollback -Delay 1 -Lag 50 -Jitter 30 -AttackB -Sites
 python -I tools\netcmp.py a\net.log b\net.log                  # frame logs of two games side by side
 python -I tools\randcmp.py a\rand.txt b\rand.txt               # MK9_TRACE_RAND random draw traces
 ```
@@ -100,39 +105,55 @@ runtime (Visual Studio Build Tools with "Desktop development with C++" must be i
 MSVC libraries and the Windows SDK). Tested here: the packaged build took about 12 minutes and
 the resulting `mk9.exe` boots to the hold point.
 
-## Rollback: where it stands
+## Rollback
 
-`net/rollback.cpp` snapshots guest memory copy-on-write per frame (pages write-protected at the
-top of each frame; the first write copies the page into that frame's undo log) and
-`net/synctest.cpp` checks that a frame run again writes what it wrote the first time. On MK9 the
-first restore crashes the game. What was found (`tools/synctest.ps1`, `MK9_RB_TRACE_FOREIGN=1`):
+`net/rollback.cpp` keeps guest memory copy-on-write: at the top of each frame every tracked page
+is write-protected; the first write to a page in a frame copies it into that frame's undo log, and
+going back to frame r plays the logs since r backwards. MK9 is UE3 on six kinds of threads, and a
+restore is only right if the memory it puts back is the simulation's and nothing else is running:
 
-1. The rendering thread runs the main thread's render commands up to a frame later; a restore
-   under it made it read stale commands. Fixed: the frame top waits for it to drain
-   (`engine::WaitRenderIdle`), and the command ring and the D3D device are never put back.
-2. The general heap mixes objects of every thread on the same pages. A page another thread
-   wrote first in a frame is "foreign" (never logged), yet the main and rendering threads keep
-   writing their own objects on such pages (traced in dozens of functions: allocator internals
-   around `0x82A4F700`, game code, FMOD's event system on the main thread). Those writes are not
-   undone, so a restore leaves freed or half-updated objects behind (null and garbage pointers).
-3. `-ONETHREAD` rendering (no rendering thread) crashes at boot: other threads queue render work.
+1. **What the simulation is.** The main thread, the rendering thread, MK's three job workers,
+   PhysX's threads (it simulates its scenes on its own threads, and an async scene's step runs
+   across a frame's top) and UE3's thread pool. `engine::Hold` holds all of them still at every
+   frame's top while memory is kept or put back: the rendering thread with its ring drained, asleep
+   in its idle loop; the workers in their 2 ms idle wait; PhysX's threads in `Event::wait` or
+   between tasks; the pool's threads in their DoWorkEvent wait with no work given. PhysX's events
+   (start, done) are kept with every frame and set back with it (`SaveEvents`), so a step that was
+   running across a frame's top runs again.
+2. **Whose memory.** `GMalloc` (the MemoryManager at `0x83423BA8`) is routed from boot on
+   (`gmalloc.cpp`): the simulation's threads allocate from the simulation heap (a TLSF heap in a
+   region of its own, its bookkeeping inside it), FMOD (from its code or UE3's file callbacks for
+   it) from the audio heap, which rollback never tracks, and every other thread from the engine
+   heap. While armed the simulation never writes the engine heap's bookkeeping: its frees of
+   engine blocks wait for disarm, unless a rollback took the frame back. A simulation block
+   another thread writes (FMOD's file handles, a loader's buffer) is that thread's from then on.
+3. **What a restore leaves alone** (volatile bytes): the rendering command ring and its control
+   block, the D3D device, every critical section outside the simulation heap (a lock's state never
+   goes back), the GPU callback's frame-time globals and the engine heap's own state. Pages other
+   threads write first are "foreign" (never put back), but a page holding volatile bytes is logged
+   whoever writes it.
+4. **The host.** `ReadFile` into a write-protected guest page fails in the kernel instead of
+   faulting: the SDK's file read takes such pages first (`patches/`).
 
-What a working rollback needs, in order: the fight's allocations from a heap of their own that
-only the simulation threads touch, FMOD's memory left alone and its event starts muted while
-frames run again, and the rendering thread's memory restored with the rest (it is idle at frame
-tops). Until then, lockstep is the netcode to use.
+The sync test (`MK9_SYNCTEST=4`) goes back 4 frames every 10 frames through a scripted fight: 420
+rollbacks and 1,680 frames run again without a crash, worst rollback about 70 ms (frames run
+again render too). `MK9_SYNCTEST_VERIFY=1` compares every tracked page after the first restore
+with a copy taken at that frame's top (only foreign audio pages differ) and lists what a frame
+run again wrote differently. Its own pass/fail ("frames differed") counts every byte, D3D fences
+included, so it always reports differences; the two-game test is the real check: with 50 ms lag,
+30 ms jitter and both players attacking, two games roll back about a hundred times each over a
+2-minute match at 60 frames/s and their checks agree (one check in 322 differed once, a script
+drawing a frame later).
 
-The allocator to route: UE3's `GMalloc` is the object pointer at `0x833D9074` (MK9's MK
-MemoryManager behind it; `sub_829AFB28` is its out-of-memory path). The game calls it through
-its vtable: `+8` Malloc (1,808 call sites), `+12` Realloc (418), `+16` Free (1,798), `+24` (33).
-The plan: from the VS screen on (the fight's objects are created on the main thread while it
-loads), the main and rendering threads' Malloc/Realloc go to a simulation heap in a guest region
-of its own whose bookkeeping lives in that region (so a restore puts it back consistently); their
-frees of older blocks wait until the fight is over; other threads keep the original allocator.
+Diagnostics: `MK9_RB_TRACE_FOREIGN=1` (who writes which pages first, stacks of foreign writers),
+`MK9_GMALLOC_TRACE=1` (frees traced, double frees explained), `MK9_NET_SITES_LOG` (draws per
+call site at every check; `-Sites` in `netplay-local.ps1`).
 
 ## Known gaps
 
-- Rollback restores crash (see above); lockstep is what works.
+- Rollback is tested on one PC over loopback with simulated lag (see "Rollback"), not yet over the
+  internet. Frames run again also render; a long rollback costs about 17 ms a frame.
+- Sounds started in frames a rollback takes back keep playing (FMOD is not rolled back).
 - Four-player TWO VS TWO (slots 2-3) is in the netplay core but untested.
 - The autopilot steers menus by fixed steps from a fresh save's cursor; the roster grid is not
   mapped yet, so the launcher cannot pick a named fighter (players pick in the game).

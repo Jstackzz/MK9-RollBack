@@ -25,6 +25,11 @@ namespace mk9::game {
 uint32_t ReadU32(uint32_t guest_address);
 void WriteU32(uint32_t guest_address, uint32_t value);
 
+// the guest stack's return addresses above the current frame, innermost first, at most `max`: each
+// frame's back chain word leads to the frame above, under which (at -8) its return address was
+// saved. Only reads inside the thread's stack (its PCR, r13, says where that is). How many it found
+int StackReturns(const PPCContext& ctx, uint32_t* out, int max);
+
 // the round timer as the HUD shows it (0 outside fights)
 int32_t RoundTimer();
 // the game's phase (0x833C6C58): 2 boot and title, 3 the front end's menus, 7 the select screens

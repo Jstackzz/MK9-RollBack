@@ -25,8 +25,8 @@ builds the game again on its own.
 
 ## What works and what does not (yet)
 
-- Online play uses lockstep netcode with an input delay set from the ping. Rollback netcode is
-  in progress: see [docs/GAME.md](docs/GAME.md#rollback-where-it-stands).
+- Online play uses rollback netcode (the default; lockstep is the fallback in Settings) with an
+  input delay set from the ping. How it works and how it was tested: [docs/GAME.md](docs/GAME.md#rollback).
 - Tested: One vs One, Two vs Two (two players), Test Your Luck, results, rematches, spectators.
   Four-player Two vs Two is not tested yet.
 - The Xbox 360 GPU emulation draws a striped texture on fighters after hits.

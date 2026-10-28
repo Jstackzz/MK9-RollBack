@@ -2,9 +2,13 @@
 
 #include "mk9/game.h"
 
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <unordered_map>
+#include <vector>
 
 #include <rex/hook.h>
 #include <rex/logging.h>
@@ -79,6 +83,22 @@ void WriteU32(uint32_t a, uint32_t value) {
   std::memcpy(p, &value, 4);
 }
 
+int StackReturns(const PPCContext& ctx, uint32_t* out, int max) {
+  const uint32_t pcr = ctx.r13.u32;
+  if (!pcr) return 0;
+  const uint32_t hi = ReadU32(pcr + 0x70), lo = ReadU32(pcr + 0x74);  // stack_base_ptr, stack_end_ptr
+  if (hi <= lo) return 0;
+  int n = 0;
+  uint32_t sp = ctx.r1.u32;
+  while (n < max && sp >= lo && sp + 4 <= hi) {
+    const uint32_t back = ReadU32(sp);
+    if (back <= sp || back > hi || back - 8 < lo) break;
+    out[n++] = ReadU32(back - 8);
+    sp = back;
+  }
+  return n;
+}
+
 int32_t RoundTimer() { return int32_t(ReadU32(kRoundTimer)); }
 int32_t Phase() { return int32_t(ReadU32(0x833C6C58)); }
 uint32_t UiScreen() { return ReadU32(0x833AEA80); }
@@ -140,9 +160,20 @@ namespace {
 // helper, such as sub_82A234E0 for a number below n). The generator's functions make no stack
 // frame, so r1 is the caller's frame: its back chain word leads to the frame above, under which
 // (at -8) the caller saved its return address
+// MK's script VM draws all its scripts' random(n) through one native (sub_824705F8, its call into
+// the helper returning to 0x8247061C): those draws are told apart by the script process (the VM's
+// current context at 0x8342CDF0, its id at +4), so one script drawing more often (an arena's
+// ambience reacting to a sound ending) leaves the others' numbers alone
+constexpr uint32_t kScriptRandomCaller = 0x8247061C;
+constexpr uint32_t kScriptContext = 0x8342CDF0;
+
 uint64_t DrawSite(const PPCContext& ctx) {
-  const uint32_t back = ReadU32(ctx.r1.u32);
-  const uint32_t up = back ? ReadU32(back - 8) : 0;
+  uint32_t up = 0;
+  StackReturns(ctx, &up, 1);
+  if (up == kScriptRandomCaller) {
+    const uint32_t context = ReadU32(kScriptContext);
+    if (context) up ^= ReadU32(context + 4) << 4;
+  }
   return (uint64_t(uint32_t(ctx.lr)) << 32) | up;
 }
 
@@ -150,8 +181,12 @@ void BeforeDraw(PPCContext& ctx) {
   if (!net::InSync() || !frame::OnMainThread()) return;
   const uint64_t site = DrawSite(ctx);
   const uint32_t n = g_site_draws[site]++;
-  g_site_journal.push_back({net::Frame(), site});
-  if (g_site_journal.size() > 4096) g_site_journal.pop_front();
+  // kept for as far back as a rollback can go (a fight draws hundreds a frame)
+  const uint32_t now = net::Frame();
+  g_site_journal.push_back({now, site});
+  while (g_site_journal.size() > (1u << 22) ||
+         (!g_site_journal.empty() && g_site_journal.front().frame + 64 < now))
+    g_site_journal.pop_front();
   SetGameRandState(Mix(g_agreed_seed ^ Mix(uint32_t(site), uint32_t(site >> 32)), n));
 }
 
@@ -187,14 +222,35 @@ bool SyncPoint() {
 
 uint32_t StateHash(PPCContext& ctx, uint8_t* base) {
   // only values that do not depend on where this process's heaps put things (the script globals
-  // hold pointers): the round timer so far; the fighters' state joins it once it is found. The
-  // game's random number generator is logged beside it (LastCheckDetail)
+  // hold pointers): the round timer so far, and below the draws per call site. The game's random
+  // number generator is logged beside it (LastCheckDetail): other threads draw from it in their
+  // own order, so it is no check of its own
   (void)ctx, (void)base;
   g_last_rand = GameRandState();
   g_last_timer = ReadU32(kRoundTimer);
   // with the round and the rounds each player won: a fight that went differently (a different
-  // winner, a round more) shows at the next check. Not the phase: loading ends on its own time
-  uint32_t v[4] = {g_last_timer, uint32_t(Round()), uint32_t(RoundsWon(0)), uint32_t(RoundsWon(1))};
+  // winner, a round more) shows at the next check. Not the phase: loading ends on its own time.
+  // And what the simulation drew at each call site so far: every hit spark, blood drop and
+  // reaction picks numbers, so a fight that went differently draws differently
+  std::vector<std::pair<uint64_t, uint32_t>> draws(g_site_draws.begin(), g_site_draws.end());
+  std::sort(draws.begin(), draws.end());
+  // MK9_NET_SITES_LOG=<file> (diagnostics): the draws per call site at every check
+  static FILE* sites_log = [] {
+    const char* v = std::getenv("MK9_NET_SITES_LOG");
+    return v && *v ? std::fopen(v, "w") : nullptr;
+  }();
+  if (sites_log) {
+    std::fprintf(sites_log, "frame %u\n", net::Frame());
+    for (const auto& [site, n] : draws)
+      std::fprintf(sites_log, "%08X %08X %u\n", uint32_t(site >> 32), uint32_t(site), n);
+    std::fflush(sites_log);
+  }
+  uint32_t sites = 0x811C9DC5u;
+  for (const auto& [site, n] : draws) {
+    const uint64_t w[2] = {site, n};
+    sites = Fnv(reinterpret_cast<const uint8_t*>(w), sizeof w) ^ (sites * 0x01000193u);
+  }
+  uint32_t v[5] = {g_last_timer, uint32_t(Round()), uint32_t(RoundsWon(0)), uint32_t(RoundsWon(1)), sites};
   return Fnv(reinterpret_cast<const uint8_t*>(v), sizeof v);
 }
 

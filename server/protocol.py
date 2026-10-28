@@ -188,10 +188,14 @@ def get_delay(msg: dict, key: str = "delay", *, default: int = 2) -> int:
     return get_int(msg, key, lo=0, hi=DELAY_MAX, default=default)
 
 
-def auto_delay(rtt_ms: int) -> int:
+def auto_delay(rtt_ms: int, netcode: str = "lockstep") -> int:
     """The input delay that covers the one-way latency of a round trip (half of it, plus 8 ms for the frame on its
-    way), in 60 Hz frames: 2 to 8. Lockstep waits at every frame whose input is still on its way."""
-    return min(8, max(2, math.ceil((rtt_ms / 2 + 8) / 16.67)))
+    way), in 60 Hz frames: 2 to 8. Lockstep waits at every frame whose input is still on its way; rollback guesses up
+    to 3 frames of it and corrects them (frames run again cost time, so the guesses stay short)."""
+    frames = math.ceil((rtt_ms / 2 + 8) / 16.67)
+    if netcode == "rollback":
+        frames -= 3
+    return min(8, max(2, frames))
 
 
 def get_netcode(msg: dict, key: str = "netcode", *, default: str = "lockstep") -> str:

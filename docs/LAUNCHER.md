@@ -175,9 +175,10 @@ with `MK9_DEV_PASSWORD`, `--register`, `--queue casual|ranked`, `--mode versus|t
   (`CyberSubZero`, `NoobSaibot`, `SonyaBlade`, ...) are what a `p1`/`p2` would name, but the game's autopilot does
   not map them yet (the disc's asset names differ: `CyberZero`, `Noob`, `Sonya`), so the launcher always sends `-`.
   Kratos is PlayStation-only and not on the Xbox 360 disc; Goro, Kintaro and Shao Kahn are listed as bosses.
-- **The player package**: no `tools\package.ps1` for MK9 yet, so no `games\mk9\build-game.cmd`, `defaults.ini` or
-  release zip; the updater code is MK3D's (renamed `MK9-Online-<version>-windows.zip`, `MK9Launcher.exe`) and the
-  server's `RELEASES_PAGE` is empty until there is a releases page.
+- **The player package**: `tools\package.ps1` / `tools\release.ps1` (see GAME.md). Its `defaults.ini` (the server
+  the launcher uses until a player picks another) comes from `dist\defaults.ini`, which is kept out of the
+  repository because it names the machine: `[server]` `address=<host>:<port>` and `fingerprint=<SHA-256>`. A
+  launcher that had saved the old built-in server (`127.0.0.1:7777`) takes the package's once.
 - **Two vs two with four people**: the game takes `players=4`; the server and launcher pair two players only.
 - **Rollback**: the default; tested on one PC with simulated lag (see GAME.md), not yet between two PCs over the
   internet. Lockstep stays in Settings.
@@ -186,5 +187,8 @@ with `MK9_DEV_PASSWORD`, `--register`, `--queue casual|ranked`, `--mode versus|t
 - The launcher was not run against the real `mk9.exe` here (it was being rebuilt); everything above used the
   stand-in, whose behaviour follows `mk9/src/mk9/link.cpp` as of 2026-10-27.
 - **Hosting**: `server/deploy/install.sh` installs `mk9-server` (`/opt/mk9`, `/var/lib/mk9`); `MK9_TCP_PORT` /
-  `MK9_UDP_PORT` pick other ports than 7777/7778 on a machine that already runs the MK3D server. The MK3D
-  `deploy-server.ps1` / `host-server.ps1` have no MK9 versions yet.
+  `MK9_UDP_PORT` pick other ports than 7777/7778 on a machine that already runs the MK3D server. The official
+  server runs that way beside MK3D's on the same Oracle machine, on TCP 7787 and UDP 7788 (installed with
+  `sudo env MK9_TCP_PORT=7787 MK9_UDP_PORT=7788 sh server/deploy/install.sh <address> <oldest launcher>`; MK3D's
+  service, folders and firewall rules are not touched). Oracle's security list must allow both ports too. The
+  MK3D `deploy-server.ps1` / `host-server.ps1` have no MK9 versions yet.

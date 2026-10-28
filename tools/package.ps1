@@ -6,6 +6,8 @@
 #   games\mk9\project\            the game's project: CMake files, src, config, manifest
 #   games\mk9\sdk\                the prebuilt ReXGlue runtime and codegen tool (dist\sdk)
 #   docs\                         PLAYING.md, GAME.md
+#   defaults.ini                  the server the launcher uses until a player picks another: dist\defaults.ini
+#                                 (not in the repository: it names the machine), [server] address= and fingerprint=
 # The folder is named MK9-Online with VERSION.txt ("MK9-Online <version>, packaged <date>"): what the
 # launcher's updater checks in a release zip (launcher/src/Updater.cpp).
 # Usage: . tools\package.ps1; New-PlayerPackage [-Out dist\MK9-Online] [-NoLauncher]
@@ -47,6 +49,14 @@ function New-PlayerPackage {
     Remove-Item -Force (Join-Path $tc "bin\*.dll"), (Join-Path $tc "bin\clang++.exe") -ErrorAction SilentlyContinue
     robocopy (Join-Path $llvm "lib\clang") (Join-Path $tc "lib\clang") /MIR /NFL /NDL /NJH /NJS | Out-Null
     Copy-Item -Force (Join-Path $llvm "LICENSE.TXT") (Join-Path $tc "LICENSE.TXT") -ErrorAction SilentlyContinue
+
+    # the server: dist\defaults.ini, kept out of the repository
+    $defaults = Join-Path $root "dist\defaults.ini"
+    if (Test-Path $defaults) {
+        Copy-Item -Force $defaults (Join-Path $Out "defaults.ini")
+    } else {
+        Write-Host "no dist\defaults.ini: the package's launcher looks for a server on the player's own PC (127.0.0.1:7777)"
+    }
 
     # the launcher (windeployqt already put Qt beside it)
     if (-not $NoLauncher) {

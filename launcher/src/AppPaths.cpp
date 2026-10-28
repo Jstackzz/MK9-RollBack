@@ -55,6 +55,17 @@ void init(const QString& configOverride) {
     g_settings = new QSettings(g_config, QSettings::IniFormat);
     const QString defaults = QDir(exeDir()).filePath(QStringLiteral("defaults.ini"));
     if (QFileInfo::exists(defaults)) g_defaults = new QSettings(defaults, QSettings::IniFormat);
+    // Launchers before 0.3.1 came without a server and kept the built-in one, this PC (127.0.0.1:7777), once
+    // Settings were saved: the package's server takes its place, once (someone who wants this PC's again sets it)
+    const QString moved = QStringLiteral("server/package_server_taken");
+    if (g_defaults && g_defaults->contains(QStringLiteral("server/address")) && !g_settings->value(moved).toBool()) {
+        if (g_settings->value(QStringLiteral("server/address")).toString() == QLatin1String("127.0.0.1:7777")) {
+            g_settings->remove(QStringLiteral("server/address"));
+            g_settings->remove(QStringLiteral("server/fingerprint"));
+        }
+        g_settings->setValue(moved, true);
+        g_settings->sync();
+    }
 }
 
 QString configFile() { return g_config; }

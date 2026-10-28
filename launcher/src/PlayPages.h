@@ -92,8 +92,12 @@ public:
     explicit SinglePlayerPage(MatchController* controller, QWidget* parent = nullptr);
     void setGame(const QString& gameId) override;
 
+protected:
+    void showEvent(QShowEvent* event) override;  // the game built (or the disc extracted) since
+
 private:
     void refreshTestRoster();
+    void refreshFiles();
     void updateButtons();
     MatchController* controller_;
     QLabel* title_;

@@ -662,14 +662,24 @@ void SinglePlayerPage::setGame(const QString& gameId) {
         for (const auto& m : g->onlineModes()) testMode_->addItem(m.name, m.id);
     }
     refreshTestRoster();
-    const QString exe = cfg::gameExe(gameId);
-    const QString disc = cfg::gameDataRoot(gameId);
+    refreshFiles();
+}
+
+void SinglePlayerPage::showEvent(QShowEvent* event) {
+    refreshFiles();
+    Page::showEvent(event);
+}
+
+void SinglePlayerPage::refreshFiles() {
+    if (!gameOf(gameId_)) return;
+    const QString exe = cfg::gameExe(gameId_);
+    const QString disc = cfg::gameDataRoot(gameId_);
     QString text = QFileInfo::exists(exe) ? tr("Game: %1").arg(QDir::toNativeSeparators(exe))
                                           : tr("Game not built yet: %1 (see Build game)").arg(QDir::toNativeSeparators(exe));
     text += QLatin1Char('\n') + (GameProcess::hasGameFiles(disc)
                                       ? tr("Disc files: %1").arg(QDir::toNativeSeparators(disc))
                                       : tr("Disc files not extracted yet: %1 (see Build game)").arg(QDir::toNativeSeparators(disc)));
-    text += QLatin1Char('\n') + tr("Saves: %1").arg(QDir::toNativeSeparators(cfg::saveFolder(gameId)));
+    text += QLatin1Char('\n') + tr("Saves: %1").arg(QDir::toNativeSeparators(cfg::saveFolder(gameId_)));
     exeInfo_->setText(text);
 }
 

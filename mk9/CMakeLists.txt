@@ -12,8 +12,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # did not ask for, so every build computes the same floats (netplay compares the games' state)
 add_compile_options(-ffp-contract=off)
 
-# the release (VERSION beside the project in a player package, at the repository's root here):
-# netplay refuses to match two games built from different releases
+# the game's release (mk9\VERSION, a player package's project\VERSION): netplay refuses to match two games built
+# from different ones. It goes up only when the game changes, and every player builds the game again then; a release
+# of the launcher alone (the repository's VERSION) leaves it, and the games already built
 foreach(_v "${CMAKE_SOURCE_DIR}/VERSION" "${CMAKE_SOURCE_DIR}/../VERSION")
     if(NOT MK9_VERSION AND EXISTS "${_v}")
         file(READ "${_v}" MK9_VERSION)

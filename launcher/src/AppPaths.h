@@ -22,6 +22,7 @@ namespace cfg {
 QSettings& store();
 QVariant get(const QString& key, const QVariant& fallback = {});
 void set(const QString& key, const QVariant& value);
+void remove(const QString& key);  // back to the default
 
 QString serverAddress();
 QString fingerprint();

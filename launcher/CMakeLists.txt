@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-# the release, shared with the game (the repository's VERSION file)
+# the release (the repository's VERSION file); the game has its own, mk9\VERSION, raised only when the game changes
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" MK9_RELEASE)
 string(STRIP "${MK9_RELEASE}" MK9_RELEASE)
 project(mk9_launcher VERSION ${MK9_RELEASE} LANGUAGES C CXX)

@@ -14,14 +14,16 @@ Xbox 360 disc image, translates the game's PowerPC code to C++ with the
 1. Install [Build Tools for Visual Studio](https://visualstudio.microsoft.com/downloads/) with the
    **Desktop development with C++** workload (the compiler's libraries; free).
 2. Download `MK9Online-<version>.zip` from [Releases](../../releases) and unpack it somewhere you can
-   write to (Documents, say).
+   write to (Documents, say), in a folder whose path has no `( ) & ^ %`: the compiler's tools cannot
+   build there (a second download's `MK9Online-0.3.2 (1)` is one; rename it first).
 3. Start `MK9Launcher.exe`, open **Build game**, pick your Mortal Kombat Komplete Edition disc image
    (`.iso`) and press **Extract and build**. The first build takes about 15 minutes.
 4. Sign in (top right) and play: **Kasual** or **Ranked** (One vs One, Two vs Two, Test Your Luck),
    **Lobbies**, or **Single player** for the game's own modes offline.
 
 The launcher updates itself from this repository's releases; when an update changes the game, it
-builds the game again on its own.
+builds the game again on its own. If a build fails, the Build game page says why, and everything the
+build printed is in `games\mk9\build.log`.
 
 ## What works and what does not (yet)
 

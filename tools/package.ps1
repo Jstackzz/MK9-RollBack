@@ -26,7 +26,7 @@ function New-PlayerPackage {
 
     # the game's project, with the manifest pointing at games\mk9\game (where the disc is extracted)
     foreach ($f in "CMakeLists.txt", "CMakePresets.json") { Copy-Item -Force (Join-Path $root "mk9\$f") $proj }
-    Copy-Item -Force (Join-Path $root "VERSION") $proj
+    Copy-Item -Force (Join-Path $root "mk9\VERSION") $proj  # the game's release, not the launcher's (mk9\CMakeLists.txt)
     robocopy (Join-Path $root "mk9\src") (Join-Path $proj "src") /MIR /NFL /NDL /NJH /NJS | Out-Null
     robocopy (Join-Path $root "mk9\config") (Join-Path $proj "config") /MIR /NFL /NDL /NJH /NJS | Out-Null
     New-Item -ItemType Directory -Force (Join-Path $proj "generated") | Out-Null
@@ -62,7 +62,8 @@ function New-PlayerPackage {
     if (-not $NoLauncher) {
         $lb = Join-Path $root "build\launcher"
         if (Test-Path (Join-Path $lb "MK9Launcher.exe")) {
-            robocopy $lb $Out /E /XD CMakeFiles _deps .qt /XF *.ninja* CMakeCache.txt cmake_install.cmake *.obj *.pdb *.ilk *.exp *.lib /NFL /NDL /NJH /NJS | Out-Null
+            # the build's own files stay behind (moc output, the static SDL3's build folder, the compile commands)
+            robocopy $lb $Out /E /XD CMakeFiles _deps .qt MK9Launcher_autogen sdl3 /XF *.ninja* CMakeCache.txt cmake_install.cmake compile_commands.json *.obj *.pdb *.ilk *.exp *.lib /NFL /NDL /NJH /NJS | Out-Null
         } else {
             Write-Host "no launcher in $lb (build it with launcher\build.cmd); packaging without it"
         }

@@ -5,7 +5,9 @@
 # release changed the game it builds the game again on the player's PC.
 #
 # Steps for a new release:
-#   1. raise the number in VERSION (the launcher and the game both take it from there)
+#   1. raise the number in VERSION (the release: the launcher's version and the tag). When the game itself
+#      changed, raise mk9\VERSION too: every player builds the game again after the update, and online
+#      matches need both players' games built from the same one
 #   2. build: mk9\build.cmd release (to test), launcher\build.cmd, and the runtime for players:
 #        tools\devenv.cmd ; cmake --build external\rexglue-sdk\out\build\win-amd64 --config Release
 #        cmake --install external\rexglue-sdk\out\build\win-amd64 --config Release --prefix dist\sdk

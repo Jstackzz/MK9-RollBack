@@ -55,14 +55,18 @@ void init(const QString& configOverride) {
     g_settings = new QSettings(g_config, QSettings::IniFormat);
     const QString defaults = QDir(exeDir()).filePath(QStringLiteral("defaults.ini"));
     if (QFileInfo::exists(defaults)) g_defaults = new QSettings(defaults, QSettings::IniFormat);
-    // Launchers before 0.3.1 came without a server and kept the built-in one, this PC (127.0.0.1:7777), once
-    // Settings were saved: the package's server takes its place, once (someone who wants this PC's again sets it)
-    const QString moved = QStringLiteral("server/package_server_taken");
+    // Launchers before 0.3.1 came without a server: the built-in one was this PC's (127.0.0.1:7777), saved once
+    // Settings were, and a certificate trusted for it was saved alone (the address being the default). The package's
+    // server takes its place once, with its own fingerprint (someone who wants this PC's again sets it). 0.3.1 kept a
+    // fingerprint saved alone, and package_server_taken marks those settings: they are gone over once more.
+    const QString moved = QStringLiteral("server/package_fingerprint_taken");
     if (g_defaults && g_defaults->contains(QStringLiteral("server/address")) && !g_settings->value(moved).toBool()) {
-        if (g_settings->value(QStringLiteral("server/address")).toString() == QLatin1String("127.0.0.1:7777")) {
+        const QString address = g_settings->value(QStringLiteral("server/address")).toString();
+        if (address.isEmpty() || address == QLatin1String("127.0.0.1:7777")) {
             g_settings->remove(QStringLiteral("server/address"));
             g_settings->remove(QStringLiteral("server/fingerprint"));
         }
+        g_settings->remove(QStringLiteral("server/package_server_taken"));
         g_settings->setValue(moved, true);
         g_settings->sync();
     }
@@ -104,6 +108,10 @@ void set(const QString& key, const QVariant& value) {
     g_settings->setValue(key, value);
     g_settings->sync();
 }
+void remove(const QString& key) {
+    g_settings->remove(key);
+    g_settings->sync();
+}
 
 QString serverAddress() { return get(QStringLiteral("server/address"), QStringLiteral("127.0.0.1:7777")).toString(); }
 QString fingerprint() { return get(QStringLiteral("server/fingerprint")).toString(); }
@@ -123,14 +131,18 @@ QString gameFolder(const QString& gameId) {
 }
 
 QString gameExe(const QString& gameId) {
-    const QString v = get(QStringLiteral("games/%1/exe").arg(gameId)).toString();
-    if (!v.isEmpty()) return v;
     const Game* g = GameData::instance().game(gameId);
     const QString exe = g && !g->defaultExe.isEmpty() ? g->defaultExe : gameId + QStringLiteral(".exe");
     // a package keeps the executable in the game folder, a source checkout in its build output
     const QDir folder(gameFolder(gameId));
-    if (QFileInfo::exists(folder.filePath(exe))) return folder.filePath(exe);
-    return folder.filePath(QStringLiteral("out/build/win-amd64-release/") + exe);
+    const QString built = QFileInfo::exists(folder.filePath(exe))
+                              ? folder.filePath(exe)
+                              : folder.filePath(QStringLiteral("out/build/win-amd64-release/") + exe);
+    // the one set in Settings, unless it is gone and the built game is there (the folder moved, or the path was
+    // saved before the game was built)
+    const QString v = get(QStringLiteral("games/%1/exe").arg(gameId)).toString();
+    if (!v.isEmpty() && (QFileInfo::exists(v) || !QFileInfo::exists(built))) return v;
+    return built;
 }
 
 QString gameDataRoot(const QString& gameId) {

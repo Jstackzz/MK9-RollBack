@@ -2,6 +2,7 @@
 
 #include <QCheckBox>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QComboBox>
 #include <QDir>
 #include <QFile>
@@ -17,6 +18,7 @@
 #include <QProcess>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QStorageInfo>
@@ -38,6 +40,28 @@ QString humanBytes(qint64 b) {
     if (b >= (qint64(1) << 30)) return QStringLiteral("%1 GB").arg(double(b) / double(qint64(1) << 30), 0, 'f', 2);
     if (b >= (1 << 20)) return QStringLiteral("%1 MB").arg(double(b) / double(1 << 20), 0, 'f', 1);
     return QStringLiteral("%1 KB").arg(b / 1024);
+}
+
+// cmd.exe takes ( ) & ^ % for its own, and the game's link step goes through it with the compiler's path unquoted
+// (see build-game.cmd): the first folder on the path with one in its name, for the player to rename, or empty
+QString awkwardFolder(const QString& path) {
+    static const QRegularExpression awkward(QStringLiteral("[()&^%]"));
+    for (const QString& part : QDir::fromNativeSeparators(QDir(path).absolutePath()).split(QLatin1Char('/'), Qt::SkipEmptyParts))
+        if (part.contains(awkward)) return part;
+    return {};
+}
+
+QString renameAdvice(const QString& folder) {
+    QString plain = folder;
+    plain.remove(QRegularExpression(QStringLiteral(" ?\\(\\d+\\)")));  // a second download's " (1)"
+    plain.remove(QRegularExpression(QStringLiteral("[()&^%]")));
+    plain = plain.simplified();
+    if (plain.isEmpty() || plain == folder) plain = QStringLiteral("MK9Online");
+    return BuildPage::tr("The game cannot be built in this folder: \"%1\" has ( ) & ^ or % in its name, and the "
+                         "compiler's tools cannot work with that.\n\nClose MK9 Online, rename that folder (for example "
+                         "to \"%2\") or move MK9 Online's folder to a place without them (C:\\Games, say), then open "
+                         "MK9 Online again and build. Your settings and the extracted disc go with it.")
+        .arg(folder, plain);
 }
 
 QWidget* pathRow(QLineEdit* edit, QPushButton* browse) {
@@ -167,8 +191,21 @@ void BuildPage::refreshInfo() {
     const QString script = cfg::buildScript(gameId_);
     const QString args = cfg::buildArgs(gameId_);
     const QString line = args.isEmpty() ? native(script) : native(script) + QLatin1Char(' ') + args;
-    scriptInfo_->setText(QFileInfo::exists(script) ? tr("Build: %1").arg(line)
-                                                   : tr("Build: %1 (not there yet)").arg(line));
+    QString build = QFileInfo::exists(script) ? tr("Build: %1").arg(line) : tr("Build: %1 (not there yet)").arg(line);
+    const QString awkward = awkwardFolder(cfg::gameFolder(gameId_));
+    if (!awkward.isEmpty())
+        build += QLatin1Char('\n') + tr("It cannot build in this folder: rename \"%1\" first (( ) & ^ or % in its name).").arg(awkward);
+    scriptInfo_->setText(build);
+}
+
+bool BuildPage::folderUsable() {
+    const QString awkward = awkwardFolder(cfg::gameFolder(gameId_));
+    if (awkward.isEmpty()) return true;
+    const QString text = renameAdvice(awkward);
+    log_->line(text);
+    applog::write(QStringLiteral("build %1: not in \"%2\" (( ) & ^ or % in its name)").arg(gameId_, awkward));
+    QMessageBox::warning(this, tr("Rename the folder first"), text);
+    return false;
 }
 
 bool BuildPage::needsRebuild(const QString& gameId) {
@@ -210,7 +247,7 @@ void BuildPage::finishStep() {
 }
 
 void BuildPage::startExtract() {
-    if (step_ != Step::Idle) return;
+    if (step_ != Step::Idle || !folderUsable()) return;
     imagePath_ = QDir::fromNativeSeparators(image_->text().trimmed());
     if (!QFileInfo(imagePath_).isFile()) {
         log_->line(tr("Choose your disc image first."));
@@ -320,7 +357,7 @@ void BuildPage::updateProgress() {
 }
 
 void BuildPage::runBuild() {
-    if (builder_ || step_ != Step::Idle) return;
+    if (builder_ || step_ != Step::Idle || !folderUsable()) return;
     const QString script = cfg::buildScript(gameId_);
     const QString args = cfg::buildArgs(gameId_);
     if (!QFileInfo::exists(script)) {
@@ -339,29 +376,64 @@ void BuildPage::runBuild() {
     auto* p = new QProcess(this);
     builder_ = p;
     buildOut_.clear();
+    // everything the build says, kept beside the game: what a player sends when a build fails
+    auto logFile = std::make_shared<QFile>(QDir(cfg::gameFolder(gameId_)).filePath(QStringLiteral("build.log")));
+    if (!logFile->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) logFile.reset();
+    auto keep = [logFile](const QString& line) {
+        if (!logFile) return;
+        logFile->write((line + QLatin1Char('\n')).toUtf8());
+        logFile->flush();
+    };
+    auto tail = std::make_shared<QStringList>();  // the last lines, for the message when it fails
+    keep(QStringLiteral("MK9 Online %1, %2: %3 %4")
+             .arg(QStringLiteral(MK9_LAUNCHER_VERSION),
+                  QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd hh:mm:ss")), native(script), args));
     p->setWorkingDirectory(QFileInfo(script).absolutePath());
     p->setProcessChannelMode(QProcess::MergedChannels);
     p->setProgram(QStringLiteral("cmd.exe"));
     // cmd /s /c ""<script>" <args>": the outer quotes go, the script's stay (a path with spaces)
     p->setNativeArguments(QStringLiteral("/d /s /c \"\"%1\" %2\"").arg(native(script), args));
     p->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* a) { a->flags |= CREATE_NO_WINDOW; });
-    connect(p, &QProcess::readyRead, this, [this, p] {
+    connect(p, &QProcess::readyRead, this, [this, p, keep, tail] {
         buildOut_.append(p->readAll());
         qsizetype nl;
         while ((nl = buildOut_.indexOf('\n')) >= 0) {
             const QString line = QString::fromLocal8Bit(buildOut_.left(nl)).trimmed();
             buildOut_.remove(0, nl + 1);
-            if (!line.isEmpty()) log_->line(line);
+            if (line.isEmpty()) continue;
+            log_->line(line);
+            keep(line);
+            tail->append(line);
+            if (tail->size() > 8) tail->removeFirst();
         }
     });
-    connect(p, &QProcess::finished, this, [this, p](int code, QProcess::ExitStatus st) {
-        if (!buildOut_.trimmed().isEmpty()) log_->line(QString::fromLocal8Bit(buildOut_).trimmed());
+    connect(p, &QProcess::finished, this, [this, p, keep, logFile, tail](int code, QProcess::ExitStatus st) {
+        if (!buildOut_.trimmed().isEmpty()) {
+            const QString rest = QString::fromLocal8Bit(buildOut_).trimmed();
+            log_->line(rest);
+            keep(rest);
+            tail->append(rest);
+        }
         buildOut_.clear();
-        const bool ok = st == QProcess::NormalExit && code == 0;
-        log_->line(stop_ ? tr("Build cancelled.")
-                         : ok ? tr("Build finished: the game is ready (Single player, or search for a match).")
-                              : tr("The build failed (exit code %1): the lines above say why.").arg(code));
-        applog::write(QStringLiteral("build %1: script exited with code %2").arg(gameId_).arg(code));
+        // the script's word is not enough: the game must be there (antivirus takes a new unsigned exe away)
+        const QString exe = cfg::gameExe(gameId_);
+        const bool exited = st == QProcess::NormalExit && code == 0;
+        const bool ok = exited && QFileInfo::exists(exe);
+        const QString logName = logFile ? native(logFile->fileName()) : QString();
+        const QString where = logName.isEmpty() ? QString() : tr(" Everything it said is in %1.").arg(logName);
+        QString verdict;
+        if (stop_) verdict = tr("Build cancelled.");
+        else if (ok) verdict = tr("Build finished: the game is ready (Single player, or search for a match).");
+        else if (exited)
+            verdict = tr("The build finished, but %1 is not there: an antivirus may have removed it (Windows Security, "
+                         "Virus & threat protection, Protection history). Allow it there, or add %2 to the "
+                         "exclusions, and build again.%3")
+                          .arg(native(exe), native(cfg::gameFolder(gameId_)), where);
+        else verdict = tr("The build failed (exit code %1): the lines above say why.%2").arg(code).arg(where);
+        log_->line(verdict);
+        keep(verdict);
+        applog::write(QStringLiteral("build %1: script exited with code %2, game %3")
+                          .arg(gameId_).arg(code).arg(QFileInfo::exists(exe) ? QStringLiteral("there") : QStringLiteral("missing")));
         progress_->setRange(0, 1000);
         progress_->setValue(ok ? 1000 : 0);
         progress_->setFormat(ok ? tr("Built") : tr("Not built"));
@@ -369,6 +441,14 @@ void BuildPage::runBuild() {
         builder_ = nullptr;
         finishStep();
         refreshInfo();
+        if (!stop_ && !ok) {
+            // where it is seen too: a build takes a while, and this page's log scrolls on
+            QString text = exited ? verdict
+                                  : tr("The build stopped (exit code %1). Its last lines:\n\n%2")
+                                        .arg(QString::number(code), tail->join(QLatin1Char('\n')));
+            if (!exited && !logName.isEmpty()) text += tr("\n\nEverything it said is in %1.").arg(logName);
+            QTimer::singleShot(0, this, [this, text] { QMessageBox::warning(this, tr("The game was not built"), text); });
+        }
     });
     stop_ = false;
     step_ = Step::Building;
@@ -503,23 +583,32 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     for (const Game& g : GameData::instance().games()) {
         const QString id = g.id;
         struct PathSetting {
-            QString key, label, value;
+            QString key, label;
+            std::function<QString()> value;
             bool folder;
         };
         const QList<PathSetting> rows = {
-            {QStringLiteral("exe"), tr("Executable"), cfg::gameExe(id), false},
-            {QStringLiteral("data"), tr("Disc files"), cfg::gameDataRoot(id), true},
-            {QStringLiteral("save"), tr("Save folder"), cfg::saveFolder(id), true},
-            {QStringLiteral("build_script"), tr("Build script"), cfg::buildScript(id), false},
+            {QStringLiteral("exe"), tr("Executable"), [id] { return cfg::gameExe(id); }, false},
+            {QStringLiteral("data"), tr("Disc files"), [id] { return cfg::gameDataRoot(id); }, true},
+            {QStringLiteral("save"), tr("Save folder"), [id] { return cfg::saveFolder(id); }, true},
+            {QStringLiteral("build_script"), tr("Build script"), [id] { return cfg::buildScript(id); }, false},
         };
         gf->addRow(ui::label(QStringLiteral("%1 (%2)").arg(g.title, g.edition), "CardTitle"));
         for (const PathSetting& r : rows) {
-            auto* edit = new QLineEdit(native(r.value));
+            auto* edit = new QLineEdit(native(r.value()));
             auto* browse = new QPushButton(tr("..."));
             gf->addRow(r.label, pathRow(edit, browse));
+            pathEdits_.append({edit, r.value});
             const QString key = QStringLiteral("games/%1/%2").arg(id, r.key);
-            connect(edit, &QLineEdit::editingFinished, this, [key, edit] {
-                cfg::set(key, QDir::fromNativeSeparators(edit->text().trimmed()));
+            // only what the player typed: Enter on the path shown leaves a default a default (the game's moves
+            // when it is built), and an emptied field goes back to it
+            connect(edit, &QLineEdit::editingFinished, this, [this, key, edit] {
+                if (!edit->isModified()) return;
+                edit->setModified(false);
+                const QString v = QDir::fromNativeSeparators(edit->text().trimmed());
+                if (v.isEmpty()) cfg::remove(key);
+                else cfg::set(key, v);
+                reloadPaths();
             });
             connect(browse, &QPushButton::clicked, this, [this, key, edit, r] {
                 const QString f = r.folder ? QFileDialog::getExistingDirectory(this, r.label, edit->text())
@@ -533,8 +622,11 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
         auto* args = new QLineEdit(cfg::buildArgs(id));
         args->setPlaceholderText(tr("its arguments, for example release"));
         gf->addRow(tr("Build arguments"), args);
-        connect(args, &QLineEdit::editingFinished, this,
-                [id, args] { cfg::set(QStringLiteral("games/%1/build_args").arg(id), args->text().trimmed()); });
+        connect(args, &QLineEdit::editingFinished, this, [id, args] {
+            if (!args->isModified()) return;
+            args->setModified(false);
+            cfg::set(QStringLiteral("games/%1/build_args").arg(id), args->text().trimmed());
+        });
     }
     auto* gamesNote = ui::label(tr("Single player plays with the save folder; every online match gets a fresh save of "
                                    "its own in its session folder (the menus the launcher steers are a fresh save's)."),
@@ -607,6 +699,16 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
 }
 
 void SettingsPage::setGame(const QString& gameId) { Page::setGame(gameId); }
+
+void SettingsPage::showEvent(QShowEvent* event) {
+    reloadPaths();
+    Page::showEvent(event);
+}
+
+void SettingsPage::reloadPaths() {
+    for (const auto& [edit, value] : pathEdits_)
+        if (!edit->hasFocus()) edit->setText(native(value()));
+}
 
 void SettingsPage::setUpnp(UpnpMapper* upnp) {
     upnp_ = upnp;

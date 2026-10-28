@@ -55,6 +55,7 @@ private:
     void updateProgress();
     // the build script from Settings (a source build: mk9\build.cmd release), its output streamed into the log
     void runBuild();
+    bool folderUsable();  // false, saying why, when the game's folder is one the build cannot work in
     void setBusy(bool busy);
 
     QLabel* gameTitle_;
@@ -93,8 +94,12 @@ public:
 signals:
     void reconnectRequested();
 
+protected:
+    void showEvent(QShowEvent* event) override;  // the game's paths as they are now (built since, say)
+
 private:
     void reloadServer();
+    void reloadPaths();
     ServerClient* server_;
     QLineEdit* address_;
     QLineEdit* fingerprint_;
@@ -103,4 +108,6 @@ private:
     QLabel* presented_;
     QLabel* routerState_;
     UpnpMapper* upnp_ = nullptr;
+    // the game's path fields, each with where its value comes from (the setting, or the default)
+    QList<std::pair<QLineEdit*, std::function<QString()>>> pathEdits_;
 };

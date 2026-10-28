@@ -15,6 +15,11 @@ tools\run-mk9.cmd <logname>      # plain start, logs in mk9\out\build\win-amd64-
 The game reads its disc files from `--game_data_root` (default `<exe>\game`; here `game\disc`, the
 extracted ISO) and keeps saves in `--user_data_root` (default `<exe>\user`).
 
+The SDK is ReXGlue v0.10.0 in `external\rexglue-sdk` with this project's changes on top
+(`patches\rexglue-sdk-v0.10.0.patch`: file reads into write-protected guest pages, the critical
+section hook rollback uses, bounded stack walks in two crash reports). On a fresh checkout of the
+SDK: `git -C external\rexglue-sdk apply ..\..\patches\rexglue-sdk-v0.10.0.patch`.
+
 ## Source map (`mk9/src/mk9`)
 
 | file | what |

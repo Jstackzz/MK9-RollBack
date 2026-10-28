@@ -162,8 +162,11 @@ namespace {
 // (at -8) the caller saved its return address
 // MK's script VM draws all its scripts' random(n) through one native (sub_824705F8, its call into
 // the helper returning to 0x8247061C): those draws are told apart by the script process (the VM's
-// current context at 0x8342CDF0, its id at +4), so one script drawing more often (an arena's
-// ambience reacting to a sound ending) leaves the others' numbers alone
+// current context at 0x8342CDF0, its object id at +4), so one script drawing more often (an arena's
+// ambience reacting to a sound ending) leaves the others' numbers alone. The id comes from the one
+// counter every MK object takes its id from (0x83394B44, sub_829DBEF0), in the order the main thread
+// makes them, so it is the same process on every PC; the site shows it as 8247061C ^ (id << 4)
+// (82A23504/824790DC: process 1000096C, a fighter's own script)
 constexpr uint32_t kScriptRandomCaller = 0x8247061C;
 constexpr uint32_t kScriptContext = 0x8342CDF0;
 
@@ -177,8 +180,39 @@ uint64_t DrawSite(const PPCContext& ctx) {
   return (uint64_t(uint32_t(ctx.lr)) << 32) | up;
 }
 
+// MK9_TRACE_SCRIPT=<file> (diagnostics): what the main thread's scripts do in a match, one line each:
+//   [r]<netplay frame> draw id <process> ctx <context> ip <code> n <n> up <return addresses>
+//   [r]<netplay frame> new id <id> obj <object> by <caller> thread m|o up <return addresses>
+//   rollback to <frame> from <frame>
+// ("r": a rollback runs the frame again). tools/scriptcmp.py takes back what rollbacks took back
+// and lists the frames where two games' scripts did something different
+FILE* ScriptTrace() {
+  static FILE* f = [] {
+    const char* v = std::getenv("MK9_TRACE_SCRIPT");
+    return v && *v ? std::fopen(v, "w") : nullptr;
+  }();
+  return f;
+}
+
+void TraceScriptDraw(const PPCContext& ctx) {
+  FILE* f = ScriptTrace();
+  if (!f) return;
+  uint32_t returns[8] = {};
+  const int n = StackReturns(ctx, returns, 8);
+  if (n < 1 || returns[0] != kScriptRandomCaller) return;
+  const uint32_t context = ReadU32(kScriptContext);
+  const uint32_t args = context ? ReadU32(context + 60) : 0;
+  std::fprintf(f, "%s%u draw id %X ctx %08X ip %08X n %u up", frame::Replaying() ? "r" : "", net::Frame(),
+               context ? ReadU32(context + 4) : 0, context, context ? ReadU32(context + 8) : 0,
+               args ? ReadU32(args + 4) : 0);
+  for (int i = 1; i < n; i++) std::fprintf(f, " %08X", returns[i]);
+  std::fputc('\n', f);
+  std::fflush(f);
+}
+
 void BeforeDraw(PPCContext& ctx) {
   if (!net::InSync() || !frame::OnMainThread()) return;
+  TraceScriptDraw(ctx);
   const uint64_t site = DrawSite(ctx);
   const uint32_t n = g_site_draws[site]++;
   // kept for as far back as a rollback can go (a fight draws hundreds a frame)
@@ -193,6 +227,10 @@ void BeforeDraw(PPCContext& ctx) {
 }  // namespace
 
 void RolledBack(uint32_t frame) {
+  if (FILE* f = ScriptTrace()) {
+    std::fprintf(f, "rollback to %u from %u\n", frame, net::Frame());
+    std::fflush(f);
+  }
   while (!g_site_journal.empty() && g_site_journal.back().frame >= frame) {
     auto it = g_site_draws.find(g_site_journal.back().site);
     if (it != g_site_draws.end() && it->second) it->second--;
@@ -220,6 +258,8 @@ bool SyncPoint() {
   return begins;
 }
 
+bool Comparable() { return Phase() != kPhaseLoading; }
+
 uint32_t StateHash(PPCContext& ctx, uint8_t* base) {
   // only values that do not depend on where this process's heaps put things (the script globals
   // hold pointers): the round timer so far, and below the draws per call site. The game's random
@@ -240,7 +280,7 @@ uint32_t StateHash(PPCContext& ctx, uint8_t* base) {
     return v && *v ? std::fopen(v, "w") : nullptr;
   }();
   if (sites_log) {
-    std::fprintf(sites_log, "frame %u\n", net::Frame());
+    std::fprintf(sites_log, "frame %u phase %d\n", net::Frame(), Phase());
     for (const auto& [site, n] : draws)
       std::fprintf(sites_log, "%08X %08X %u\n", uint32_t(site >> 32), uint32_t(site), n);
     std::fflush(sites_log);
@@ -287,4 +327,21 @@ REX_HOOK_RAW(sub_826D91E8) {
   mk9::game::BeforeDraw(ctx);
   __imp__sub_826D91E8(ctx, base);
   mk9::randtrace::Log('F', uint32_t(site >> 32), mk9::game::GameRandState(), uint32_t(site));
+}
+
+// MK's counted objects (script processes among them) take their id from one counter (0x83394B44):
+// the "new" lines of MK9_TRACE_SCRIPT
+REX_EXTERN(__imp__sub_829DBEF0);
+REX_HOOK_RAW(sub_829DBEF0) {
+  const uint32_t obj = ctx.r3.u32, caller = uint32_t(ctx.lr);
+  __imp__sub_829DBEF0(ctx, base);
+  FILE* f = mk9::game::ScriptTrace();
+  if (!f || !mk9::net::InSync()) return;
+  uint32_t returns[4] = {};
+  const int n = mk9::game::StackReturns(ctx, returns, 4);
+  std::fprintf(f, "%s%u new id %X obj %08X by %08X thread %c up", mk9::frame::Replaying() ? "r" : "",
+               mk9::net::Frame(), mk9::game::ReadU32(obj + 4), obj, caller, mk9::frame::OnMainThread() ? 'm' : 'o');
+  for (int i = 0; i < n; i++) std::fprintf(f, " %08X", returns[i]);
+  std::fputc('\n', f);
+  std::fflush(f);
 }

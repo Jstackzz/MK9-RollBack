@@ -79,5 +79,10 @@ void LastCheckDetail(uint32_t& timer, uint32_t& rand_state);
 // at the top of a frame in sync: true once when every PC must meet again before going on (a fight
 // begins: the phase turned to kPhaseFight)
 bool SyncPoint();
+// whether the state at the top of this frame is the same on every PC in sync, so worth a check: not
+// while a fight loads (kPhaseLoading, the VS screen). Each PC finishes loading when it does, and the
+// fight's scripts start then (a frame or two apart, drawing, setting the round timer) until each PC
+// reaches the fight's barrier, which puts them in step again (SyncPoint)
+bool Comparable();
 
 }  // namespace mk9::game

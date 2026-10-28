@@ -24,7 +24,7 @@ SDK: `git -C external\rexglue-sdk apply ..\..\patches\rexglue-sdk-v0.10.0.patch`
 
 | file | what |
 |---|---|
-| `frame.cpp` | the frame boundary: FEngineLoop::Tick (`sub_823621F8`), top/end hooks, frames run again, the 60 frames/s cap |
+| `frame.cpp` | the frame boundary: FEngineLoop::Tick (`sub_823621F8`), top/end hooks, frames run again (with the rest of GuardedMain's loop), the 60 frames/s cap |
 | `crash.cpp` | crash reports: `crash.txt` and `crash.dmp` in the session folder when the game crashes (see "Crash reports") |
 | `input.cpp` | XamInputGetState / GetCapabilities / GetKeystrokeEx answered from one pad source chain: autopilot override (offline) > netplay or test scripts > the PC's controllers (remapped, `controls.cpp`) |
 | `game.cpp` | what netplay and the launcher read from MK9 (addresses below), the random generator agreement, per-call-site menu streams |
@@ -87,7 +87,9 @@ variant, Test Your Luck's slots; in fights every MK script process has a stream 
 script drawing more often, an arena's ambience reacting to a sound ending, say, leaves the
 fighters' numbers alone). Every 30 frames both sides compare a state hash: the round timer, the
 round, the rounds won and the draws made at every call site so far (a fight that goes differently
-draws differently).
+draws differently). Not while a fight loads (the VS screen, phase 1): each PC finishes loading when
+it does and the fight's scripts start then, a frame or two apart from one PC to the next, drawing
+and setting the round timer, until the fight's barrier puts them in step.
 
 - **Lockstep** (default): a frame runs once every player's input for it is there; input delay 2.
 - **Rollback** (`netcode=rollback`): frames of a fight run ahead on guessed inputs (up to 8) and a
@@ -118,6 +120,7 @@ same fighters again, `rematch select=1` picks again, `park` quits to the main me
 . tools\netplay-local.ps1; Start-NetplayLocal -Out <dir> -Mode rollback -Delay 1 -Lag 50 -Jitter 30 -AttackB -Sites
 python -I tools\netcmp.py a\net.log b\net.log                  # frame logs of two games side by side
 python -I tools\randcmp.py a\rand.txt b\rand.txt               # MK9_TRACE_RAND random draw traces
+python -I tools\scriptcmp.py a\script.txt b\script.txt         # -TraceScript: what scripts did, frame by frame
 ```
 
 ## The player package (each PC builds its own game)
@@ -168,6 +171,14 @@ restore is only right if the memory it puts back is the simulation's and nothing
    whoever writes it.
 4. **The host.** `ReadFile` into a write-protected guest page fails in the kernel instead of
    faulting: the SDK's file read takes such pages first (`patches/`).
+5. **Whole frames.** GuardedMain's loop runs more than `FEngineLoop::Tick` each time round: before
+   the tick it counts the frame, reads the pads (`sub_829D5230`; the tick only reads what that put
+   in the game's pad state) and the key presses (`sub_829D49F0`) and updates the game's systems
+   (`sub_8239D550`), after it it measures the frame. A frame run again runs all of it
+   (`frame.cpp`, `RestOfLoop`), and what the key presses had reported goes back with the frame
+   (`input.cpp`). Until 2026-10-28 only the tick ran again: a rollback from frame n to r played
+   frames r+1..n on the pads read before r, so inputs that came in for them took effect only after
+   n, and the two games of a lagged fight drifted 1-3 frames apart.
 
 The sync test (`MK9_SYNCTEST=4`) goes back 4 frames every 10 frames through a scripted fight: 420
 rollbacks and 1,680 frames run again without a crash, worst rollback about 70 ms (frames run
@@ -175,29 +186,38 @@ again render too). `MK9_SYNCTEST_VERIFY=1` compares every tracked page after the
 with a copy taken at that frame's top (only foreign audio pages differ) and lists what a frame
 run again wrote differently. Its own pass/fail ("frames differed") counts every byte, D3D fences
 included, so it always reports differences; the two-game test is the real check: with 50 ms lag,
-30 ms jitter and both players attacking, two games roll back about a hundred times each over a
-2-minute match at 60 frames/s and their checks agree (one check in 322 differed once, a script
-drawing a frame later).
+30 ms jitter and both players attacking, two games roll back 23-31 times each (up to 8 frames back)
+over the first 80 seconds of the fight and their checks agree (162-172 checks a run), and so do
+their scripts, frame for frame (`-TraceScript`, `scriptcmp.py`: every process made and every
+number drawn on the same frame in both games).
 
 Diagnostics: `MK9_RB_TRACE_FOREIGN=1` (who writes which pages first, stacks of foreign writers),
 `MK9_GMALLOC_TRACE=1` (frees traced, double frees explained), `MK9_NET_SITES_LOG` (draws per
-call site at every check; `-Sites` in `netplay-local.ps1`).
+call site at every check; `-Sites` in `netplay-local.ps1`), `MK9_TRACE_SCRIPT` (every script
+process made and every script random draw, with the frame and the rollbacks; `-TraceScript`, and
+`tools\scriptcmp.py` compares two games' frame by frame as their rollbacks left them).
 
 ## Known gaps
 
 - Rollback is tested on one PC over loopback with simulated lag (see "Rollback"), not yet over the
   internet. Frames run again also render; a long rollback costs about 17 ms a frame (16.5 ms measured by
   the sync test, which now logs it; 13 ms with the SDK's vsync off while they run, not kept: unproven).
-- **Rollback can go out of step** (found 2026-10-28, in 0.3.x builds as in 0.4.0): the two-game test above
-  with `-Lag 50 -Jitter 30 -AttackB` stopped with DESYNC in 9 of 11 runs, 8 of them in the fight (four at
-  fight frame 1590, a fifth going wrong there first), the 0.3.x build in 2 of its 3. At 1590 one game's
-  scripts drew 20 numbers through the script native `sub_824790A8` (a random number in a range: the script
-  VM's context at `0x8342CDF0`, its arguments at `+60`, through `sub_8239C2A8` and the range helper
-  `sub_82A234E0`; draw site `82A23504/824790DC` in `MK9_NET_SITES_LOG`) between frames 1560 and 1590, and the
-  other game none; whichever game rolled back across that moment lost them. Suspected: a script that
-  waits on something a rollback does not take back (FMOD's sounds). One run also stopped before the fight, in
-  lockstep at the end of loading, a script drawing on one PC a frame before the other.
+- **Rollback went out of step under lag** in 0.3.x builds and the first 0.4.0 commit (found and fixed
+  2026-10-28): the two-game test above with `-Lag 50 -Jitter 30 -AttackB` stopped with DESYNC in 9 of 11
+  runs, most at fight frame 1590. Frames run again ran only the tick, not the rest of GuardedMain's loop,
+  which reads the pads ("Rollback", 5), so inputs inside a rollback's frames took effect only after them
+  and the two games' fights drifted 1-3 frames apart from the first rollback on; a check caught it when a
+  draw fell in between. At 1590 that was a fighter's own script (process `1000096C`; draw site
+  `82A23504/824790DC` is the script random native `sub_824705F8` keyed by it, not `sub_824790A8`) drawing
+  `random(100)` twice a frame for 10 frames, from a frame or two later in one game. Not FMOD: once frames
+  run again run the whole loop, the scripts of both games do the same on the same frames (`scriptcmp.py`).
+  The stop in lockstep at the end of loading (3 runs of 15) was the checks comparing the fight's
+  first script draws and round timer, which each PC makes when its loading ends: no checks while a fight
+  loads now. Since: 4 lagged runs in a row with no DESYNC and 0 check differences, lockstep agreeing.
 - Sounds started in frames a rollback takes back keep playing (FMOD is not rolled back).
+- Seen once in about twenty test boots (2026-10-28, three games starting at the same moment): a crash in
+  `main()` before the first frame (`sub_823669D8`, a write through a null pointer, the job workers then
+  reading through one too). Not looked into yet.
 - Four-player TWO VS TWO (slots 2-3) is in the netplay core but untested.
 - The autopilot steers menus by fixed steps from a fresh save's cursor; the roster grid is not
   mapped yet, so the launcher cannot pick a named fighter (players pick in the game).

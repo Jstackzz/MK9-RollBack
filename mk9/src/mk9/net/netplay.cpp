@@ -622,10 +622,11 @@ void SetFrameInputs(uint32_t f) {
   }
 }
 
-// every 30 frames both sides compare what the game says its state is at the top of the frame; with
-// rollback the hash is sent once every input before the frame is known (and was used)
+// every 30 frames both sides compare what the game says its state is at the top of the frame (not
+// while a fight loads: game::Comparable); with rollback the hash is sent once every input before the
+// frame is known (and was used)
 void Tentative(uint32_t f, PPCContext& ctx, uint8_t* base) {
-  if (f % 30 == 0) {
+  if (f % 30 == 0 && game::Comparable()) {
     g_tentative[f] = game::StateHash(ctx, base);
     uint32_t timer, rand_state;
     game::LastCheckDetail(timer, rand_state);

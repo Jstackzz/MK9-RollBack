@@ -1,9 +1,10 @@
 #pragma once
-// The game's frame boundary. GuardedMain (sub_823667E8) runs `while (!GIsRequestingExit)
-// FEngineLoop::Tick()` on the main guest thread; the hook on FEngineLoop::Tick (sub_823621F8)
+// The game's frame boundary. GuardedMain (sub_823667E8) runs `while (!GIsRequestingExit) {...
+// FEngineLoop::Tick() ...}` on the main guest thread; the hook on FEngineLoop::Tick (sub_823621F8)
 // is the top of each frame: no game code is on the guest stack below GuardedMain's own frame,
-// so the simulation can be saved and put back there (rollback.h), and inputs for the frame are
-// settled before the engine polls the pads.
+// so the simulation can be saved and put back there (rollback.h). GuardedMain reads the pads
+// before each tick (sub_829D5230), so a frame plays on the inputs settled at the top of the frame
+// before it.
 //
 // No more than 60 frames a second start there (MK9_FRAME_CAP=<n> caps at n instead, 0 not at all):
 // the frames the game draws wait for the GPU's 60 Hz vertical blank anyway, the cap holds back the
@@ -28,8 +29,10 @@ void SetTopHook(Hook hook);
 void SetEndHook(Hook hook);
 
 // Rollback: from the top hook, after putting the game back to an earlier frame (and the count
-// with SetCount), run one frame again: the engine's tick and the end hook, no top hook. Frames
-// run this way are unseen catch-up work.
+// with SetCount), run one frame again: the engine's tick, the end hook, and the rest of GuardedMain's
+// loop up to the next tick (no top hook): it reads the pads and key presses the next frame plays on,
+// among other things, so a frame run again leaves the game where its first run would have with the
+// same inputs. Frames run this way are unseen catch-up work.
 void RunAgain(PPCContext& ctx, uint8_t* base);
 void SetCount(uint64_t n);
 bool Replaying();

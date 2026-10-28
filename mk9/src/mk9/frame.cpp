@@ -23,6 +23,8 @@ uint64_t Switches();
 
 #include <rex/hook.h>
 #include <rex/logging.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/xmemory.h>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -32,6 +34,15 @@ uint64_t Switches();
 
 // FEngineLoop::Tick, called once per frame from GuardedMain's loop (0x823668E8)
 REX_EXTERN(__imp__sub_823621F8);
+// what else GuardedMain's loop runs each time round (RestOfLoop)
+REX_EXTERN(sub_82366BF8);  // reads the time base into [r3]
+REX_EXTERN(sub_82360F10);
+REX_EXTERN(sub_8270A038);  // appSprintf(buffer, size, format, ...)
+REX_EXTERN(sub_829B0430);
+REX_EXTERN(sub_829D5230);  // reads the pads (XamInputGetState) into the game's pad state
+REX_EXTERN(sub_829D7748);  // system notifications, sign-in changes
+REX_EXTERN(sub_8239D550);
+REX_EXTERN(sub_829D49F0);  // reads key presses (XamInputGetKeystrokeEx)
 
 namespace mk9::frame {
 namespace {
@@ -148,11 +159,71 @@ void SetTopHook(Hook hook) { g_top = hook; }
 void SetEndHook(Hook hook) { g_end = hook; }
 bool Replaying() { return g_replaying.load(std::memory_order_relaxed); }
 
+namespace {
+
+// GuardedMain's loop (sub_823667E8, 0x82366860-0x82366920) runs more than the engine's tick each time
+// round, and a frame run again must run all of it, or it is not the frame that ran first: after the
+// tick it measures the frame and takes a flag another thread sets, and before the next tick it counts
+// the frame, reads the pads and the key presses (the tick only reads what that put in the game's pad
+// state) and updates the game's systems. This is that part, from the tick's return to the next
+// tick's call, with GuardedMain's registers (ctx at the top of a frame holds them: r21-r31 its
+// constants, r30 the time base when the loop came round, r1 its frame) and the return addresses its
+// calls have. Without it a rollback from frame n to r played frames r+1..n on the pads read before
+// r, and the inputs that came in for them took effect only after n.
+void RestOfLoop(PPCContext& ctx, uint8_t* base) {
+  auto* mem = REX_KERNEL_STATE()->memory();
+  auto read = [&](uint32_t a) { return __builtin_bswap32(*mem->TranslateVirtual<uint32_t*>(a)); };
+  auto write = [&](uint32_t a, uint32_t v) { *mem->TranslateVirtual<uint32_t*>(a) = __builtin_bswap32(v); };
+  // after the tick (0x823668D8): the frame's length in time base ticks
+  ctx.r3.u64 = ctx.r1.u32 + 88;
+  ctx.lr = 0x823668E0;
+  sub_82366BF8(ctx, base);
+  write(ctx.r28.u32 - 10916, read(ctx.r1.u32 + 92) - ctx.r30.u32);
+  // a word another thread sets, taken and cleared at once (lwarx/stwcx. in the guest)
+  const uint32_t taken = uint32_t(InterlockedExchange(mem->TranslateVirtual<volatile LONG*>(ctx.r29.u32), 0));
+  write(ctx.r27.u32 - 10912, __builtin_bswap32(taken));
+  ctx.lr = 0x82366918;
+  sub_82360F10(ctx, base);
+  // the top of the loop (0x82366860): the time base, the frame counted
+  ctx.r3.u64 = ctx.r1.u32 + 80;
+  ctx.lr = 0x82366868;
+  sub_82366BF8(ctx, base);
+  ctx.r30.u64 = read(ctx.r1.u32 + 84);
+  const uint32_t counters = read(ctx.r31.u32 + 18644);
+  write(counters + 108, read(counters + 108) + 1);
+  ctx.r3.u64 = 12;
+  ctx.r4.u64 = ctx.r26.u64;
+  ctx.r5.u64 = ctx.r25.u64;
+  ctx.r6.u64 = read(read(ctx.r31.u32 + 18644) + 108);
+  ctx.lr = 0x82366898;
+  sub_8270A038(ctx, base);
+  ctx.lr = 0x8236689C;
+  sub_829B0430(ctx, base);
+  if (ctx.r3.u32 == 0) {
+    const uint32_t c = read(ctx.r31.u32 + 18644);
+    write(c + 112, read(c + 112) + 1);
+  }
+  if (read(ctx.r21.u32 - 10956) != 0) {
+    ctx.lr = 0x823668C4;
+    sub_829D5230(ctx, base);
+    ctx.lr = 0x823668C8;
+    sub_829D7748(ctx, base);
+  }
+  ctx.lr = 0x823668CC;
+  sub_8239D550(ctx, base);
+  ctx.lr = 0x823668D0;
+  sub_829D49F0(ctx, base);
+  ctx.r3.u64 = ctx.r24.u64;  // the tick's argument
+}
+
+}  // namespace
+
 void RunAgain(PPCContext& ctx, uint8_t* base) {
   g_replaying.store(true, std::memory_order_relaxed);
   __imp__sub_823621F8(ctx, base);
   g_frames.fetch_add(1, std::memory_order_relaxed);
   if (g_end) g_end(ctx, base);
+  RestOfLoop(ctx, base);
   g_replaying.store(false, std::memory_order_relaxed);
 }
 

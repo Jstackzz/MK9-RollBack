@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <map>
 #include <mutex>
 
 #include <rex/hook.h>
@@ -19,6 +20,7 @@
 
 #include "mk9/controls.h"
 #include "mk9/frame.h"
+#include "mk9/net/rollback.h"
 
 namespace mk9::input {
 namespace {
@@ -201,6 +203,30 @@ struct KeyUser {
 };
 std::array<KeyUser, 4> g_keys;
 std::mutex g_keys_lock;
+
+// what the keys had reported at the top of each frame rollback keeps: a frame run again reads them
+// again (mk9/frame.cpp), and must see the same key events as the first time
+std::map<uint32_t, std::array<KeyUser, 4>> g_keys_kept;
+
+void KeepKeys(uint32_t frame) {
+  std::lock_guard<std::mutex> lock(g_keys_lock);
+  g_keys_kept[frame] = g_keys;
+  while (g_keys_kept.size() > size_t(mk9::rb::kKeepFrames) + 4) g_keys_kept.erase(g_keys_kept.begin());
+}
+
+void KeysBack(uint32_t frame) {
+  std::lock_guard<std::mutex> lock(g_keys_lock);
+  auto it = g_keys_kept.find(frame);
+  if (it == g_keys_kept.end()) return;
+  g_keys = it->second;
+  g_keys_kept.erase(std::next(it), g_keys_kept.end());
+}
+
+const bool g_keys_rolled_back = [] {
+  mk9::rb::OnOpen(&KeepKeys);
+  mk9::rb::OnRestore(&KeysBack);
+  return true;
+}();
 
 uint32_t KeyMask(const Pad& p) {
   uint32_t m = 0;

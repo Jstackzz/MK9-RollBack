@@ -131,7 +131,10 @@ void GamepadNav::tick() {
     }
     const unsigned now = readButtons();
     raw_ = now;
-    const bool front = LauncherInFront() && !(paused && paused());
+    // the window the buttons are for: one that needs an answer now, else a launcher window in front
+    QWidget* window = priority ? priority() : nullptr;
+    if (!window && LauncherInFront()) window = QApplication::activeWindow();
+    const bool front = window && !(paused && paused());
     if (front && !front_) sinceFront_.start();  // a launcher window came up, over a game maybe
     front_ = front;
     if (!front) {
@@ -147,21 +150,20 @@ void GamepadNav::tick() {
         if ((active & bit) && !(last_ & bit)) {
             held_[i].start();
             repeats_[i] = 0;
-            press(Button(i));
+            press(Button(i), window);
         } else if ((active & bit) && i <= Right) {  // a direction held repeats
             const qint64 t = held_[i].elapsed();
             const int due = t < kRepeatDelayMs ? 0 : 1 + int((t - kRepeatDelayMs) / kRepeatMs);
             if (due > repeats_[i]) {
                 repeats_[i] = due;
-                press(Button(i));
+                press(Button(i), window);
             }
         }
     }
     last_ = active;
 }
 
-void GamepadNav::press(Button b) {
-    QWidget* window = QApplication::activeWindow();
+void GamepadNav::press(Button b, QWidget* window) {
     // an open list (a combo box's): arrows, Enter and Esc as on the keyboard
     if (QWidget* popup = QApplication::activePopupWidget()) {
         static const int keys[kButtons] = {Qt::Key_Up, Qt::Key_Down, 0, 0, Qt::Key_Return, Qt::Key_Escape, 0, 0, 0};
@@ -171,11 +173,11 @@ void GamepadNav::press(Button b) {
     if (!window) return;
     const bool dialog = qobject_cast<QDialog*>(window) != nullptr;
     switch (b) {
-        case Up: move(0, -1); break;
-        case Down: move(0, 1); break;
-        case Left: move(-1, 0); break;
-        case Right: move(1, 0); break;
-        case A: activate(); break;
+        case Up: move(0, -1, window); break;
+        case Down: move(0, 1, window); break;
+        case Left: move(-1, 0, window); break;
+        case Right: move(1, 0, window); break;
+        case A: activate(window); break;
         case B:
             if (dialog && !window->property("padKeepsFromBack").toBool()) SendKey(window, Qt::Key_Escape);
             break;
@@ -192,9 +194,8 @@ void GamepadNav::press(Button b) {
 
 // the focus to the nearest control that way: along the direction edge to edge, off to the side counting three times
 // (0 when they overlap that way); a list or table moves its own current item first, as far as its edge
-void GamepadNav::move(int dx, int dy) {
-    QWidget* window = QApplication::activeWindow();
-    QWidget* from = QApplication::focusWidget();
+void GamepadNav::move(int dx, int dy, QWidget* window) {
+    QWidget* from = window->focusWidget();
     if (from && (from->window() != window || !Navigable(from))) from = nullptr;
     if (auto* view = qobject_cast<QAbstractItemView*>(from)) {
         const QModelIndex before = view->currentIndex();
@@ -247,10 +248,10 @@ void GamepadNav::move(int dx, int dy) {
 }
 
 // A: the focused control as a click would (a combo box opens its list); with none, the focus comes first
-void GamepadNav::activate() {
-    QWidget* w = QApplication::focusWidget();
-    if (!w || w->window() != QApplication::activeWindow() || !Navigable(w)) {
-        move(0, 1);
+void GamepadNav::activate(QWidget* window) {
+    QWidget* w = window->focusWidget();
+    if (!w || w->window() != window || !Navigable(w)) {
+        move(0, 1, window);
         return;
     }
     if (auto* b = qobject_cast<QAbstractButton*>(w)) b->animateClick();

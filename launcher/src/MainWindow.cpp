@@ -113,6 +113,16 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
         else if (auto* lobby = qobject_cast<LobbyPage*>(stack_->currentWidget())) lobby->pressReady();
     };
     pad_->paused = [this] { return controller_->inMatch(); };
+    // what needs an answer now steers before anything, in front of the game or not (Windows may keep a game in front
+    // of a window that pops up): MATCH FOUND (single player paused under it), the rematch prompt (the game at its
+    // CONTINUE? menu takes no presses), the lobby's Ready after its match (the game at its hold point takes none)
+    pad_->priority = [this]() -> QWidget* {
+        if (matchDialog_ && matchDialog_->isVisible()) return matchDialog_;
+        if (rematchDialog_ && rematchDialog_->isVisible()) return rematchDialog_;
+        auto* lobby = qobject_cast<LobbyPage*>(pages_[kLobby]);
+        if (lobbyPads_ && lobby && lobby->inLobby() && !controller_->soloRunning()) return this;
+        return nullptr;
+    };
     soloFrontTimer_.setInterval(400);
     connect(&soloFrontTimer_, &QTimer::timeout, this, [this] {
         GameProcess* solo = controller_->solo();
@@ -226,14 +236,18 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
             cliLobbyMessage(cliLastLobby_);
         // a lobby match is over and its game played the ending: the lobby comes back in front, Ready focused, so a
         // player on a controller readies up for the next one (A, or START anywhere on the page)
+        if (p != MatchController::Phase::Idle) lobbyPads_ = false;
         if (p == MatchController::Phase::Idle && wasInMatch_) {
             auto* lobby = qobject_cast<LobbyPage*>(pages_[kLobby]);
             if (lobby && lobby->inLobby()) {
                 selectPage(kLobby);
                 popUp(this);
                 lobby->focusReady();
+                lobbyPads_ = true;
             }
         }
+        // a lobby match to watch plays in the game: up in front for it
+        if (p == MatchController::Phase::Watching) focusGame();
         wasInMatch_ = controller_->inMatch();
     });
     connect(controller_, &MatchController::seriesChanged, this, [this](const QJsonObject& s) {
@@ -262,8 +276,8 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     connect(&CrashReports::instance(), &CrashReports::written, this, &MainWindow::showCrashReport);
     // the series' next match from the games' CONTINUE? menu comes without a match found: back to the game for it
     connect(controller_, &MatchController::matchStarted, this, [this](const QJsonObject& go) {
-        if (go.value(QStringLiteral("rematch")).toString().isEmpty() || !rematchDialog_) return;
-        rematchDialog_->close();
+        if (go.value(QStringLiteral("rematch")).toString().isEmpty()) return;
+        if (rematchDialog_) rematchDialog_->close();
         focusGame();
     });
     connect(controller_, &MatchController::matchCancelled, this, [this](const QString& reason, bool requeued) {
@@ -625,10 +639,9 @@ void MainWindow::onMatchFound(const QJsonObject& found) {
         showNotice(found.contains(QStringLiteral("series")) ? tr("Next match against %1 starting.").arg(opponent)
                                                             : tr("Lobby match starting against %1.").arg(opponent),
                    false);
-        if (rematchDialog_) {  // both chose: back to the game for it
-            rematchDialog_->close();
-            focusGame();
-        }
+        // both chose a rematch, or the lobby's two readied: back to the game for it, no switching to it
+        if (rematchDialog_) rematchDialog_->close();
+        focusGame();
         return;
     }
     const Game* g = GameData::instance().game(found.value(QStringLiteral("game")).toString());
@@ -638,6 +651,9 @@ void MainWindow::onMatchFound(const QJsonObject& found) {
     auto* dlg = new MatchFoundDialog(found, g ? g->title : QString(), m ? m->name : QString(),
                                      g ? g->characterName(req.character) : req.character, this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
+    if (controller_->soloRunning())  // paused under it, its window hidden (MatchController::freezeSolo)
+        dlg->setNote(tr("Your single-player game is paused. ACCEPT closes it and starts the match; Decline goes back "
+                        "to it."));
     GamepadNav::keepFromBack(dlg);  // B, an attack button, never declines
     // over the games, and in front again whenever a game window takes the front: a match found the moment the search
     // began pops up before the match's game (or single player) opens its window, which covered it for the rest of its
@@ -694,6 +710,8 @@ void MainWindow::onKasualSeries(const QJsonObject& series, const QString& title,
         auto* dlg = new RematchDialog(this);
         dlg->setAttribute(Qt::WA_DeleteOnClose);
         GamepadNav::keepFromBack(dlg);
+        // over the game at its CONTINUE? menu, the controllers' (GamepadNav::priority) even if the game kept the front
+        dlg->setWindowFlag(Qt::WindowStaysOnTopHint);
         rematchDialog_ = dlg;
         connect(dlg, &RematchDialog::chose, this, [this](const QString& choice) {
             if (choice == QLatin1String("leave")) {

@@ -140,8 +140,9 @@ QueuePage::QueuePage(bool ranked, ServerClient* server, MatchController* control
     solo_ = new QCheckBox(tr("Play single player while you wait"));
     solo_->setChecked(cfg::soloWhileWaiting());
     solo_->setToolTip(tr("While the search runs, the game opens single player (your saves, its own menus: practice, "
-                         "the ladder...). A match found comes up over it, and afterwards you are back where you "
-                         "were."));
+                         "the ladder...), the only game running. A match found pauses it: ACCEPT closes it and the "
+                         "match's game starts, Decline goes back to it, CANCEL SEARCH closes it. Off: the match's game "
+                         "waits in the background instead, ready at once."));
     mm->addWidget(solo_);
     delayInfo_ = ui::label(QString(), "Muted");
     delayInfo_->setWordWrap(true);
@@ -660,9 +661,9 @@ SinglePlayerPage::SinglePlayerPage(MatchController* controller, QWidget* parent)
     exeInfo_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     exeInfo_->setWordWrap(true);
     solo->addWidget(exeInfo_);
-    auto* onlineNote = ui::label(tr("You can search for an online match while you play: when one is found, accept it "
-                                    "over your game, which waits frozen through the match and the rematches after "
-                                    "it, then carries on where you left it."),
+    auto* onlineNote = ui::label(tr("You can search for an online match while you play: when one is found your game "
+                                    "pauses under MATCH FOUND. Accepting closes it and the match's game starts (one "
+                                    "game at a time); declining carries on where you left it."),
                                  "Muted");
     onlineNote->setWordWrap(true);
     solo->addWidget(onlineNote);

@@ -44,7 +44,7 @@ int maxPing();
 bool strict();
 // the player picks their fighter on the game's own select screen in online matches, not in the launcher
 bool pickInGame();
-// a Ranked or Kasual search starts single player to play while it waits (MatchController::maybeStartSolo)
+// a Ranked or Kasual search waits in single player, the one game it runs (MatchController::findMatch; on by default)
 bool soloWhileWaiting();
 // the input delay in frames, 0-6, or kAutoDelay (the default): from the match's measured ping, the server's
 // match_go delay (autoDelay); as the protocol writes it: "auto" or the number

@@ -84,11 +84,10 @@ public:
     // fighters, when both choose it) or "select" (both pick again on the select screen); a ranked set ignores it.
     void seriesReady(bool ready, const QString& choice = QStringLiteral("rematch"));
     bool prepareGame(const QString& gameId, QString* error);
-    // the whole game with its own menus and the player's saves, no match. A search can run alongside it (standby):
-    // accepting a match freezes it (winutil::freezeProcess) and starts or thaws the match's game; once the match, and
-    // the rematches or the set after it, are over (or the match never started), that game is frozen in turn and single
-    // player runs on where it stood. `whileWaiting`: started by a Ranked or Kasual search once the match's game waits
-    // at its hold point (cfg::soloWhileWaiting).
+    // the whole game with its own menus and the player's saves, no match. One game runs at a time, and a search waits
+    // in it (standby): a match found pauses it under MATCH FOUND (winutil::freezeProcess); accepting closes it and
+    // starts the match's game, a match not accepted lets it run on where it stood; CANCEL SEARCH closes it.
+    // `whileWaiting`: started by a Ranked or Kasual search (cfg::soloWhileWaiting).
     bool startSolo(const QString& gameId, QString* error, bool whileWaiting = false);
     void stopSolo();
     bool soloRunning() const { return solo_ != nullptr; }
@@ -119,9 +118,9 @@ signals:
     void gameStatusChanged(const QString& text);
     void logLine(const QString& text);
     void notice(const QString& text);  // for the player, over every page (a watched match the game could not play)
-    void soloResumed();  // standby: single player runs again, its window wants the front
+    void soloResumed();  // standby: single player runs again (a match found not accepted), its window wants the front
     void soloStarted();  // single player's game was started, its window (once it has one) wants the front
-    void gameShown();    // standby: the match's game started for an accepted match has its window up
+    void gameShown();    // standby: the match's game started for an accepted match is up at its hold point
 
 private:
     void setPhase(Phase p, const QString& text);
@@ -163,12 +162,10 @@ private:
     void log(const QString& text);
     void freezeSolo();
     void thawSolo();
-    void freezeGame();
-    void thawGame();
-    void maybeBackToSolo();  // standby: nothing more to play online, single player again
-    void maybeStartSolo();   // a search waits with the match's game at its hold point: single player meanwhile
+    void maybeBackToSolo();  // standby: a match found not accepted, single player again
+    void startAcceptedGame();  // standby: the accepted match's game, once single player has gone
     void closeGame(const QString& why);  // the match's game, once nothing wants it
-    void closeSolo(const QString& why);  // single player a search opened, once the search is cancelled
+    void closeSolo(const QString& why);  // single player a search waited in: a match accepted, the search cancelled
     void maybeCloseIdleGame();           // closeGameWhenIdle, once idle
     // a tunnel (docs/PROTOCOL.md): no hello_ack for the match, so the server is asked to carry it through the
     // connection; its packets come and go there, to the punch and then to the game (bridge_)
@@ -189,13 +186,14 @@ private:
     UdpRendezvous* udp_;
     GameProcess* game_ = nullptr;
     GameProcess* solo_ = nullptr;
-    bool soloWaiting_ = false;  // solo_ was started by a search, to play while it waits
-    bool soloFrozen_ = false, gameFrozen_ = false;
-    QList<quintptr> soloHidden_, gameHidden_;  // the windows freezing hid, shown again by thawing
+    bool soloWaiting_ = false;  // solo_ is the game a search waits in (opened for it or open already)
+    bool soloFrozen_ = false;   // paused under a match found
+    QList<quintptr> soloHidden_;  // the windows freezing hid, shown again by thawing
     bool showWhenReady_ = false;  // standby: the match's game started on accepting; to the front once it is up
     bool closeWhenIdle_ = false;  // a lobby was left: game_ goes once idle (closeGameWhenIdle)
     QPointer<GameProcess> lobbyGame_;   // the game a lobby's Ready wants (prepareGame): a cancelled search leaves it be
-    QPointer<GameProcess> searchGame_;  // the game a search started (findMatch): a cancelled search closes it
+    // the game a search started (findMatch, or an accepted match in single player's place): a cancelled search closes it
+    QPointer<GameProcess> searchGame_;
     GameProcess* localA_ = nullptr;
     GameProcess* localB_ = nullptr;
     Phase phase_ = Phase::Idle;

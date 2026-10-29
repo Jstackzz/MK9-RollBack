@@ -212,6 +212,11 @@ MatchFoundDialog::MatchFoundDialog(const QJsonObject& found, const QString& game
     countdown_ = ui::label(QString(), "Muted");
     countdown_->setAlignment(Qt::AlignCenter);
     v->addWidget(countdown_);
+    note_ = ui::label(QString(), "Muted");
+    note_->setAlignment(Qt::AlignCenter);
+    note_->setWordWrap(true);
+    note_->hide();
+    v->addWidget(note_);
     auto* buttons = new QHBoxLayout;
     auto* decline = new QPushButton(tr("Decline"));
     auto* acceptBtn = new QPushButton(tr("ACCEPT"));
@@ -239,6 +244,11 @@ MatchFoundDialog::MatchFoundDialog(const QJsonObject& found, const QString& game
     });
     tick_.start();
     winutil::useDarkTitleBar(this);
+}
+
+void MatchFoundDialog::setNote(const QString& text) {
+    note_->setText(text);
+    note_->setVisible(!text.isEmpty());
 }
 
 // --- RematchDialog ---------------------------------------------------------------------------------

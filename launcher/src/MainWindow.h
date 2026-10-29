@@ -74,6 +74,9 @@ private:
     void selectGame(const QString& id);
     void selectPage(int index);
     bool wasInMatch_ = false;  // the last phase change was during a match (MatchController::inMatch)
+    // a lobby match is over and the lobby came back for the next Ready: the controllers steer it even if the game kept
+    // the front (GamepadNav::priority), until a match is on its way again
+    bool lobbyPads_ = false;
     void connectServer();
     void updateFooter();
     void updateAccountButton();

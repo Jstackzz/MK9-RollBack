@@ -50,11 +50,13 @@ public:
     MatchFoundDialog(const QJsonObject& found, const QString& gameTitle, const QString& modeName,
                      const QString& characterName, QWidget* parent = nullptr);
     QString matchId() const { return matchId_; }
+    void setNote(const QString& text);  // a line over the buttons: what answering does to the game played meanwhile
 
 private:
     QString matchId_;
     QProgressBar* bar_;
     QLabel* countdown_;
+    QLabel* note_;
     QTimer tick_;
     qint64 deadlineMs_ = 0;
 };

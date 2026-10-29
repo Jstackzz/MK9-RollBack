@@ -1,11 +1,12 @@
 #pragma once
 // The launcher with a controller, through SDL3 as the games read theirs (XInput, Windows.Gaming.Input and HIDAPI:
-// Xbox and PlayStation pads, fight sticks): while a launcher window is in front, the d-pad or the left stick moves the
-// focus to the nearest control that way (or moves within a list or table first), A presses it, B backs out of a
-// dialog (never the match-found or rematch prompt: a match should not go by a slip), LB / RB switch pages and START
-// finds a match on a queue page. A window that comes up over a game ignores the buttons held from the game until they
-// are let go. While a match is played (`paused`) the buttons are the game's alone, wherever the focus is: a launcher
-// left in front by a game that could not take the focus must not act on a fight's presses.
+// Xbox and PlayStation pads, fight sticks): while a launcher window is in front, or one that needs an answer over a
+// game (`priority`, even when Windows kept the game in front), the d-pad or the left stick moves the focus to the
+// nearest control that way (or moves within a list or table first), A presses it, B backs out of a dialog (never the
+// match-found or rematch prompt: a match should not go by a slip), LB / RB switch pages and START finds a match on a
+// queue page. A window that comes up over a game ignores the buttons held from the game until they are let go. While a
+// match is played (`paused`) the buttons are the game's alone, wherever the focus is: a launcher left in front by a
+// game that could not take the focus must not act on a fight's presses.
 
 #include <QElapsedTimer>
 #include <QList>
@@ -27,6 +28,10 @@ public:
     std::function<void(int)> onPage;
     std::function<void()> onStart;
     std::function<bool()> paused;
+    // the launcher window the controllers steer before any other, in front or not (nullptr: none): what needs an
+    // answer now, over a game that takes no presses meanwhile (MATCH FOUND over single player paused, the rematch
+    // prompt over the game held at its CONTINUE? menu, a lobby's Ready with the game at its hold point)
+    std::function<QWidget*()> priority;
     // a dialog that B leaves alone (its own buttons decide)
     static void keepFromBack(QWidget* dialog);
 
@@ -35,9 +40,10 @@ private:
     void tick();
     void openPads();
     unsigned readButtons();
-    void press(Button b);
-    void move(int dx, int dy);
-    void activate();
+    // to `window`, its focus within it (the window need not be the active one)
+    void press(Button b, QWidget* window);
+    void move(int dx, int dy, QWidget* window);
+    void activate(QWidget* window);
 
     QTimer timer_;
     QList<SDL_Gamepad*> pads_;

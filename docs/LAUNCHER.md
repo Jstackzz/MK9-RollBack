@@ -8,9 +8,11 @@ MK9 changes in [PROTOCOL.md](PROTOCOL.md). The game's side of the launcher link 
 ```
 launcher/
   data/mk9.json          the game, its modes and roster (compiled into the exe)
+  data/sounds/           match-found.wav, the MATCH FOUND chime (compiled in; tools/make_chime.py writes it)
   src/                   MainWindow, pages, ServerClient (TLS), UdpRendezvous, GameProcess, MatchController,
                          FeedLink (spectators), Controls (controls.toml), Xiso (disc images), GamepadNav, Updater
   tools/fake_game.py     stand-in for mk9.exe that speaks the game contract below
+  tools/make_chime.py    synthesizes data/sounds/match-found.wav (nothing recorded; the same file on every run)
   build.cmd              configure + build + windeployqt into build\launcher
 server/                  python -m server; python -m server.client (scripted players); tests/ (pytest)
 ```
@@ -54,8 +56,16 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
 ## The pages
 
 - **Ranked / Kasual**: mode (One vs One, Two vs Two, Test Your Luck; Test Your Luck is Kasual only), FIND MATCH.
-  Fighters are always picked on the game's own select screen (the start line says `p1=- p2=-`). The game boots in
-  the background to its hold point while the search runs; a match found has 15 s to be accepted; then the launcher
+  Fighters are always picked on the game's own select screen (the start line says `p1=- p2=-`). The page says how
+  many play MK9 right now, how many search (and for this page's queue), are in matches and in lobbies, and who
+  searches (the server's `online` counts); a long search says when the server raised its max ping ("Max ping raised
+  to N ms to find you a match"). The game boots in the background to its hold point while the search runs, and
+  CANCEL SEARCH closes it again (and single player the search opened), unless a lobby's Ready wants it or it was up
+  before. A match found has 20 s to be accepted: MATCH FOUND stays on top of the games (brought back in front every
+  400 ms while a game window takes it), plays a chime (Settings), and shows the opponent's connection, ranked too:
+  the Wi-Fi fan (amber) or the wired bars (green) and the ping, "about N ms between you" when the server knows it
+  (an earlier match, or both ways to the server when the match goes through it), else their ping to the server. Then
+  the launcher
   punches the opponent on the game port, measures the ping, writes the start line and reports what the game writes
   to `status.txt`. Two who cannot reach each other play through the server's UDP port, and a player whose network
   lets no UDP through at all (no answer from the server's UDP port within 3 s) through the server connection
@@ -64,10 +74,18 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
   without counting, a ranked one counts as leaving the set (it asks first). After a queue match the series card
   offers REMATCH (the same fighters), SELECT (both pick again) and LEAVE for 60 s; a ranked set (first to 2) plays
   on by itself. When both games still wait at their CONTINUE? menu the next match starts right there with the
-  game's own `rematch` (no new connection), otherwise as a new match. *Play single player while you wait* starts
+  game's own `rematch` (no new connection), otherwise as a new match. A Kasual match that a game closed during, or
+  whose games lost each other, does not count and the rematch is offered again (from new games): "Your game closed
+  during the match against X: it does not count." A ranked one still loses the set. *Play single player while you wait* starts
   single player during a search (off by default); a match found freezes it and it comes back afterwards.
 - **Lobby**: create (name, mode, optional password, best of 1/3/5, *King of the Hill*), join from the list or by its
-  5-letter code, chat, Ready, the host starts. *Watch selected* / *Watch* make you a spectator: each of the lobby's
+  5-letter code, chat, Ready. The two to play ready (both players, or the first two in a King of the Hill line), the
+  server starts the match after a 3 s countdown (STARTING IN 3, 2, 1, then MATCH IN PROGRESS); with a server before
+  0.3.0 the host's START does it. The members' table has a Connection column (the Wi-Fi or wired icon, their ping to
+  the server). START on a controller presses Ready, and after a lobby match the lobby comes back in front with Ready
+  focused. Leaving the lobby closes its game once nothing needs it (a match it plays or watches ends first). A
+  dropped connection keeps the place 60 s: the next login takes it back, and a spectator's game watches on meanwhile.
+  *Watch selected* / *Watch* make you a spectator: each of the lobby's
   matches plays in your game from both players' feeds (`FeedLink`, a TCP port of the launcher on 127.0.0.1).
   King of the Hill: up to 8 players in line, the first two fight (the first as P1), the winner stays, the loser
   goes to the end; a match without a result keeps the king and sends the challenger to the end, and a player who
@@ -91,10 +109,24 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
 - **Settings**: server address and pinned fingerprint, region, max ping, **input delay** (Auto, the default: from
   the ping measured when the match connects; or 0-6 frames), **netcode** (Rollback,
   the default, or Lockstep: a match plays rollback only when both players chose it), game UDP port,
-  UPnP, the game window (fullscreen or a window), the game's paths (table above), Python and local test ports.
+  *Play a sound when a match is found* (on), UPnP, *Hide my IP address from opponents* (off: every match of the
+  player's goes through the server, `relay` in `queue_join` / `lobby_ready`, at the cost of ping for players far
+  from it), the game window (fullscreen or a window), the game's paths (table above), Python and local test ports.
 
 A controller steers the launcher as in MK3D (`GamepadNav`, SDL3): d-pad or stick moves the gold focus, A presses, B
-backs out of dialogs (never MATCH FOUND or the rematch prompt), LB/RB switch pages, START finds a match.
+backs out of dialogs (never MATCH FOUND or the rematch prompt), LB/RB switch pages, START finds a match (in a lobby:
+Ready). While a match is set up, played or watched the buttons are the game's alone (a launcher left in front must
+not act on a fight's presses), and Sign out waits for the match's end.
+
+What the launcher shows and logs never names an address: not the opponent's (the start line's `peers=` is logged as
+`(hidden)`, the punch says only "directly" or "through the server"), not this PC's public or home address (the UDP
+hello, the UPnP status). The server sends the home network's address only to a player behind the same router.
+
+A match that went out of step (`desync` from the game) sends a desync report a moment later (`desync_report`,
+PROTOCOL.md; servers from 0.3.0): this PC's Windows and processor, the game's `mk9 net:` / `mk9 link:` lines from the
+match's start (addresses as `x.x.x.x`, the user folder as `*`), the match's last frames from `net-<match>.log`, and the
+extracted game's files in brief (count, bytes, a hash of names and sizes); the server logs both players' side by side.
+A game that ends during a match reports `left` with how (`crash C0000005`, `abort`, `closed`, `exit code N`).
 
 ## Crash reports
 
@@ -164,7 +196,9 @@ configured Python). It boots to `ready`, binds `local_port`, exchanges heartbeat
 and after `MK9_FAKE_SECONDS` (6) a result derived from the seed (the rule of `server/client.py`), then waits at its
 "CONTINUE?" for `rematch` (same peers, new id and seed) or `park`; a park from the middle of a match leaves it lost
 (`booting`), like the game. With `feed=` it writes MK9N feed packets; with `watch=1` it reads the feed and reports the
-seed's result. `MK9_FAKE_RESULT=desync|none`, `MK9_FAKE_BOOT`, `MK9_FAKE_PARK` vary it.
+seed's result. `MK9_FAKE_RESULT=desync|none`, `MK9_FAKE_BOOT`, `MK9_FAKE_PARK` vary it; with `desync` its log has
+a match's `mk9 net:` lines and its `net-<match>.log` the last frames, for the desync report; `MK9_FAKE_EXIT=<code>` ends
+it by itself with that exit code halfway through a match.
 
 What was run for this version (2026-10-27), all on one PC with Qt's offscreen platform
 (`QT_QPA_PLATFORM=offscreen`, `QT_QPA_PLATFORM_PLUGIN_PATH=<qt>\plugins\platforms`, since windeployqt ships only
@@ -195,11 +229,26 @@ And for 0.4.0 (2026-10-28), the same way:
   copy had no user folder path left in it.
 - `python -m pytest server\tests`: 95 passed (tunnels and crash reports: `test_tunnel.py`).
 
+And for the fixes and features from MK3D Online (2026-10-29), with the stand-in and `QT_QPA_PLATFORM=offscreen`:
+
+- A local server and two launchers, Kasual, one hiding its address, both games desyncing: MATCH FOUND's connection
+  ("ping about 87 ms between you": both ways to the server), the match through the relay, both desync reports in the
+  server's log (18 lines each, the stand-in's address written as `x.x.x.x`), the chime played; the launchers' logs had
+  no address but the server's and their own bound port.
+- A lobby with a scripted spectator: its states had the members' `ping` and `starts_in` 3.0, the countdown started
+  the match ("started (both ready)"), both left (`--leave-lobby`) and their games closed.
+- A game that ended itself mid-match (`MK9_FAKE_EXIT`, 0xC0000005): `left` with `crash C0000005`, the Kasual series
+  went on; a third launcher's search cancelled after 8 s (`--cancel-search`) closed the game it had started.
+- These launchers against the deployed 0.2.0 server's code (the host's START, no connection, desync reports not
+  sent), and the 0.4.0 launcher against the new server (Kasual, and the lobby: its host's START came first).
+- `python -m pytest server\tests`: 113 passed.
+
 Command-line options (development and automation) are MK3D's (`--config`, `--server`, `--fingerprint`, `--user`
 with `MK9_DEV_PASSWORD`, `--register`, `--queue casual|ranked`, `--mode versus|tag|tyl`, `--auto-accept N`,
 `--rematches N`, `--rematch-choice`, `--leave-series`, `--solo`, `--lobby host|join|watch`, `--lobby-name`,
-`--lobby-matches`, `--page`, `--local-test`, `--extract`, `--auto-update`, `--updated`) plus `--koth`,
-`--netcode lockstep|rollback` and `--solo-wait on|off` (saved); `--practice` and `--death-traps` are gone.
+`--lobby-matches`, `--page`, `--local-test`, `--extract`, `--auto-update`, `--updated`, `--cancel-search N`,
+`--leave-lobby`) plus `--koth`, `--netcode lockstep|rollback` and `--solo-wait on|off` (saved); `--practice` and
+`--death-traps` are gone.
 
 ## Not done yet
 

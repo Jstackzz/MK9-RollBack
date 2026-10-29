@@ -18,6 +18,7 @@
 #include <algorithm>
 
 #include "AppPaths.h"
+#include "MatchController.h"
 #include "ServerClient.h"
 #include "Style.h"
 #include "Widgets.h"
@@ -177,6 +178,28 @@ MatchFoundDialog::MatchFoundDialog(const QJsonObject& found, const QString& game
     vsLabel->setAlignment(Qt::AlignCenter);
     vsLabel->setWordWrap(true);
     v->addWidget(vsLabel);
+    if (found.contains(QStringLiteral("connection"))) {
+        // the opponent's connection (ranked too, without who it is): the link's icon (the Wi-Fi fan or wired bars),
+        // then the ping in words
+        const QString link = found.value(QStringLiteral("connection")).toObject().value(QStringLiteral("link")).toString();
+        auto* row = new QHBoxLayout;
+        row->setSpacing(8);
+        row->addStretch();
+        const QPixmap icon = style::linkIcon(link, 22);
+        if (!icon.isNull()) {
+            auto* iconLabel = new QLabel;
+            iconLabel->setPixmap(icon);
+            iconLabel->setToolTip(style::linkName(link));
+            iconLabel->setAccessibleName(style::linkName(link));
+            row->addWidget(iconLabel);
+        }
+        QString text = MatchController::pingText(found);
+        if (icon.isNull())
+            text = text.isEmpty() ? style::linkName(link) : style::linkName(link) + QStringLiteral("  \u00B7  ") + text;
+        if (!text.isEmpty()) row->addWidget(ui::label(text, link == QLatin1String("wifi") ? "Warning" : "Muted"));
+        row->addStretch();
+        v->addLayout(row);
+    }
     if (!characterName.isEmpty()) {
         auto* you = ui::label(tr("You play %1").arg(characterName), "Muted");
         you->setAlignment(Qt::AlignCenter);

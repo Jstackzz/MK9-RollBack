@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QProcessEnvironment>
+#include <QRegularExpression>
 
 #include <windows.h>
 
@@ -156,6 +157,7 @@ bool GameProcess::start(const QString& exe, QString* error, bool netMode) {
         // ended by itself with an error (not asked to quit, not killed): a crash report
         if (!quitting_ && code != 0 && !standIn_) CrashReports::instance().gameEnded(gameId_, sessionDir_, code, ran_.elapsed());
         const QString last = quitting_ ? QStringLiteral("exited") : QStringLiteral("error exited");
+        exitCode_ = code;
         status_ = last;
         emit statusChanged(last);
         emit exited(code, st == QProcess::CrashExit);
@@ -227,7 +229,10 @@ void GameProcess::writeCommand(const QString& line) {
         return;
     }
     lastWrite_.start();
-    applog::write(QStringLiteral("game %1/%2: cmd %3").arg(gameId_).arg(instance_).arg(line));
+    // the log leaves the peer's address out (the opponent's, or the server's): logs get shared
+    static const QRegularExpression peers(QStringLiteral("\\b(peers=\\d+@)\\S+"));
+    applog::write(QStringLiteral("game %1/%2: cmd %3").arg(gameId_).arg(instance_)
+                      .arg(QString(line).replace(peers, QStringLiteral("\\1(hidden)"))));
 }
 
 void GameProcess::quit() {

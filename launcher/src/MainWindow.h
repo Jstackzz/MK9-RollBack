@@ -38,12 +38,14 @@ struct LaunchOptions {
     QString character;
     QString page;
     int autoAcceptSeconds = -1;
+    int cancelSearchSeconds = -1;  // --queue: cancel the search after this many seconds (what it opened closes)
     bool localTest = false;  // start the two-instance loopback test right away
     QString extractImage;    // open "Build game" and extract this disc image right away
     QString lobby;           // "host": create a lobby and start it once both are ready; "join": join it by name
     QString lobbyName;
     bool koth = false;       // --lobby host: a King of the Hill lobby
     int lobbyMatches = 1;    // matches to play there, one after the other
+    bool leaveLobby = false; // once they are played, leave the lobby (its game closes once idle)
     int rematches = 0;       // --queue casual: rematches to choose after the first match
     QStringList rematchChoices;  // what each of them chooses, "rematch" or "select" (the last one repeats)
     bool leaveSeries = false;    // once those are chosen, leave the series at once instead of letting it run out
@@ -71,6 +73,7 @@ private:
     QWidget* buildFooter();
     void selectGame(const QString& id);
     void selectPage(int index);
+    bool wasInMatch_ = false;  // the last phase change was during a match (MatchController::inMatch)
     void connectServer();
     void updateFooter();
     void updateAccountButton();
@@ -146,7 +149,7 @@ private:
     bool cliTriedRegister_ = false;
     bool cliQueued_ = false;
     int cliRematches_ = 0;  // rematches chosen
-    bool cliLobbyBegun_ = false, cliLobbyJoined_ = false, cliLobbyInMatch_ = false;
+    bool cliLobbyBegun_ = false, cliLobbyJoined_ = false, cliLobbyInMatch_ = false, cliLobbyLeft_ = false;
     int cliLobbyDone_ = 0, cliLobbyReadyFor_ = -1, cliLobbyStarts_ = 0;  // matches over, ready sent for, starts sent
     QTimer* cliLobbyPoll_ = nullptr;
     QJsonObject cliLastLobby_;  // the lobby's last state, looked at again once the controller is idle

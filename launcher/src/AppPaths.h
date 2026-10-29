@@ -62,6 +62,8 @@ bool fullscreen();  // the game's window: fullscreen (the game's own default) or
 int localTestPort(int instance);
 bool udpLoopback();  // development: matches on loopback only (one-PC tests, no firewall prompt)
 bool upnp();         // open the game UDP port on the router (UPnP)
+bool matchSound();   // a chime when a Ranked or Kasual match is found (the MATCH FOUND window comes up)
+bool hideIp();       // matches through the server: no opponent learns this player's address ("relay" to the server)
 }  // namespace cfg
 
 namespace applog {

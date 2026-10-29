@@ -191,6 +191,8 @@ int gamePort() { return get(QStringLiteral("online/game_port"), 7001).toInt(); }
 bool fullscreen() { return get(QStringLiteral("display/fullscreen"), true).toBool(); }
 bool udpLoopback() { return get(QStringLiteral("dev/udp_loopback"), false).toBool(); }
 bool upnp() { return get(QStringLiteral("online/upnp"), true).toBool(); }
+bool matchSound() { return get(QStringLiteral("online/match_sound"), true).toBool(); }
+bool hideIp() { return get(QStringLiteral("online/hide_ip"), false).toBool(); }
 int localTestPort(int instance) {
     return get(QStringLiteral("dev/local_port%1").arg(instance), instance == 1 ? 7001 : 7002).toInt();
 }

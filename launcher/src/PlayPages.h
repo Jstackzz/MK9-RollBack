@@ -39,6 +39,7 @@ private:
     void refreshRoster();
     void updateStats();
     void updateButton();
+    void updatePlayers();
     void onPhase(MatchController::Phase phase, const QString& text);
     // the series after a match: a Kasual rematch, or the ranked set's score and its next match
     void onSeries(const QJsonObject& series);
@@ -55,6 +56,9 @@ private:
     CharacterPicker* picker_;
     QLabel* inGamePick_;
     QCheckBox* pickInGame_;  // pick on the game's own select screen (modes the launcher picks for otherwise)
+    QLabel* playersNow_;   // how many play the game right now (the server's counts)
+    QLabel* playersInfo_;  // searching (for this page's queue too), in matches, in lobbies
+    QLabel* searchers_;    // who searches right now, and for which queue
     QComboBox* region_;
     QComboBox* maxPing_;
     QCheckBox* strict_;
@@ -81,6 +85,7 @@ private:
     QElapsedTimer seriesSince_;  // since the series' last message, for its countdown
     QJsonObject stats_;
     QJsonObject series_;      // this page's series (Kasual or ranked), {} when none
+    QJsonObject online_;      // the server's last online counts
     QString chosen_;  // "rematch" or "select" pressed, not seen by the server yet (sent once the game is ready)
 };
 

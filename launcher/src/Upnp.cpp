@@ -131,7 +131,7 @@ void UpnpMapper::tryNextLocation() {
     connect(reply, &QNetworkReply::finished, this, [this, reply, location] {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
-            applog::write(QStringLiteral("upnp: %1: %2").arg(location.toString(), reply->errorString()));
+            applog::write(QStringLiteral("upnp: the router's description: %1").arg(reply->errorString()));
             tryNextLocation();
             return;
         }
@@ -177,11 +177,10 @@ void UpnpMapper::readDescription(const QUrl& location, const QByteArray& body) {
     localIp_ = route.localAddress();
     if (localIp_.isNull() || localIp_.protocol() != QAbstractSocket::IPv4Protocol) {
         controlUrl_.clear();
-        finish(tr("no route to the router at %1").arg(location.host()));
+        finish(tr("no route to the router"));
         return;
     }
-    applog::write(QStringLiteral("upnp: router %1, %2 at %3, this PC %4")
-                      .arg(location.toString(), serviceType_, controlUrl_.toString(), localIp_.toString()));
+    applog::write(QStringLiteral("upnp: router found, %1").arg(serviceType_));
     askExternalAddress();
 }
 
@@ -190,13 +189,14 @@ void UpnpMapper::askExternalAddress() {
         if (code == 200) externalIp_ = element(body, QStringLiteral("NewExternalIPAddress"));
         const QHostAddress external(externalIp_);
         if (!external.isNull() && behindAnotherNat(external)) {
-            finish(tr("the router is behind another network (its address %1 is not public), so ports cannot be "
-                      "opened; matches connect by hole punching or through the server").arg(externalIp_));
+            // only what the address means, never the address itself
+            finish(tr("the router is behind another network (its outside address is not public), so ports cannot "
+                      "be opened; matches connect by hole punching or through the server"));
             return;
         }
         if (probeOnly_) {
-            finish(tr("router found (UPnP), public address %1; nothing changed")
-                       .arg(externalIp_.isEmpty() ? tr("unknown") : externalIp_));
+            finish(externalIp_.isEmpty() ? tr("router found (UPnP), its public address unknown; nothing changed")
+                                         : tr("router found (UPnP) with a public address; nothing changed"));
             return;
         }
         addMapping(kLeaseSeconds);
@@ -216,9 +216,7 @@ void UpnpMapper::addMapping(int leaseSeconds) {
     soap(QStringLiteral("AddPortMapping"), args, [this, port, leaseSeconds](int code, const QString& body) {
         if (code == 200) {
             renewTimer_.start();
-            finish(tr("UDP port %1 open on the router (UPnP)%2")
-                       .arg(port)
-                       .arg(externalIp_.isEmpty() ? QString() : tr(", public address %1").arg(externalIp_)));
+            finish(tr("UDP port %1 open on the router (UPnP)").arg(port));
             return;
         }
         const int error = element(body, QStringLiteral("errorCode")).toInt();
@@ -244,8 +242,8 @@ void UpnpMapper::checkOwnMapping(quint16 port) {
             finish(tr("UDP port %1 open on the router (UPnP)").arg(port));
             return;
         }
-        finish(tr("UDP port %1 is forwarded to another device on your network (%2): choose another game port in "
-                  "Settings").arg(port).arg(client.isEmpty() ? tr("unknown") : client));
+        finish(tr("UDP port %1 is forwarded to another device on your network: choose another game port in "
+                  "Settings").arg(port));
     });
 }
 

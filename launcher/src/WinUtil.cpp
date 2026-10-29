@@ -2,6 +2,8 @@
 
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QHash>
 #include <QThread>
 #include <QWidget>
 
@@ -10,6 +12,7 @@
 
 #include <windows.h>
 #include <dwmapi.h>
+#include <mmsystem.h>
 #include <tlhelp32.h>
 
 namespace winutil {
@@ -123,6 +126,10 @@ bool bringToFront(QWidget* window) {
     return front;
 }
 
+bool inFront(QWidget* window) {
+    return window && GetForegroundWindow() == reinterpret_cast<HWND>(window->winId());
+}
+
 // the process and any it started (a game that relaunched itself into another image runs on in a child)
 static std::vector<DWORD> processTree(qint64 pid) {
     std::vector<DWORD> pids{static_cast<DWORD>(pid)};
@@ -207,6 +214,19 @@ bool thawProcess(qint64 pid, const QList<quintptr>& hidden) {
         if (IsWindow(hwnd)) ShowWindow(hwnd, SW_SHOW);
     }
     return ok;
+}
+
+bool playWav(const QString& path) {
+    // played from memory, which must outlive the sound: each file is read once and kept
+    static QHash<QString, QByteArray> loaded;
+    auto it = loaded.find(path);
+    if (it == loaded.end()) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) return false;
+        it = loaded.insert(path, file.readAll());
+    }
+    return !it->isEmpty() &&
+           PlaySoundW(reinterpret_cast<LPCWSTR>(it->constData()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
 }
 
 int smartAppControl() {

@@ -141,7 +141,9 @@ async def test_relay_only_skips_the_direct_attempt(server, connect, udp_peers):
     await hello_and_accept(server, b, ub, fb)
     pa, pb = await a.expect("match_peer"), await b.expect("match_peer")
     assert pa["relay"] is True and pb["relay"] is True
-    await relay_to_go(server, a, b, ua, ub, pa, pb)
+    assert pa["peer"] == pb["peer"] == {"public": "", "lan": ""}  # neither gets the other's address
+    ga, gb = await relay_to_go(server, a, b, ua, ub, pa, pb)
+    assert ga["remote"] == gb["remote"] == f"127.0.0.1:{server.udp_port}"  # their games send to the server only
 
 
 async def test_relay_failure_cancels(server, connect, udp_peers):
@@ -255,3 +257,46 @@ async def test_full_flow_helper(server, connect, udp_peers):
     await b.request(queue_msg(mode="tag"))
     gos = await run_to_go(server, [(a, ua), (b, ub)])
     assert gos[0]["game"] == "mk9" and gos[0]["mode"] == "tag"
+
+
+async def test_a_player_who_hides_their_address_plays_through_the_relay(server, connect, udp_peers):
+    a, b = await connect("Havik"), await connect("Hotaru")
+    ua, ub = await udp_peers(), await udp_peers()
+    await a.request({**queue_msg(), "relay": True})  # only one of the two asks
+    await b.request(queue_msg())
+    fa, fb = await a.expect("match_found"), await b.expect("match_found")
+    await hello_and_accept(server, a, ua, fa)
+    await hello_and_accept(server, b, ub, fb)
+    pa, pb = await a.expect("match_peer"), await b.expect("match_peer")
+    assert pa["relay"] is True and pb["relay"] is True
+    assert pa["peer"] == pb["peer"] == {"public": "", "lan": ""}
+    ga, gb = await relay_to_go(server, a, b, ua, ub, pa, pb)
+    assert ga["remote"] == gb["remote"] == f"127.0.0.1:{server.udp_port}"
+
+
+async def test_the_lan_address_goes_only_to_a_peer_behind_the_same_router(server, connect, udp_peers):
+    a, b = await connect("Kabal"), await connect("Kira")
+    ua, ub = await udp_peers(), await udp_peers()
+    await a.request(queue_msg())
+    await b.request(queue_msg())
+    fa, fb = await a.expect("match_found"), await b.expect("match_found")
+    await hello_and_accept(server, a, ua, fa)
+    # A's hellos came from another network than B's (a documentation address: nothing to reach)
+    next(s for s in server.sessions if s.name == "Kabal").udp_public = ("203.0.113.7", ua.port)
+    await hello_and_accept(server, b, ub, fb)
+    pa, pb = await a.expect("match_peer"), await b.expect("match_peer")
+    assert pa["same_nat"] is False and pb["same_nat"] is False
+    assert pa["peer"] == {"public": f"127.0.0.1:{ub.port}", "lan": ""}
+    assert pb["peer"] == {"public": f"203.0.113.7:{ua.port}", "lan": ""}
+
+
+async def test_a_udp_hello_while_searching_tells_the_server_its_round_trip(server, connect, udp_peers):
+    a = await connect("Tanya")
+    ua = await udp_peers()
+    await a.request({**queue_msg(), "server_rtt": 120})
+    entry = next(e for e in server.queue.values() if e.name == "Tanya")
+    assert entry.server_rtt == 120
+    await ua.hello(("127.0.0.1", server.udp_port), a.account["udp_token"], rtt=35, timeout=3)
+    assert entry.server_rtt == 35
+    await ua.hello(("127.0.0.1", server.udp_port), a.account["udp_token"], rtt=-4, timeout=3)  # nonsense: kept
+    assert entry.server_rtt == 35

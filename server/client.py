@@ -270,13 +270,17 @@ class UdpPeer(asyncio.DatagramProtocol):
                 return msg, addr
 
     async def hello(self, server: tuple[str, int], token: str, *, match: str = "", lan: str = "",
-                    timeout: float = 10.0) -> dict[str, Any] | None:
-        """Send hellos every 250 ms until hello_ack; returns it with `rtt_ms` added."""
+                    timeout: float = 10.0, rtt: int | None = None) -> dict[str, Any] | None:
+        """Send hellos every 250 ms until hello_ack (with `rtt`, the last round trip to the server, when given);
+        returns it with `rtt_ms` added."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while loop.time() < deadline:
             t = int(loop.time() * 1000)
-            self.sendto({"type": "hello", "token": token, "match": match, "lan": lan, "t": t}, server)
+            hello: dict[str, Any] = {"type": "hello", "token": token, "match": match, "lan": lan, "t": t}
+            if rtt is not None:
+                hello["rtt"] = rtt
+            self.sendto(hello, server)
             got = await self.recv(0.25, lambda m, a: m.get("type") == "hello_ack")
             if got is not None:
                 ack = got[0]

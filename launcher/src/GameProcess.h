@@ -35,6 +35,7 @@ public:
     QString sessionDir() const { return sessionDir_; }
     QString saveDir() const { return saveDir_; }
     QString status() const { return status_; }  // first line of status.txt
+    int exitCode() const { return exitCode_; }  // the process's, once it has ended
     QString state() const;                     // first word of it
     bool isReady() const { return state() == QLatin1String("ready"); }
 
@@ -72,6 +73,7 @@ private:
     bool windowed_ = false;
     bool quitting_ = false;
     bool standIn_ = false;
+    int exitCode_ = 0;
     QElapsedTimer ran_;  // since it started: a crash report says how long it ran
     QByteArray outBuf_;
     QHash<QString, QString> extraEnv_;

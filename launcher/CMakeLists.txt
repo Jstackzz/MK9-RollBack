@@ -63,11 +63,17 @@ qt_add_resources(MK9Launcher "gamedata"
     FILES data/mk9.json
 )
 
+qt_add_resources(MK9Launcher "sounds"
+    PREFIX "/sounds"
+    BASE data/sounds
+    FILES data/sounds/match-found.wav  # tools/make_chime.py
+)
+
 target_compile_definitions(MK9Launcher PRIVATE
     MK9_LAUNCHER_VERSION="${PROJECT_VERSION}"
     UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
 )
-target_link_libraries(MK9Launcher PRIVATE Qt6::Widgets Qt6::Network SDL3::SDL3-static dwmapi advapi32)
+target_link_libraries(MK9Launcher PRIVATE Qt6::Widgets Qt6::Network SDL3::SDL3-static dwmapi advapi32 winmm)
 set_target_properties(MK9Launcher PROPERTIES OUTPUT_NAME "MK9Launcher")
 
 if(MSVC)

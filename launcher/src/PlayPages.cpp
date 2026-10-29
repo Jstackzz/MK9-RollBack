@@ -111,15 +111,28 @@ QueuePage::QueuePage(bool ranked, ServerClient* server, MatchController* control
     seriesButtons->addWidget(leave_, 1);
     ser->addLayout(seriesButtons);
     seriesCard_->setVisible(false);
-    auto* form = new QFormLayout;
-    form->setLabelAlignment(Qt::AlignRight);
+    // who there is to meet: the game's players right now, as the server counts them (pushed as they change)
+    playersNow_ = ui::label(QString());
+    playersInfo_ = ui::label(QString(), "Muted");
+    playersInfo_->setWordWrap(true);
+    searchers_ = ui::label(QString());
+    searchers_->setWordWrap(true);
+    searchers_->setTextFormat(Qt::PlainText);  // players' names, never markup
+    mm->addWidget(playersNow_);
+    mm->addWidget(playersInfo_);
+    mm->addWidget(searchers_);
+    // region and max ping on one row: the card keeps room for the players' lines above at the window's smallest
     region_ = new QComboBox;
     ui::fillRegions(region_, cfg::region());
     maxPing_ = new QComboBox;
     ui::fillMaxPing(maxPing_, cfg::maxPing());
-    form->addRow(tr("Region"), region_);
-    form->addRow(tr("Max ping"), maxPing_);
-    mm->addLayout(form);
+    auto* where = new QHBoxLayout;
+    where->addWidget(ui::label(tr("Region")));
+    where->addWidget(region_, 3);
+    where->addSpacing(8);
+    where->addWidget(ui::label(tr("Max ping")));
+    where->addWidget(maxPing_, 2);
+    mm->addLayout(where);
     strict_ = new QCheckBox(tr("Strict: close ratings and my region only"));
     strict_->setChecked(cfg::strict());
     strict_->setVisible(ranked);
@@ -168,6 +181,7 @@ QueuePage::QueuePage(bool ranked, ServerClient* server, MatchController* control
         cfg::set(key(QStringLiteral("mode")), mode_->currentData());
         refreshRoster();
         updateStats();
+        updatePlayers();
     });
     connect(picker_, &CharacterPicker::picked, this, [this](const QString& id) {
         cfg::set(QStringLiteral("ui/%1/%2/character").arg(gameId_, mode_->currentData().toString()), id);
@@ -220,10 +234,14 @@ QueuePage::QueuePage(bool ranked, ServerClient* server, MatchController* control
                        : tr("You lost to %1 %2 (confirmed by both players)").arg(opp, r.value(QStringLiteral("score")).toString());
         else if (status == QLatin1String("disputed"))
             text = tr("The two reports differ; the match does not count.");
-        else if (status == QLatin1String("abandoned"))
+        else if (status == QLatin1String("abandoned") && ranked_)
             text = r.value(QStringLiteral("left_side")).toInt() == r.value(QStringLiteral("side")).toInt()
                        ? tr("You left the match against %1: your game closed during it.").arg(opp)
                        : tr("%1 left the match: their game closed or dropped out.").arg(opp);
+        else if (status == QLatin1String("abandoned"))  // Kasual: the rematch is offered again, from new games
+            text = r.value(QStringLiteral("left_side")).toInt() == r.value(QStringLiteral("side")).toInt()
+                       ? tr("Your game closed during the match against %1: it does not count.").arg(opp)
+                       : tr("%1's game closed or dropped out during the match: it does not count.").arg(opp);
         else if (status == QLatin1String("no_contest"))
             text = tr("The match against %1 ended without a result: it does not count.").arg(opp);
         else
@@ -242,8 +260,16 @@ QueuePage::QueuePage(bool ranked, ServerClient* server, MatchController* control
         updateStats();
         updateButton();
     });
-    connect(server_, &ServerClient::stateChanged, this, [this] { updateButton(); });
+    connect(server_, &ServerClient::stateChanged, this, [this] {
+        updateButton();
+        updatePlayers();
+    });
     connect(server_, &ServerClient::message, this, [this](const QJsonObject& m) {
+        if (m.value(QStringLiteral("type")).toString() == QLatin1String("online") &&
+            m.contains(QStringLiteral("games"))) {  // a server before 0.3.0 does not count them
+            online_ = m;
+            updatePlayers();
+        }
         if (m.value(QStringLiteral("type")).toString() == QLatin1String("profile") &&
             m.value(QStringLiteral("name")).toString() == server_->accountName()) {
             stats_ = m.value(QStringLiteral("stats")).toObject();
@@ -254,6 +280,13 @@ QueuePage::QueuePage(bool ranked, ServerClient* server, MatchController* control
     connect(&clock_, &QTimer::timeout, this, [this] {
         const int s = controller_->searchSeconds();
         timer_->setText(QStringLiteral("%1:%2").arg(s / 60).arg(s % 60, 2, 10, QLatin1Char('0')));
+        // the server raises a long search's max ping by itself: say so beside the phase
+        if (controller_->phase() == MatchController::Phase::Searching && controller_->lastRequest().ranked == ranked_) {
+            const int raised = controller_->raisedMaxPing();
+            status_->setText(raised ? tr("%1\nMax ping raised to %2 ms to find you a match")
+                                          .arg(controller_->phaseText()).arg(raised)
+                                    : controller_->phaseText());
+        }
     });
     updateButton();
 }
@@ -289,6 +322,7 @@ void QueuePage::refreshModes() {
     mode_->setCurrentIndex(i >= 0 ? i : 0);
     refreshRoster();
     updateStats();
+    updatePlayers();
 }
 
 void QueuePage::refreshRoster() {
@@ -367,6 +401,65 @@ void QueuePage::onPhase(MatchController::Phase, const QString& text) {
     if (controller_->lastRequest().ranked == ranked_) status_->setText(text);
     updateButton();
     updateSeries();
+    updatePlayers();  // this player's own search is in the counts while it runs
+}
+
+// How many play this game right now (the server's online counts, docs/PROTOCOL.md): any of searching, in a match or a
+// series, in a lobby; and how many of those searching wait in this page's queue (the mode, Kasual or Ranked), the ones
+// a search here can meet, this player's own search left out.
+void QueuePage::updatePlayers() {
+    const Game* g = gameOf(gameId_);
+    const QJsonObject game = online_.value(QStringLiteral("games")).toObject().value(gameId_).toObject();
+    const bool show = g && server_->isOnline() && !game.isEmpty();
+    playersNow_->setVisible(show);
+    playersInfo_->setVisible(show);
+    searchers_->setVisible(false);
+    if (!show) return;
+    const QString modeId = mode_->currentData().toString();
+    const auto queueName = [](const QString& game, const QString& mode, bool ranked) {
+        return QStringLiteral("%1/%2/%3").arg(game, mode, ranked ? QStringLiteral("ranked") : QStringLiteral("casual"));
+    };
+    const QString queue = queueName(gameId_, modeId, ranked_);
+    const QueueRequest r = controller_->lastRequest();
+    const bool mine = controller_->phase() == MatchController::Phase::Searching && queueName(r.game, r.mode, r.ranked) == queue;
+    int searching = game.value(QStringLiteral("searching")).toInt();
+    int here = online_.value(QStringLiteral("queues")).toObject().value(queue).toInt();
+    if (mine) {
+        searching = qMax(0, searching - 1);
+        here = qMax(0, here - 1);
+    }
+    const QString queueText = QStringLiteral("%1 %2").arg(ranked_ ? tr("Ranked") : tr("Kasual"), mode_->currentText());
+    QString search;
+    if (searching == 0) search = mine ? tr("only you searching") : tr("nobody searching");
+    else if (here == searching) search = (mine ? tr("you and %1 more searching for %2") : tr("%1 searching for %2")).arg(searching).arg(queueText);
+    else if (here == 0) search = (mine ? tr("you and %1 more searching, none for %2") : tr("%1 searching, none for %2")).arg(searching).arg(queueText);
+    else search = (mine ? tr("you and %1 more searching, %2 of them for %3") : tr("%1 searching, %2 of them for %3"))
+                      .arg(searching).arg(here).arg(queueText);
+    playersNow_->setText(tr("%1 playing %2 right now").arg(game.value(QStringLiteral("playing")).toInt()).arg(g->shortName));
+    playersInfo_->setText(tr("%1\n%2 in matches  \u00B7  %3 in lobbies")
+                              .arg(search)
+                              .arg(game.value(QStringLiteral("matches")).toInt())
+                              .arg(game.value(QStringLiteral("lobbies")).toInt()));
+    // who searches (the longest waiting first), this player left out; what each one searches for (Kasual or Ranked,
+    // the mode) in the tooltip
+    constexpr int kNames = 6;
+    QStringList names, details;
+    for (const auto& v : online_.value(QStringLiteral("searchers")).toArray()) {
+        const QJsonObject s = v.toObject();
+        const QString name = s.value(QStringLiteral("name")).toString();
+        if (name.isEmpty() || name == server_->accountName() || s.value(QStringLiteral("game")).toString() != gameId_) continue;
+        names << name;
+        // its queue: <game>/<mode>/<casual|ranked>
+        const QStringList q = s.value(QStringLiteral("queue")).toString().split(QLatin1Char('/'));
+        const GameMode* sm = g->mode(q.value(1));
+        details << tr("%1: %2 %3").arg(name, q.value(2) == QLatin1String("ranked") ? tr("Ranked") : tr("Kasual"),
+                                       sm ? sm->name : q.value(1));
+    }
+    QString list = names.mid(0, kNames).join(QStringLiteral(", "));
+    if (names.size() > kNames) list += tr(" and %1 more").arg(names.size() - kNames);
+    searchers_->setVisible(!names.isEmpty());
+    searchers_->setText(tr("Searching now: %1").arg(list));
+    searchers_->setToolTip(details.join(QLatin1Char('\n')));
 }
 
 void QueuePage::onSeries(const QJsonObject& s) {

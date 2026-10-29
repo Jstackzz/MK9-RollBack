@@ -131,6 +131,97 @@ little-endian u16 length: header u32 magic `"MK9N"` (0x4E394B4D, little-endian),
 is side 1), u16 match (barrier number), then 6 MEET (its READY at a barrier), 7 OWN (its own inputs), 8 CHECK, 9 END.
 The server takes a player's own slot's packets of these types only (`bad_request` otherwise).
 
+## Connections and hidden addresses (servers from 0.3.0)
+
+Every field here is optional both ways: a launcher up to 0.4.0 sends none of them and ignores what it gets, and a
+launcher after 0.4.0 works with a 0.2.0 server, which ignores them and sends none.
+
+- `queue_join`, `lobby_create`, `lobby_join` and `lobby_ready` may carry this PC's connection: `"link": "ethernet" |
+  "wifi" | "other"` (from the network interface it reaches the server through; anything else counts as unknown) and
+  `"server_rtt"` (ms, 0-5000: its last round trip to the server, the UDP hello's or the TLS `ping`'s). A `lobby_ready`
+  without them keeps what the member said before.
+- The UDP `hello` may carry `"rtt"` (ms, 0-5000), the launcher's last round trip to that port: it updates a running
+  search's `server_rtt`.
+- `match_found` (queue matches, ranked too, without who it is) carries the other player's connection:
+
+  ```json
+  "connection": {"link": "wifi", "ping": 45, "estimate": 75, "measured": false}
+  ```
+
+  `link` is `null` when unknown, `ping` their `server_rtt` (`null`), `estimate` the round trip between the two when
+  known (`null`): measured by an earlier match of theirs (`measured: true`), or both `server_rtt`s added when the
+  match goes through the server.
+- A lobby state's `members` carry `"link"` (`null` when unknown) and `"ping"` (`server_rtt`, `null`).
+- `queue_join` and `lobby_ready` may carry `"relay": true`: the player hides their address (Settings, *Hide my IP
+  address from opponents*). A match where either player does goes through the server from the start, never
+  directly: `match_peer` with `"relay": true` and an empty `peer` for both, as with `--relay-only` (which does it for
+  every match; `--no-relay` does not stop it). It combines with the tunnel: a tunnelled player's end is their
+  connection, the other's the relay. A series keeps each player's choice; a relayed match is never the start of an
+  in-game rematch (its games are not together).
+- Matchmaking estimates a pair whose match would go through the server (one hides their address, or `--relay-only`)
+  from both `server_rtt`s, and does not pair them over the tighter max ping.
+- `match_peer`'s `peer.lan` (the home network's address) is sent only to a player behind the same router
+  (`same_nat`); otherwise it is `""`.
+
+## Matchmaking
+
+- `accept_timeout` is 20 s (was 15).
+- A search that finds nobody raises its max ping by itself (not a strict one, not "any"): `queued` then carries the
+  rule, `"ping_widen": {"after": 30.0, "every": 15.0, "step": 25, "cap": 250}`: after `after` seconds the max ping is
+  the player's own plus `step` ms, `step` more every `every` seconds, at most `cap` (never below the player's own;
+  `server/matchmaking.py`, `max_ping_now`). A match found takes the raised limit (`ping_too_high` checks it).
+- `online` carries each game's players, each counted once:
+
+  ```json
+  "games": {"mk9": {"playing": 6, "searching": 2, "matches": 2, "lobbies": 2}},
+  "searchers": [{"name": "Kitana", "game": "mk9", "queue": "mk9/versus/casual"}]
+  ```
+
+  `searching` in a queue, `matches` in a match or a series (between two matches too), `lobbies` in a lobby
+  (spectators too), `playing` any of those; `searchers` the 40 longest waiting, the longest first.
+
+## Kasual rematches without end
+
+A Kasual match that a game closed during (status `abandoned`) or whose games lost each other no longer ends the
+series: `series` goes back to `between` and the rematch is offered again (from new games: the next match is set up
+as a new one, never from CONTINUE?), however often that happens; `series_max_no_contest` ends only a ranked set. A
+Kasual series ends when a player leaves it (`series_ready` with `ready: false`, a search, a lobby) or lets the offer
+run out (`left`, `timeout`); a ranked set still ends `forfeit` or `void` as before. Servers before 0.3.0 ended a Kasual
+series `left` or `disconnected` there.
+
+`result` with `outcome: "left"` may say how the reporter's game ended: `"exit"` (printable ASCII, at most 40
+characters: `crash C0000005`, `abort`, `closed`, `exit code N`) and `"exit_code"` (an int). The server logs them with
+the match's `ABANDONED` line; anything else there is dropped, never refused.
+
+## Lobbies: the countdown, places kept, names
+
+- The two to play a lobby's match ready (both players, or the first two in a King of the Hill line) and no match:
+  it starts by itself after a countdown (`lobby_countdown`, 3 s). A lobby's state carries `"starts_in"`: `null`, or
+  the seconds left. Anything that clears a ready or takes a player away calls it off. `lobby_start` (the host) still
+  starts at once; launchers after 0.4.0 never send it to a server that counts down, and know one by `starts_in`.
+- A player whose connection drops (not `lobby_leave`, not `logout`) keeps their place for `lobby_rejoin_grace` (60 s):
+  their next login (password or token) takes them back in, to play if a place is free (at the end of a King of the
+  Hill line), else to watch; the lobby's state is pushed to them (a `lobby` without `id`), and a spectator gets the
+  running match again (`spectate`, the feed from its start).
+- A lobby named `<host>'s lobby` (the launcher's default) is named after the new host when its host leaves.
+
+## Desync reports
+
+A launcher whose match went out of step sends what its game logged of it:
+
+```json
+C: {"type": "desync_report", "game": "mk9", "match": "7658cd7bfcd7", "frame": 600,
+    "lines": ["PC: Windows 11 Version 25H2, 16 threads", "CPU: ...", "[...] mk9 net: DESYNC at frame 600 ..."]}
+S: {"type": "desync_ack"}
+```
+
+At most 40 `lines`, each printable ASCII and at most 200 characters (`bad_request` otherwise), 10 reports a session;
+signed in only. Nothing is kept: the server logs `DESYNC_REPORT <name> <game> (launcher <version>) match <id> at frame
+<n>: <k> lines`, then each line, so both players' reports sit side by side in its log. The launcher sends this PC's
+Windows and processor, the game's `mk9 net:` / `mk9 link:` lines from the match's start (game.log; addresses as
+`x.x.x.x`, the user folder as `*`), the match's last frames from `net-<match>.log` and a summary of the extracted
+game's files (count, bytes, a hash of their names and sizes).
+
 ## Other
 
 - `match_go` and the series' state are unchanged otherwise; `match_result` statuses are MK3D's.

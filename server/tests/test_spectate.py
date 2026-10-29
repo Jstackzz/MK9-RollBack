@@ -165,3 +165,23 @@ async def test_casual_searches_meet_only_the_same_death_traps(server, connect, u
     await d.request(queue_msg(character="NoobSaibot"))
     go = await run_to_go(server, [(b, await udp_peers()), (d, await udp_peers())])
     assert [g["death_traps"] for g in go] == [True, True]
+
+
+async def test_a_spectator_whose_connection_drops_watches_on(server, connect, udp_peers):
+    """A spectator back within the grace is in the lobby again and gets the running match from its start."""
+    code, host, guest, watcher, go, _ = await start_lobby_match(server, connect, udp_peers)
+    await watcher.expect("spectate")
+    p1 = own_inputs(0, 0, 4)
+    host.send({"type": "feed", "match": go["match"], "data": b64(p1)})
+    await watcher.expect("spectate_feed")
+    token = watcher.account["token"]
+    await watcher.close()
+    await host.expect("lobby", pred=lambda m: len(m["lobby"]["members"]) == 2)
+
+    back = await connect()
+    await back.request({"type": "auth", "token": token})
+    state = await back.expect("lobby")
+    assert {m["name"]: m["spectator"] for m in state["lobby"]["members"]} == {
+        "Raiden": False, "Shinnok": False, "Fujin": True}
+    assert (await back.expect("spectate"))["match"] == go["match"]
+    assert base64.b64decode((await back.expect("spectate_feed"))["data"]) == p1

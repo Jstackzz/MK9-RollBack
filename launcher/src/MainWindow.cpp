@@ -110,7 +110,9 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     };
     pad_->onStart = [this] {
         if (auto* queue = qobject_cast<QueuePage*>(stack_->currentWidget())) queue->pressFind();
+        else if (auto* lobby = qobject_cast<LobbyPage*>(stack_->currentWidget())) lobby->pressReady();
     };
+    pad_->paused = [this] { return controller_->inMatch(); };
     soloFrontTimer_.setInterval(400);
     connect(&soloFrontTimer_, &QTimer::timeout, this, [this] {
         GameProcess* solo = controller_->solo();
@@ -222,6 +224,17 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
         // --lobby: the next match's ready waited for the game to finish the last one
         if (p == MatchController::Phase::Idle && !opts_.lobby.isEmpty() && !cliLastLobby_.isEmpty())
             cliLobbyMessage(cliLastLobby_);
+        // a lobby match is over and its game played the ending: the lobby comes back in front, Ready focused, so a
+        // player on a controller readies up for the next one (A, or START anywhere on the page)
+        if (p == MatchController::Phase::Idle && wasInMatch_) {
+            auto* lobby = qobject_cast<LobbyPage*>(pages_[kLobby]);
+            if (lobby && lobby->inLobby()) {
+                selectPage(kLobby);
+                popUp(this);
+                lobby->focusReady();
+            }
+        }
+        wasInMatch_ = controller_->inMatch();
     });
     connect(controller_, &MatchController::seriesChanged, this, [this](const QJsonObject& s) {
         if (opts_.queue.isEmpty() || s.value(QStringLiteral("ranked")).toBool() ||
@@ -525,7 +538,8 @@ void MainWindow::onAccountButton() {
         QMenu menu(this);
         menu.addAction(tr("Signed in as %1").arg(server_->accountName()))->setEnabled(false);
         menu.addSeparator();
-        QAction* out = menu.addAction(tr("Sign out"));
+        QAction* out = menu.addAction(controller_->inMatch() ? tr("Sign out (after the match)") : tr("Sign out"));
+        out->setEnabled(!controller_->inMatch());
         if (menu.exec(account_->mapToGlobal(QPoint(0, account_->height()))) == out) {
             server_->logout();
             cfg::set(QStringLiteral("account/token"), QString());
@@ -625,6 +639,20 @@ void MainWindow::onMatchFound(const QJsonObject& found) {
                                      g ? g->characterName(req.character) : req.character, this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     GamepadNav::keepFromBack(dlg);  // B, an attack button, never declines
+    // over the games, and in front again whenever a game window takes the front: a match found the moment the search
+    // began pops up before the match's game (or single player) opens its window, which covered it for the rest of its
+    // countdown, the controller's A going to the game
+    dlg->setWindowFlag(Qt::WindowStaysOnTopHint);
+    auto* keepFront = new QTimer(dlg);
+    keepFront->setInterval(400);
+    connect(keepFront, &QTimer::timeout, dlg, [dlg, pulls = 0]() mutable {
+        if (!dlg->isVisible() || winutil::inFront(dlg)) return;
+        const bool front = winutil::bringToFront(dlg);
+        if (++pulls <= 3)
+            applog::write(QStringLiteral("popup: Match found %1 again").arg(front ? QStringLiteral("in front")
+                                                                                 : QStringLiteral("not in front")));
+    });
+    keepFront->start();
     matchDialog_ = dlg;
     connect(dlg, &QDialog::finished, this, [this](int result) {
         if (controller_->phase() != MatchController::Phase::Found) return;
@@ -637,6 +665,11 @@ void MainWindow::onMatchFound(const QJsonObject& found) {
     });
     if (opts_.autoAcceptSeconds >= 0)
         QTimer::singleShot(opts_.autoAcceptSeconds * 1000, dlg, [dlg] { dlg->accept(); });
+    // heard over the game the player waits in (launcher/tools/make_chime.py)
+    if (cfg::matchSound())
+        applog::write(winutil::playWav(QStringLiteral(":/sounds/match-found.wav"))
+                          ? QStringLiteral("sound: match found chime")
+                          : QStringLiteral("sound: the match found chime could not play"));
     popUp(dlg);  // over the game the player waits in
     QApplication::alert(this);
 }
@@ -821,6 +854,11 @@ void MainWindow::cliQueue() {
     selectPage(opts_.queue == QLatin1String("ranked") ? kRanked : kCasual);
     applog::write(QStringLiteral("cli: queueing %1 %2 %3").arg(opts_.queue, gameId_, opts_.mode));
     page->startSearch(opts_.mode, opts_.character);
+    if (opts_.cancelSearchSeconds >= 0)
+        QTimer::singleShot(opts_.cancelSearchSeconds * 1000, this, [this] {
+            applog::write(QStringLiteral("cli: cancelling the search"));
+            controller_->cancelSearch();
+        });
 }
 
 // --lobby host: create the lobby; --lobby join: look for it by name until it is there, then join; both mark themselves
@@ -843,7 +881,9 @@ void MainWindow::cliLobby() {
                        {QStringLiteral("rounds"), 3},
                        {QStringLiteral("region"), cfg::region()},
                        {QStringLiteral("character"), opts_.character},
-                       {QStringLiteral("koth"), opts_.koth}});
+                       {QStringLiteral("koth"), opts_.koth},
+                       {QStringLiteral("link"), server_->linkType()},
+                       {QStringLiteral("server_rtt"), controller_->serverRttMs()}});
         return;
     }
     applog::write(QStringLiteral("cli: looking for lobby \"%1\"").arg(name));
@@ -872,7 +912,9 @@ void MainWindow::cliLobbyMessage(const QJsonObject& msg) {
                            {QStringLiteral("lobby"), code},
                            {QStringLiteral("password"), QString()},
                            {QStringLiteral("character"), opts_.character},
-                           {QStringLiteral("spectate"), watch}});
+                           {QStringLiteral("spectate"), watch},
+                           {QStringLiteral("link"), server_->linkType()},
+                           {QStringLiteral("server_rtt"), controller_->serverRttMs()}});
             break;
         }
         return;
@@ -892,6 +934,13 @@ void MainWindow::cliLobbyMessage(const QJsonObject& msg) {
         cliLobbyDone_++;
         applog::write(QStringLiteral("cli: lobby match %1 of %2 over").arg(cliLobbyDone_).arg(opts_.lobbyMatches));
     }
+    // --leave-lobby: out as soon as the last match is over, while the game may still play its end
+    if (opts_.leaveLobby && cliLobbyDone_ >= opts_.lobbyMatches && !cliLobbyLeft_) {
+        cliLobbyLeft_ = true;
+        applog::write(QStringLiteral("cli: leaving lobby %1").arg(lobby.value(QStringLiteral("id")).toString()));
+        server_->send({{QStringLiteral("type"), QStringLiteral("lobby_leave")}});
+        return;
+    }
     if (members.size() < 2 || cliLobbyDone_ >= opts_.lobbyMatches) return;
     if (controller_->phase() != MatchController::Phase::Idle) return;  // the game still plays the last match's end
     bool all_ready = true, me_ready = false;
@@ -904,14 +953,22 @@ void MainWindow::cliLobbyMessage(const QJsonObject& msg) {
     if (!me_ready && cliLobbyReadyFor_ != cliLobbyDone_) {
         cliLobbyReadyFor_ = cliLobbyDone_;
         applog::write(QStringLiteral("cli: ready in lobby %1").arg(lobby.value(QStringLiteral("id")).toString()));
-        server_->send({{QStringLiteral("type"), QStringLiteral("lobby_ready")}, {QStringLiteral("ready"), true},
-                       {QStringLiteral("delay"), cfg::inputDelayValue(cfg::inputDelay())},
-                       {QStringLiteral("netcode"), cfg::netcode()}});
+        QJsonObject ready{{QStringLiteral("type"), QStringLiteral("lobby_ready")}, {QStringLiteral("ready"), true},
+                          {QStringLiteral("delay"), cfg::inputDelayValue(cfg::inputDelay())},
+                          {QStringLiteral("netcode"), cfg::netcode()}, {QStringLiteral("relay"), cfg::hideIp()},
+                          {QStringLiteral("link"), server_->linkType()}};
+        if (controller_->serverRttMs() >= 0) ready.insert(QStringLiteral("server_rtt"), controller_->serverRttMs());
+        server_->send(ready);
     }
     if (opts_.lobby == QLatin1String("host") && all_ready && cliLobbyStarts_ == cliLobbyDone_) {
         cliLobbyStarts_++;
-        applog::write(QStringLiteral("cli: starting the lobby's match %1").arg(cliLobbyStarts_));
-        server_->send({{QStringLiteral("type"), QStringLiteral("lobby_start")}});
+        // a server that counts down starts the match by itself; one without it (before 0.3.0), the host's START
+        if (lobby.contains(QStringLiteral("starts_in"))) {
+            applog::write(QStringLiteral("cli: both ready, the lobby's match %1 counts down").arg(cliLobbyStarts_));
+        } else {
+            applog::write(QStringLiteral("cli: starting the lobby's match %1").arg(cliLobbyStarts_));
+            server_->send({{QStringLiteral("type"), QStringLiteral("lobby_start")}});
+        }
     }
 }
 

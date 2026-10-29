@@ -12,6 +12,7 @@
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QTableWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include "AppPaths.h"
@@ -19,6 +20,7 @@
 #include "GameData.h"
 #include "MatchController.h"
 #include "ServerClient.h"
+#include "Style.h"
 
 namespace {
 QString s(const QJsonObject& o, const char* k) { return o.value(QLatin1String(k)).toString(); }
@@ -94,11 +96,12 @@ LobbyPage::LobbyPage(ServerClient* server, MatchController* controller, QWidget*
     auto* pv = new QVBoxLayout(panel);
     pv->setContentsMargins(0, 0, 0, 0);
     lobbyTitle_ = ui::label(QString(), "Big");
+    lobbyTitle_->setTextFormat(Qt::PlainText);  // the lobby's name is whatever its host typed: never markup
     lobbyInfo_ = ui::label(QString(), "Muted");
     lobbyInfo_->setWordWrap(true);
     pv->addWidget(lobbyTitle_);
     pv->addWidget(lobbyInfo_);
-    members_ = makeTable({tr("Player"), tr("Place"), tr("Ready")});
+    members_ = makeTable({tr("Player"), tr("Place"), tr("Ready"), tr("Connection")});
     members_->setMaximumHeight(190);
     pv->addWidget(members_);
     auto* controls = new QHBoxLayout;
@@ -108,6 +111,16 @@ LobbyPage::LobbyPage(ServerClient* server, MatchController* controller, QWidget*
     ready_->setCheckable(true);
     start_ = new QPushButton(tr("START"));
     start_->setObjectName(QStringLiteral("Primary"));
+    // the server's countdown once the two to play are ready, shown here (no START then)
+    countdown_ = ui::label(QString(), "Big");
+    countdown_->setAlignment(Qt::AlignCenter);
+    countdown_->hide();
+    nextInfo_ = ui::label(QString(), "Muted");
+    nextInfo_->setAlignment(Qt::AlignCenter);
+    nextInfo_->setWordWrap(true);
+    nextInfo_->hide();
+    tick_ = new QTimer(this);
+    tick_->setInterval(100);
     leave_ = new QPushButton(tr("Leave"));
     role_ = new QPushButton(tr("Watch"));
     leaveMatch_ = new QPushButton(tr("LEAVE MATCH"));
@@ -119,6 +132,8 @@ LobbyPage::LobbyPage(ServerClient* server, MatchController* controller, QWidget*
     controls->addWidget(leave_);
     pv->addLayout(controls);
     pv->addWidget(start_);
+    pv->addWidget(countdown_);
+    pv->addWidget(nextInfo_);
     pv->addWidget(leaveMatch_);
     chat_ = new LogView;
     pv->addWidget(chat_, 1);
@@ -161,6 +176,7 @@ LobbyPage::LobbyPage(ServerClient* server, MatchController* controller, QWidget*
                        {QStringLiteral("role"), watchNow ? QStringLiteral("spectator") : QStringLiteral("player")}});
     });
     connect(start_, &QPushButton::clicked, this, [this] { server_->send({{QStringLiteral("type"), QStringLiteral("lobby_start")}}); });
+    connect(tick_, &QTimer::timeout, this, &LobbyPage::updateStatus);
     connect(leaveMatch_, &QPushButton::clicked, controller_, &MatchController::leaveMatch);
     connect(controller_, &MatchController::phaseChanged, this, &LobbyPage::updateLeaveMatch);
     connect(ready_, &QPushButton::clicked, this, [this](bool on) {
@@ -172,9 +188,13 @@ LobbyPage::LobbyPage(ServerClient* server, MatchController* controller, QWidget*
                 return;
             }
         }
-        server_->send({{QStringLiteral("type"), QStringLiteral("lobby_ready")}, {QStringLiteral("ready"), on},
-                       {QStringLiteral("delay"), cfg::inputDelayValue(cfg::inputDelay())},
-                       {QStringLiteral("netcode"), cfg::netcode()}});
+        // with this PC's connection, for the members' table (and the address hidden, when the player asked)
+        QJsonObject ready{{QStringLiteral("type"), QStringLiteral("lobby_ready")}, {QStringLiteral("ready"), on},
+                          {QStringLiteral("delay"), cfg::inputDelayValue(cfg::inputDelay())},
+                          {QStringLiteral("netcode"), cfg::netcode()}, {QStringLiteral("relay"), cfg::hideIp()},
+                          {QStringLiteral("link"), server_->linkType()}};
+        if (controller_->serverRttMs() >= 0) ready.insert(QStringLiteral("server_rtt"), controller_->serverRttMs());
+        server_->send(ready);
     });
     connect(character_, &QComboBox::activated, this, [this] {
         const QString id = character_->currentData().toString();  // empty: picked on the game's select screen
@@ -188,10 +208,35 @@ LobbyPage::LobbyPage(ServerClient* server, MatchController* controller, QWidget*
     connect(send, &QPushButton::clicked, this, &LobbyPage::sendChat);
     connect(chatInput_, &QLineEdit::returnPressed, this, &LobbyPage::sendChat);
     connect(server_, &ServerClient::message, this, &LobbyPage::onMessage);
-    connect(server_, &ServerClient::stateChanged, this, [this](ServerClient::State st) {
-        if (st == ServerClient::State::Offline) leftLobby();
-        if (st == ServerClient::State::LoggedIn) refresh();
+    // signed out or offline: the server took this player out of the lobby (a lobby is the session's), so the page
+    // goes back to the list rather than showing a room it is no longer in. A dropped connection gets the place back
+    // at the next login within the server's 60 s, so a spectator's game keeps watching meanwhile: from what it has,
+    // then from the feed sent again
+    rejoinGrace_ = new QTimer(this);
+    rejoinGrace_->setSingleShot(true);
+    rejoinGrace_->setInterval(70000);
+    connect(rejoinGrace_, &QTimer::timeout, this, [this] {
+        if (!inLobby()) controller_->stopWatching();
     });
+    connect(server_, &ServerClient::stateChanged, this, [this](ServerClient::State st) {
+        if (st == ServerClient::State::LoggedIn) {
+            refresh();
+        } else if (inLobby()) {
+            const bool dropped = st == ServerClient::State::Offline && watchingHere_;
+            leftLobby(dropped);
+            if (dropped) rejoinGrace_->start();
+        }
+    });
+}
+
+void LobbyPage::pressReady() {
+    if (!inLobby()) return;
+    if (start_->isVisible() && start_->isEnabled()) start_->click();  // a server without the countdown: the host's
+    else if (ready_->isVisible() && ready_->isEnabled()) ready_->click();
+}
+
+void LobbyPage::focusReady() {
+    if (inLobby() && ready_->isVisible() && ready_->isEnabled()) ready_->setFocus(Qt::OtherFocusReason);
 }
 
 void LobbyPage::setGame(const QString& gameId) {
@@ -234,15 +279,18 @@ void LobbyPage::createLobby() {
     }
     CreateLobbyDialog dlg(*g, tr("%1's lobby").arg(server_->accountName()), this);
     if (dlg.exec() != QDialog::Accepted) return;
-    server_->send({{QStringLiteral("type"), QStringLiteral("lobby_create")},
-                   {QStringLiteral("name"), dlg.name()},
-                   {QStringLiteral("game"), gameId_},
-                   {QStringLiteral("mode"), dlg.mode()},
-                   {QStringLiteral("password"), dlg.password()},
-                   {QStringLiteral("rounds"), dlg.rounds()},
-                   {QStringLiteral("region"), cfg::region()},
-                   {QStringLiteral("koth"), dlg.kingOfTheHill()},
-                   {QStringLiteral("character"), savedCharacter(gameId_, dlg.mode())}});
+    QJsonObject msg{{QStringLiteral("type"), QStringLiteral("lobby_create")},
+                    {QStringLiteral("name"), dlg.name()},
+                    {QStringLiteral("game"), gameId_},
+                    {QStringLiteral("mode"), dlg.mode()},
+                    {QStringLiteral("password"), dlg.password()},
+                    {QStringLiteral("rounds"), dlg.rounds()},
+                    {QStringLiteral("region"), cfg::region()},
+                    {QStringLiteral("koth"), dlg.kingOfTheHill()},
+                    {QStringLiteral("character"), savedCharacter(gameId_, dlg.mode())},
+                    {QStringLiteral("link"), server_->linkType()}};
+    if (controller_->serverRttMs() >= 0) msg.insert(QStringLiteral("server_rtt"), controller_->serverRttMs());
+    server_->send(msg);
 }
 
 bool LobbyPage::spectating() const {
@@ -267,9 +315,11 @@ void LobbyPage::join(const QString& code, bool locked, bool spectate) {
     QString game = gameId_, mode = QStringLiteral("versus");
     for (int r = 0; r < list_->rowCount(); ++r)
         if (list_->item(r, 0)->text() == code) mode = list_->item(r, 3)->data(Qt::UserRole).toString();
-    server_->send({{QStringLiteral("type"), QStringLiteral("lobby_join")}, {QStringLiteral("lobby"), code},
-                   {QStringLiteral("password"), password}, {QStringLiteral("character"), savedCharacter(game, mode)},
-                   {QStringLiteral("spectate"), spectate}});
+    QJsonObject msg{{QStringLiteral("type"), QStringLiteral("lobby_join")}, {QStringLiteral("lobby"), code},
+                    {QStringLiteral("password"), password}, {QStringLiteral("character"), savedCharacter(game, mode)},
+                    {QStringLiteral("spectate"), spectate}, {QStringLiteral("link"), server_->linkType()}};
+    if (controller_->serverRttMs() >= 0) msg.insert(QStringLiteral("server_rtt"), controller_->serverRttMs());
+    server_->send(msg);
 }
 
 void LobbyPage::sendChat() {
@@ -317,7 +367,10 @@ void LobbyPage::onMessage(const QJsonObject& msg) {
     } else if (type == QLatin1String("lobby")) {
         showLobby(msg.value(QStringLiteral("lobby")).toObject());
     } else if (type == QLatin1String("lobby_left")) {
+        // the player left (the server says so only then; a dropped connection keeps the place, and the game): the
+        // lobby's game is not needed any more
         leftLobby();
+        controller_->closeGameWhenIdle();
         refresh();
     } else if (type == QLatin1String("lobby_chat")) {
         if (s(msg, "lobby") == s(lobby_, "id"))
@@ -385,8 +438,16 @@ void LobbyPage::showLobby(const QJsonObject& lobby) {
         else if (i == 0) place = s(mem, "name") == king ? tr("KING (%n win(s) in a row)", nullptr, streak) : tr("first in line");
         else if (i == 1) place = tr("challenger");
         else place = tr("#%1 in line").arg(i + 1);
-        const QStringList cells = {name, place, spectator ? tr("WATCHING") : ready ? tr("READY") : tr("-")};
+        // the member's connection (its own column): the link's icon, and their ping to the server
+        const QString link = s(mem, "link");
+        const int ping = mem.value(QStringLiteral("ping")).toInt(-1);
+        const QStringList cells = {name, place, spectator ? tr("WATCHING") : ready ? tr("READY") : tr("-"),
+                                   ping >= 0 ? tr("%1 ms").arg(ping) : QString()};
         for (int c = 0; c < cells.size(); ++c) members_->setItem(i, c, new QTableWidgetItem(cells[c]));
+        if (const QPixmap icon = style::linkIcon(link, 16); !icon.isNull()) {
+            members_->item(i, 3)->setIcon(QIcon(icon));
+            members_->item(i, 3)->setToolTip(style::linkName(link));
+        }
     }
     if (g && (newLobby || character_->count() == 0)) {
         const QSignalBlocker block(character_);
@@ -413,14 +474,22 @@ void LobbyPage::showLobby(const QJsonObject& lobby) {
     role_->setToolTip(meWatching ? tr("Take a free place to play in this lobby's next match")
                                  : tr("Step aside and watch this lobby's matches in your game"));
     role_->setEnabled(meWatching ? playersIn < most && (koth || !inMatch) : !inMatch);
+    watchingHere_ = meWatching;
     if (!meWatching) controller_->stopWatching();  // a player now: nothing more to watch
-    start_->setVisible(host);
+    else rejoinGrace_->stop();                      // back in after a dropped connection
+    // a server that counts down (its state has starts_in) starts the match by itself; one without it, the host's START
+    const bool countsDown = lobby.contains(QStringLiteral("starts_in"));
+    const double startsIn = lobby.value(QStringLiteral("starts_in")).toDouble(-1);
+    startsAtMs_ = countsDown && !inMatch && startsIn >= 0
+                      ? QDateTime::currentMSecsSinceEpoch() + qint64(startsIn * 1000.0) : 0;
+    start_->setVisible(host && !countsDown);
     start_->setEnabled(host && allReady && !inMatch);
     start_->setText(inMatch ? tr("MATCH IN PROGRESS") : koth && playersIn >= 2 ? tr("START: %1 VS %2")
                                                                                        .arg(s(members.at(0).toObject(), "name"),
                                                                                             s(members.at(1).toObject(), "name"))
                                                                                  : tr("START"));
     updateLeaveMatch();
+    updateStatus();
     if (newLobby) {
         chat_->clear();
         for (const auto& cv : lobby.value(QStringLiteral("chat")).toArray()) {
@@ -428,7 +497,7 @@ void LobbyPage::showLobby(const QJsonObject& lobby) {
             appendChat(s(c, "from"), s(c, "text"), c.value(QStringLiteral("ts")).toDouble());
         }
         chat_->appendPlainText(meWatching
-                                   ? tr("-- Watching lobby %1: each match its host starts plays in your game.")
+                                   ? tr("-- Watching lobby %1: each of its matches plays in your game.")
                                          .arg(s(lobby, "id"))
                                    : tr("-- Joined lobby %1. Share the code with your opponent.").arg(s(lobby, "id")));
     }
@@ -441,8 +510,44 @@ void LobbyPage::updateLeaveMatch() {
     leaveMatch_->setVisible(mine);
 }
 
-void LobbyPage::leftLobby() {
-    controller_->stopWatching();
+void LobbyPage::updateStatus() {
+    if (lobby_.isEmpty() || !lobby_.contains(QStringLiteral("starts_in"))) {  // no countdown: START says it all
+        tick_->stop();
+        countdown_->hide();
+        nextInfo_->hide();
+        return;
+    }
+    if (s(lobby_, "state") == QLatin1String("in_match")) {
+        tick_->stop();
+        countdown_->setText(tr("MATCH IN PROGRESS"));
+        countdown_->show();
+        nextInfo_->hide();
+        return;
+    }
+    if (startsAtMs_) {
+        if (!tick_->isActive()) tick_->start();
+        const qint64 left = startsAtMs_ - QDateTime::currentMSecsSinceEpoch();
+        countdown_->setText(left > 0 ? tr("STARTING IN %1").arg((left + 999) / 1000) : tr("STARTING..."));
+        countdown_->show();
+        nextInfo_->hide();
+        return;
+    }
+    tick_->stop();
+    countdown_->hide();
+    const bool koth = lobby_.value(QStringLiteral("koth")).toBool();
+    nextInfo_->setText(spectating() ? tr("The next match plays in your game once its players are ready.")
+                       : koth       ? tr("The match starts by itself once the first two in line are ready.")
+                                    : tr("The match starts by itself once both players are ready."));
+    nextInfo_->show();
+}
+
+void LobbyPage::leftLobby(bool keepWatching) {
+    if (!keepWatching) controller_->stopWatching();
+    watchingHere_ = false;
+    tick_->stop();
+    startsAtMs_ = 0;
+    countdown_->hide();
+    nextInfo_->hide();
     lobby_ = {};
     right_->setCurrentIndex(0);
     character_->clear();

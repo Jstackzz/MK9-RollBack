@@ -23,8 +23,10 @@ and takes the game's command line (--game_data_root=, --user_data_root=, --log_f
     quit                             exit
 
 Without MK9_LINK=1 (single player) it just runs until it is closed. Knobs: MK9_FAKE_BOOT (seconds before "ready",
-default 1.5), MK9_FAKE_RESULT=desync (report "desync frame=600") or none (never report a result, a match that does
-not get to its end).
+default 1.5), MK9_FAKE_RESULT=desync (report "desync frame=600", its log then has a match's "mk9 net:" lines as the
+game writes them, for the launcher's desync report) or none (never report a result, a match that does not get to its
+end), MK9_FAKE_EXIT=<code> (the game ends by itself with that exit code halfway through a match: a crash or a closed
+window, for the launcher's "left" report).
 """
 
 from __future__ import annotations
@@ -111,6 +113,7 @@ class FakeGame:
         self.cmd_path = cmd_path
         self.match_seconds = float(os.environ.get("MK9_FAKE_SECONDS", "6"))
         self.result_mode = os.environ.get("MK9_FAKE_RESULT", "")
+        self.exit_code = int(os.environ["MK9_FAKE_EXIT"]) if os.environ.get("MK9_FAKE_EXIT") else None
         self.sock: socket.socket | None = None
         self.feed: socket.socket | None = None
         self.state = "booting"
@@ -217,6 +220,22 @@ class FakeGame:
         self.state = "continue"
         self.feed_write(feed_packet(FEED_END, self.slot(), self.barrier, struct.pack("<I", 360)))
         if self.result_mode == "desync":
+            slot = self.slot()
+            for line in (f"mk9 link: start {self.start.get('mode', 'versus')} slot {slot} of 2, match {self.match}, "
+                         f"{self.start.get('netcode', 'lockstep')}, 1 peers",
+                         f"mk9 net: slot {slot} of 2, port {self.start.get('local_port', '0')}, 1 peers, "
+                         f"{self.start.get('netcode', 'lockstep')} delay {self.start.get('delay', '2')}",
+                         f"mk9 net: a packet from 203.0.113.9:7001, not this match's peer: ignored (1 so far)",
+                         f"mk9 net: match {self.match} in sync, seed {int(self.start.get('seed', '0')) & 0xFFFFFFFF:08X}, "
+                         f"input delay {self.start.get('delay', '2')}",
+                         f"mk9 net: DESYNC at frame 600 with slot {1 - slot}: 1234ABCD here, 5678EF00 there"):
+                log(line)
+            net_log = os.environ.get("MK9_NET_LOG", "").replace("{match}", self.match).replace("{slot}", str(slot))
+            if net_log:
+                with open(net_log, "w", encoding="ascii") as fh:
+                    for f in range(590, 601):
+                        fh.write(f"{f} 0000:0000:00000000 0000:0000:00000000 check {f * 2654435761 & 0xFFFFFFFF:08X} "
+                                 f"timer {f} rand {f * 40503 & 0xFFFFFFFF:08X}\n")
             self.status(f"desync frame=600 match={self.match}")
         elif self.result_mode == "none":
             self.state = "playing"  # never gets to its end
@@ -316,6 +335,9 @@ class FakeGame:
                 self.close_socket()
                 self.state = "over"
                 self.status(f"disconnected match={self.match}")
+            elif self.exit_code is not None and now - self.connected_at >= self.match_seconds / 2:
+                log(f"ending by itself mid-match, exit code {self.exit_code}")
+                os._exit(self.exit_code)
             elif now - self.connected_at >= self.match_seconds:
                 self.finish()
         elif self.state == "watching":

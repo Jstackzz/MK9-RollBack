@@ -29,13 +29,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="the release launchers are offered to update to (default: update.json next to the database)")
     ap.add_argument("--allow-same-ip", action="store_true",
                     help="let ranked pair two players from the same public IP (LAN events, development)")
-    ap.add_argument("--accept-timeout", type=float, default=15.0, help="seconds to accept a found match")
+    ap.add_argument("--accept-timeout", type=float, default=20.0, help="seconds to accept a found match")
     ap.add_argument("--no-relay", action="store_true",
                     help="cancel a match whose players cannot reach each other instead of relaying it")
     ap.add_argument("--upnp", action="store_true",
                     help="open the TCP and UDP ports on this network's router (UPnP): a server on a home PC")
     ap.add_argument("--relay-only", action="store_true",
-                    help="development: relay every match through this server (tests the relay on one PC)")
+                    help="relay every match through this server: no player ever learns another's IP address, but "
+                         "players far from the server get much more ping (by default only the matches of players "
+                         "who ask to hide their address are relayed)")
     ap.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     ap.add_argument("--log-file", default=None, help="also append the log to this file")
     ap.add_argument("--version", action="version", version=f"mk9-server {__version__}")

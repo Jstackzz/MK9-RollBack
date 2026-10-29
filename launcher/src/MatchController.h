@@ -9,6 +9,7 @@
 #include <QHash>
 #include <QJsonObject>
 #include <QObject>
+#include <QPointer>
 #include <QTimer>
 
 class ServerClient;
@@ -43,10 +44,23 @@ public:
     ~MatchController() override;
 
     Phase phase() const { return phase_; }
+    // a match on its way, played or watched: the game has the player's controller
+    bool inMatch() const {
+        return phase_ == Phase::Connecting || phase_ == Phase::Starting || phase_ == Phase::Playing ||
+               phase_ == Phase::Reporting || phase_ == Phase::Finishing || phase_ == Phase::Watching;
+    }
     QString phaseText() const { return phaseText_; }
     QueueRequest lastRequest() const { return request_; }
     QJsonObject currentFound() const { return found_; }
     int searchSeconds() const;
+    // the max ping the server raised this search's to, waiting for a match (0: not raised): the rule it gave with
+    // `queued`, from the time searched
+    int raisedMaxPing() const;
+    // this PC's round trip to the server, ms (the rendezvous' UDP one, else the connection's; -1 unknown)
+    int serverRttMs() const;
+    // match_found's `connection` in words (the log), and its ping part alone (beside the link's icon)
+    static QString connectionText(const QJsonObject& found);
+    static QString pingText(const QJsonObject& found);
     QString gameStatus() const;
     GameProcess* game() const { return game_; }
 
@@ -85,6 +99,9 @@ public:
                         QString* error);
     void stopLocalTest();
     void stopGame();
+    // a lobby left: its game is closed once nothing needs it any more (a lobby match it plays or watches ends first),
+    // so the player need not close it; a search, a lobby's Ready or a match to watch wanting a game before then keeps it
+    void closeGameWhenIdle();
     void shutdown();
     // a spectator in a lobby: each of its matches comes to this game as the server passes it on (one at a time, the
     // next once the game is back at its hold point); stopWatching drops what waits and parks a match being watched
@@ -121,6 +138,8 @@ private:
     QString startLine(const QJsonObject& go) const;
     void tryStart();
     void reportResult(QJsonObject fields);
+    void reportLeft();             // the game ended during the match: "left", with how it ended
+    void reportDesync(int frame);  // the match went out of step: the game's log of it to the server
     // `status`: the server's match_result status ("" when it did not come)
     void finishMatch(const QString& status = {});
     void finishDone();
@@ -148,6 +167,9 @@ private:
     void thawGame();
     void maybeBackToSolo();  // standby: nothing more to play online, single player again
     void maybeStartSolo();   // a search waits with the match's game at its hold point: single player meanwhile
+    void closeGame(const QString& why);  // the match's game, once nothing wants it
+    void closeSolo(const QString& why);  // single player a search opened, once the search is cancelled
+    void maybeCloseIdleGame();           // closeGameWhenIdle, once idle
     // a tunnel (docs/PROTOCOL.md): no hello_ack for the match, so the server is asked to carry it through the
     // connection; its packets come and go there, to the punch and then to the game (bridge_)
     void askForTunnel();
@@ -171,6 +193,9 @@ private:
     bool soloFrozen_ = false, gameFrozen_ = false;
     QList<quintptr> soloHidden_, gameHidden_;  // the windows freezing hid, shown again by thawing
     bool showWhenReady_ = false;  // standby: the match's game started on accepting; to the front once it is up
+    bool closeWhenIdle_ = false;  // a lobby was left: game_ goes once idle (closeGameWhenIdle)
+    QPointer<GameProcess> lobbyGame_;   // the game a lobby's Ready wants (prepareGame): a cancelled search leaves it be
+    QPointer<GameProcess> searchGame_;  // the game a search started (findMatch): a cancelled search closes it
     GameProcess* localA_ = nullptr;
     GameProcess* localB_ = nullptr;
     Phase phase_ = Phase::Idle;
@@ -182,7 +207,9 @@ private:
     bool wantNext_ = false;  // ready for the series' next match, not sent yet (the game still plays the last one's end)
     QString nextChoice_ = QStringLiteral("rematch");
     QElapsedTimer searchClock_;
+    QJsonObject pingWiden_;  // the server's rule for raising the max ping ({} when it is not raised)
     QTimer parkTimer_, keepaliveTimer_, startTimeout_, finishTimeout_, watchTimeout_, watchFeedCheck_, startCheck_;
+    QTimer watchEndTimeout_;  // the watched match ended early: the watching game's while to be in it, else it parks
     QTimer continueTimer_;  // no series' next match comes for the game held at CONTINUE?: it goes back to its menu
     QTimer parkWatch_;      // a park outside Finishing that did not bring the game back: it is started again
     QTimer tunnelAsk_;      // the match's hellos unanswered this long: through the server connection

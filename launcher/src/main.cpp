@@ -46,6 +46,13 @@ int main(int argc, char* argv[]) {
                                         QStringLiteral("image"));
     const QCommandLineOption acceptOpt(QStringLiteral("auto-accept"), QStringLiteral("Development: accept found matches after N seconds."),
                                        QStringLiteral("seconds"));
+    const QCommandLineOption cancelOpt(
+        QStringLiteral("cancel-search"),
+        QStringLiteral("Development: cancel the --queue search N seconds after it starts, as CANCEL SEARCH does."),
+        QStringLiteral("seconds"));
+    const QCommandLineOption leaveLobbyOpt(
+        QStringLiteral("leave-lobby"),
+        QStringLiteral("Development: once the --lobby-matches are played, leave the lobby (its game then closes)."));
     const QCommandLineOption lobbyOpt(QStringLiteral("lobby"),
                                       QStringLiteral("Development: host a lobby (start once both are ready), join it "
                                                      "(ready at once) or watch it (as a spectator)."),
@@ -92,8 +99,8 @@ int main(int argc, char* argv[]) {
     const QCommandLineOption sendCrashOpt(QStringLiteral("send-crash-reports"),
                                           QStringLiteral("Development: send a crash report to the server at once, without asking."));
     for (const auto* o : {&configOpt, &serverOpt, &fpOpt, &userOpt, &pwEnvOpt, &regOpt, &queueOpt, &gameOpt, &modeOpt,
-                          &charOpt, &pageOpt, &acceptOpt, &localTestOpt, &extractOpt, &lobbyOpt, &lobbyNameOpt, &kothOpt,
-                          &lobbyMatchesOpt, &upnpProbeOpt, &rematchesOpt, &rematchChoiceOpt, &leaveSeriesOpt, &soloOpt,
+                          &charOpt, &pageOpt, &acceptOpt, &cancelOpt, &localTestOpt, &extractOpt, &lobbyOpt,
+                          &lobbyNameOpt, &kothOpt, &lobbyMatchesOpt, &leaveLobbyOpt, &upnpProbeOpt, &rematchesOpt, &rematchChoiceOpt, &leaveSeriesOpt, &soloOpt,
                           &soloWaitOpt, &netcodeOpt, &updatedOpt, &autoUpdateOpt, &sendCrashOpt})
         cli.addOption(*o);
     cli.process(app);
@@ -143,12 +150,14 @@ int main(int argc, char* argv[]) {
     opts.character = cli.value(charOpt);
     opts.page = cli.value(pageOpt);
     opts.autoAcceptSeconds = cli.isSet(acceptOpt) ? cli.value(acceptOpt).toInt() : -1;
+    opts.cancelSearchSeconds = cli.isSet(cancelOpt) ? std::max(0, cli.value(cancelOpt).toInt()) : -1;
     opts.localTest = cli.isSet(localTestOpt);
     opts.extractImage = cli.value(extractOpt);
     opts.lobby = cli.value(lobbyOpt);
     opts.lobbyName = cli.value(lobbyNameOpt);
     opts.koth = cli.isSet(kothOpt);
     opts.lobbyMatches = cli.isSet(lobbyMatchesOpt) ? std::max(1, cli.value(lobbyMatchesOpt).toInt()) : 1;
+    opts.leaveLobby = cli.isSet(leaveLobbyOpt);
     opts.rematches = cli.isSet(rematchesOpt) ? std::max(0, cli.value(rematchesOpt).toInt()) : 0;
     opts.rematchChoices = cli.value(rematchChoiceOpt).split(QLatin1Char(','), Qt::SkipEmptyParts);
     opts.leaveSeries = cli.isSet(leaveSeriesOpt);

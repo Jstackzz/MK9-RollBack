@@ -39,6 +39,8 @@ void useDarkTitleBar(QWidget* window);
 // Windows lets only the foreground process hand the foreground over and otherwise just flashes the taskbar, so the
 // foreground window's thread input is attached to ours for the switch. True: it has the foreground now.
 bool bringToFront(QWidget* window);
+// the window has the front: the foreground window, the one keys and the launcher's controller navigation go to
+bool inFront(QWidget* window);
 // The game's window in front again (the largest visible window of that process or of one it started), so the player
 // is back in it without switching to it; false when it has none or did not get the foreground.
 bool bringProcessToFront(qint64 pid);
@@ -48,6 +50,10 @@ bool bringProcessToFront(qint64 pid);
 // takes no CPU and plays no sound, and comes back exactly where it was.
 bool freezeProcess(qint64 pid, QList<quintptr>* hidden);
 bool thawProcess(qint64 pid, const QList<quintptr>& hidden);
+
+// A WAV file (a resource of the launcher's too) played on the default sound device without waiting for it, over
+// whatever else plays; one sound at a time. False when it is missing or nothing could play it.
+bool playWav(const QString& path);
 
 // Smart App Control (Windows 11): 1 on, blocking programs without a known publisher's signature (the games, whose
 // code each PC builds for itself, never have one), 2 evaluating (it may switch itself on), 0 off, -1 not on this

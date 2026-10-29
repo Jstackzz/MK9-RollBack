@@ -546,6 +546,13 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     strict->setChecked(cfg::strict());
     auto* upnp = new QCheckBox(tr("Open the game port on the router (UPnP)"));
     upnp->setChecked(cfg::upnp());
+    auto* hideIp = new QCheckBox(tr("Hide my IP address from opponents"));
+    hideIp->setChecked(cfg::hideIp());
+    hideIp->setToolTip(tr("Your matches go through the server, so nobody you play can see your address. They get "
+                          "more ping the farther you and your opponent are from the server."));
+    auto* matchSound = new QCheckBox(tr("Play a sound when a match is found"));
+    matchSound->setChecked(cfg::matchSound());
+    matchSound->setToolTip(tr("A short chime with the MATCH FOUND window, heard over the game you wait in."));
     routerState_ = ui::label(tr("Router: not asked"), "Muted");
     routerState_->setWordWrap(true);
     of->addRow(tr("Region"), region);
@@ -554,11 +561,14 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     of->addRow(tr("Netcode"), netcode);
     of->addRow(tr("Game UDP port"), port);
     of->addRow(QString(), strict);
+    of->addRow(QString(), matchSound);
     of->addRow(QString(), upnp);
+    of->addRow(QString(), hideIp);
     of->addRow(tr("Router"), routerState_);
     auto* delayNote = ui::label(tr("A match takes the larger delay of the two players (Auto: from the ping, 2 to 8 "
-                                   "frames; Ranked at least 1). Players who cannot reach each other directly play "
-                                   "through the server, with a little more delay."), "Muted");
+                                   "frames; Ranked at least 1). Players who cannot reach each other directly, or who "
+                                   "hide their IP address, play through the server: more ping the farther both are "
+                                   "from it."), "Muted");
     delayNote->setWordWrap(true);
     of->addRow(QString(), delayNote);
     grid->addWidget(onlineBox, 1, 0);
@@ -675,6 +685,8 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
         if (on && upnp_) upnp_->map(static_cast<quint16>(cfg::gamePort()));
     });
     connect(strict, &QCheckBox::toggled, this, [](bool on) { cfg::set(QStringLiteral("online/strict"), on); });
+    connect(matchSound, &QCheckBox::toggled, this, [](bool on) { cfg::set(QStringLiteral("online/match_sound"), on); });
+    connect(hideIp, &QCheckBox::toggled, this, [](bool on) { cfg::set(QStringLiteral("online/hide_ip"), on); });
     connect(window, &QComboBox::currentIndexChanged, this,
             [window] { cfg::set(QStringLiteral("display/fullscreen"), window->currentData()); });
     connect(python, &QLineEdit::editingFinished, this, [python] { cfg::set(QStringLiteral("tools/python"), python->text().trimmed()); });

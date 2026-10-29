@@ -79,6 +79,58 @@ index a7ab6b3..c120291 100644
   protected:
    ImGuiDialog(ImGuiDrawer* imgui_drawer);
  
+diff --git a/include/rex/ui/overlay/achievement_toast.h b/include/rex/ui/overlay/achievement_toast.h
+index 7642601..d841f5f 100644
+--- a/include/rex/ui/overlay/achievement_toast.h
++++ b/include/rex/ui/overlay/achievement_toast.h
+@@ -35,6 +35,10 @@ class AchievementToastDialog : public AchievementNotificationDialog {
+   // Thread-safe: safe to call from any thread, including guest threads.
+   void Push(const rex::system::AchievementEvent& event) override;
+ 
++  // Open for the whole run (a toast can come any time), it animates with the guest's frames, which repaint
++  // the UI anyway: asking for continuous repaint kept the presenter painting as fast as it could all along.
++  bool RepaintsContinuously() const override { return false; }
++
+  protected:
+   void OnDraw(ImGuiIO& io) override;
+ 
+diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
+index afb4a30..5676f49 100644
+--- a/include/rex/ui/presenter.h
++++ b/include/rex/ui/presenter.h
+@@ -13,6 +13,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <chrono>
+ #include <climits>
+ #include <cmath>
+ #include <condition_variable>
+@@ -188,6 +189,13 @@ class Presenter {
+       std::function<void(bool is_responsible, bool statically_from_ui_thread)>;
+   static void FatalErrorHostGpuLossCallback(bool is_responsible, bool statically_from_ui_thread);
+ 
++  // Every presentation to the host so far, by any presenter and thread: the rate a frame counter overlay
++  // (one hooking Present) shows, against the guest's own frames.
++  static uint64_t PresentCount();
++  // Since the last call: how many guest frames reached a present, how long they waited for it after the
++  // guest output refresh made them ready, in all and at most (milliseconds).
++  static void TakePresentWaits(uint64_t& frames, double& total_ms, double& longest_ms);
++
+   class GuestOutputRefreshContext {
+    public:
+     GuestOutputRefreshContext(const GuestOutputRefreshContext& context) = delete;
+@@ -971,6 +979,10 @@ class Presenter {
+   // with paint_mode_mutex_ held in this case, and guest output consumption
+   // happens as part of painting.
+   std::mutex guest_output_mailbox_consumer_mutex_;
++  // When each image became the ready one (written by the refresh before it publishes the image), and the
++  // ready time of an image a paint acquired new, until a present shows it (the painting thread's).
++  std::array<std::chrono::steady_clock::time_point, kGuestOutputMailboxSize> guest_output_ready_time_{};
++  std::chrono::steady_clock::time_point new_guest_output_ready_time_{};
+ 
+   std::array<GuestOutputProperties, kGuestOutputMailboxSize> guest_output_properties_;
+   // Accessible only by refreshing, whether the last refresh contained an image
 diff --git a/src/core/filesystem_win.cpp b/src/core/filesystem_win.cpp
 index c5a2c5d..854cb82 100644
 --- a/src/core/filesystem_win.cpp
@@ -415,3 +467,67 @@ index f270f3c..5661df9 100644
    }
  }
  
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index 7360ed9..a12338e 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -584,6 +584,8 @@ bool Presenter::RefreshGuestOutput(
+   // the host present call on the CPU and all frames reaching a present call).
+   uint32_t last_acquired_and_ready =
+       guest_output_mailbox_acquired_and_ready_.load(std::memory_order_relaxed);
++  // when it became ready, published with it (the present's wait for it is counted from here)
++  guest_output_ready_time_[guest_output_mailbox_writable_] = std::chrono::steady_clock::now();
+   // Desired acquired = current acquired (changed only by the consumers).
+   // Desired ready = current writable.
+   // memory_order_acq_rel to acquire the new writable image and to release the
+@@ -840,6 +842,10 @@ std::unique_lock<std::mutex> Presenter::ConsumeGuestOutput(
+         (old_acquired_and_ready & ~uint32_t(3)) | (old_acquired_and_ready >> 2);
+   }
+   uint32_t mailbox_index = desired_acquired_and_ready & 3;
++  // a guest frame not acquired before: its present (PaintAndPresent) counts its wait
++  if ((old_acquired_and_ready & 3) != mailbox_index) {
++    new_guest_output_ready_time_ = guest_output_ready_time_[mailbox_index];
++  }
+   // Give the current acquired image to the caller, or UINT32_MAX if it's
+   // inactive.
+   const GuestOutputProperties& properties = guest_output_properties_[mailbox_index];
+@@ -1494,10 +1500,39 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
+ #endif  // XE_PLATFORM
+ }
+ 
++namespace {
++std::atomic<uint64_t> g_present_count{0};
++// guest frames that reached a present since TakePresentWaits, their waits in all and the longest (microseconds)
++std::atomic<uint64_t> g_waited_frames{0}, g_waited_us{0}, g_longest_wait_us{0};
++}  // namespace
++
++uint64_t Presenter::PresentCount() { return g_present_count.load(std::memory_order_relaxed); }
++
++void Presenter::TakePresentWaits(uint64_t& frames, double& total_ms, double& longest_ms) {
++  frames = g_waited_frames.exchange(0, std::memory_order_relaxed);
++  total_ms = double(g_waited_us.exchange(0, std::memory_order_relaxed)) / 1000.0;
++  longest_ms = double(g_longest_wait_us.exchange(0, std::memory_order_relaxed)) / 1000.0;
++}
++
+ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
+   assert_false(execute_ui_drawers && !is_in_ui_thread_paint_);
+   assert_true(surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable);
+   PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
++  if (result == PaintResult::kPresented || result == PaintResult::kPresentedSuboptimal) {
++    g_present_count.fetch_add(1, std::memory_order_relaxed);
++    // the first present of a guest frame: how long it waited since it was ready
++    if (new_guest_output_ready_time_ != std::chrono::steady_clock::time_point{}) {
++      const auto waited = std::chrono::duration_cast<std::chrono::microseconds>(
++                              std::chrono::steady_clock::now() - new_guest_output_ready_time_)
++                              .count();
++      new_guest_output_ready_time_ = {};
++      const uint64_t us = uint64_t(std::max<int64_t>(0, waited));
++      g_waited_frames.fetch_add(1, std::memory_order_relaxed);
++      g_waited_us.fetch_add(us, std::memory_order_relaxed);
++      uint64_t longest = g_longest_wait_us.load(std::memory_order_relaxed);
++      while (us > longest && !g_longest_wait_us.compare_exchange_weak(longest, us, std::memory_order_relaxed)) {}
++    }
++  }
+   switch (result) {
+     case PaintResult::kPresented:
+       surface_paint_connection_was_optimal_at_successful_paint_ = true;

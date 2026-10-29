@@ -49,8 +49,9 @@ the MK9 Online server, so whoever runs it can see what went wrong.
   the shaders for it were still being made. Fixed in 0.5.0 (docs/GAME.md, "Blood and damage textures").
 - Until 0.5.1 a game waiting for a match did not stay at its menu: after a minute MK9 went back to its title
   and then played its demo fight, and a lobby match started after such a wait desynced or lost the other
-  player. 0.5.0 also drew frames nonstop for its names overlay (frame counters read it as uncapped; the
-  game itself stayed at 60). Both fixed in 0.5.1 (docs/GAME.md, "The launcher link", "Names over the fight").
+  player. And every release presented the window about 300 times a second (frame counters read it as
+  uncapped; the game itself stayed at 60): the SDK's achievement toast overlay, open the whole time, kept
+  it repainting. Both fixed in 0.5.1 (docs/GAME.md, "The launcher link", "Frame rate").
 
 ## Building from source
 

@@ -66,7 +66,15 @@ purpose stay held back). The game asks Windows for 1 ms timers: with the default
 which sleeps 1 ms at a time, delivered the blanks in uneven bursts. Measured on the boot to the title and the attract
 fight: 62.7-70.4 frames/s and about 75 frames a minute off by more than 2 ms before, 59.3-60.1 and none after, with
 the attract fight starting at the same second. The frame rate line every 600 frames counts frames under 15 ms and
-over 20 ms after the one before, and the longest gap.
+over 20 ms after the one before, and the longest gap, and since 0.5.1 the window's presents a second
+(`rex::ui::Presenter::PresentCount`, an SDK addition): what a frame counter overlay hooked into Present shows, and
+how long a finished frame waited for its present (`TakePresentWaits`). Players' counters read 224 with the game at
+60, and this PC counted about 300 from the first boot screens on, in every release so far: the SDK opens its
+achievement toast (an ImGui dialog) when the game launches and keeps it for the whole run, and while any dialog was
+open Xenia's ImGui drawer asked for the next paint at the end of each one, so the presenter painted as fast as it
+could. The toast and the names overlay now ask for no continuous repaint (`ImGuiDialog::RepaintsContinuously`, an
+SDK addition; the guest's frames repaint the UI): 60.0 presents a second through the menus, the select screen and a
+fight with names, with the game at 60.0.
 
 The SDK draws on Windows' first graphics adapter, and its Optimus/PowerXpress exports sit in `rexgpu-xenos.dll`,
 where the drivers do not look: on a laptop with two the game ran on the slow one in the processor. `mk9.exe` exports
@@ -243,15 +251,12 @@ screenshots (the game's own snapshots leave the overlay out; `tools\shot.ps1` ta
 `mk9 names: ... over the fight` at the start, `mk9 names: up over the fight` once they show and
 `mk9 names: drawn over the fight` once the overlay drew them.
 
-The overlay is open only while names are up. An open ImGui dialog puts the SDK's presenter on the UI
-thread's paints (`Presenter::GetDesiredPaintModeFromUIThread`: no presenting straight from the guest
-output thread) and, in Xenia's drawer, asked for the next paint at the end of each one, so 0.5.0, whose
-overlay was open from the start, presented as fast as the GPU could all the time (the game's 60 frames a
-second, but "uncapped" to any frame counter) and gave the low-latency path up even in the menus. Now the
-main thread opens and closes the overlay on the UI thread (`CallInUIThreadDeferred`) as the names come
-and go, and it asks for no continuous repaint (`ImGuiDialog::RepaintsContinuously`, an SDK addition:
-every guest frame repaints the UI while a drawer is attached). At the main menu, in a 1280x720 window,
-the game took 2.24 of the processor's cores before and 1.76 after (the 3D engine 7 % both ways).
+The overlay is open only while names are up: the main thread opens and closes it on the UI thread
+(`CallInUIThreadDeferred`) as the names come and go, and it asks for no continuous repaint
+(`ImGuiDialog::RepaintsContinuously`, an SDK addition: every guest frame repaints the UI while a drawer is
+attached). 0.5.0 kept it open from the start, beside the SDK's own achievement toast (see "Frame rate": the
+two kept the presenter painting as fast as it could); with the overlay closed outside fights the game took 1.76
+of the processor's cores at the main menu instead of 2.24.
 
 Tested 2026-10-29 (0.5.0): a 4K window, the names after the bars' slide-in and not during it, and an
 online rollback match driven through the link (both games showed them in round 1, `none` again after

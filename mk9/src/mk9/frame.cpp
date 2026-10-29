@@ -27,6 +27,7 @@ uint64_t Switches();
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
+#include <rex/ui/presenter.h>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -258,20 +259,29 @@ REX_HOOK_RAW(sub_823621F8) {
   mk9::link::OnFrame(n);
   mk9::names::OnFrame(n);
 
-  // the frame rate, every ten seconds of frames
+  // the frame rate, every ten seconds of frames, and how often the window was presented meanwhile (what a
+  // frame counter overlay shows: once a frame unless something repaints the window on its own)
   static auto since = std::chrono::steady_clock::now();
-  static uint64_t since_frames = 0;
+  static uint64_t since_frames = 0, since_presents = 0;
   if (n - since_frames >= 600) {
     auto now = std::chrono::steady_clock::now();
     double s = std::chrono::duration<double>(now - since).count();
     const mk9::fx::Stats fx = mk9::fx::GetStats();
-    REXLOG_INFO("mk9: frame {}: {:.1f} frames/s ({} under 15 ms, {} over 20 ms, longest {:.1f} ms), timer {}, "
-                "{} fiber switches, {} effects taken ({} with every one in use, {} made room)",
+    const uint64_t presents = rex::ui::Presenter::PresentCount();
+    // and how long a frame the game finished waited until the window was presented with it
+    uint64_t shown = 0;
+    double waited_ms = 0, longest_wait_ms = 0;
+    rex::ui::Presenter::TakePresentWaits(shown, waited_ms, longest_wait_ms);
+    REXLOG_INFO("mk9: frame {}: {:.1f} frames/s ({} under 15 ms, {} over 20 ms, longest {:.1f} ms), {:.1f} presents/s "
+                "(a frame shown {:.2f} ms after it was ready, at most {:.1f}), timer {}, {} fiber switches, {} effects "
+                "taken ({} with every one in use, {} made room)",
                 n, double(n - since_frames) / s, g_pacing.early, g_pacing.late,
-                std::chrono::duration<double, std::milli>(g_pacing.longest).count(), mk9::game::RoundTimer(),
-                mk9::fibers::Switches(), fx.taken, fx.empty, fx.reclaimed);
+                std::chrono::duration<double, std::milli>(g_pacing.longest).count(),
+                double(presents - since_presents) / s, shown ? waited_ms / double(shown) : 0.0, longest_wait_ms,
+                mk9::game::RoundTimer(), mk9::fibers::Switches(), fx.taken, fx.empty, fx.reclaimed);
     since = now;
     since_frames = n;
+    since_presents = presents;
     g_pacing.early = g_pacing.late = 0;
     g_pacing.longest = {};
   }

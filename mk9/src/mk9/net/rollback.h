@@ -85,8 +85,16 @@ void DebugComparePages(const char* what);
 
 struct Stats {
   uint64_t faults = 0, foreign_pages = 0, tracked_pages = 0, logged_bytes = 0;
+  uint64_t fault_us = 0;  // time in the write fault handler (taking pages), all threads
+  // pages taken by whom: the main thread, the rendering thread (the first simulation thread added), the other
+  // simulation threads, anyone else (a page of the simulation heap's region or shared)
+  uint64_t faults_main = 0, faults_render = 0, faults_sim = 0, faults_other = 0;
   double close_ms = 0, restore_ms = 0, arm_ms = 0;
   uint32_t last_pages = 0;
+  // the last closed frame's pages: in the simulation heap's region, and the 64 KB blocks they lie in
+  uint32_t last_region_pages = 0, last_blocks = 0;
+  uint64_t pages_ahead = 0;   // pages taken with another page of their block, before any write (no fault of their own)
+  uint32_t dense_blocks = 0;  // blocks taken whole, as last measured
 };
 Stats GetStats();
 

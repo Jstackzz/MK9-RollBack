@@ -8,6 +8,7 @@
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
 #include <rex/logging.h>
+#include <rex/system/interfaces/graphics.h>
 #include <rex/ui/flags.h>
 
 #include <rex/ui/presenter.h>
@@ -137,6 +138,9 @@ void Mk9App::OnPostSetup() {
   mk9::controls::Poll();
   mk9::testinput::Init();
   mk9::net::InitFromEnvironment();
+  mk9::net::SetDrawSkip([this](bool skip) {
+    if (auto* graphics = runtime()->graphics_system()) graphics->SkipDrawsFromNow(skip);
+  });
   mk9::link::Init();
   mk9::synctest::Init();  // a sync test takes the frame hooks over from netplay
   mk9::diag::Init();

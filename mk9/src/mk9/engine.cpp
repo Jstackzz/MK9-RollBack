@@ -45,6 +45,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -259,11 +260,57 @@ void Park(Leave leave, Back back) {
 
 namespace mk9::engine {
 
+namespace {
+std::atomic<bool> g_sample_render{false};
+std::map<std::array<uint32_t, 3>, uint32_t> g_render_samples;  // main thread
+std::map<std::array<uint32_t, 2>, uint32_t> g_render_commands;  // the first two words of the command it runs
+uint32_t g_render_sample_count = 0;
+}  // namespace
+
+void SampleRenderWaits(bool on) { g_sample_render = on; }
+
+std::string TakeRenderWaitSamples(int top) {
+  std::vector<std::pair<uint32_t, std::array<uint32_t, 3>>> seen;
+  for (const auto& [where, n] : g_render_samples) seen.push_back({n, where});
+  std::sort(seen.begin(), seen.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+  std::string out;
+  for (int i = 0; i < top && i < int(seen.size()); i++)
+    out += fmt::format("{}{:08X} < {:08X} < {:08X} {:.0f} %", i ? ", " : "", seen[i].second[0], seen[i].second[1],
+                       seen[i].second[2], 100.0 * seen[i].first / std::max(1u, g_render_sample_count));
+  std::vector<std::pair<uint32_t, std::array<uint32_t, 2>>> cmds;
+  for (const auto& [words, n] : g_render_commands) cmds.push_back({n, words});
+  std::sort(cmds.begin(), cmds.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+  if (!cmds.empty()) out += "; the command at its read point:";
+  for (int i = 0; i < 8 && i < int(cmds.size()); i++)
+    out += fmt::format(" {:08X} {:08X} {:.0f} %{}", cmds[i].second[0], cmds[i].second[1],
+                       100.0 * cmds[i].first / std::max(1u, g_render_sample_count), i + 1 < 8 ? "," : "");
+  g_render_samples.clear();
+  g_render_commands.clear();
+  g_render_sample_count = 0;
+  return out;
+}
+
 bool WaitRenderIdle(int timeout_ms) {
   const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  auto sampled = std::chrono::steady_clock::now();
   for (int spins = 0;; spins++) {
     if (game::ReadU32(kRenderRing + 20) == game::ReadU32(kRenderRing + 8)) return true;
-    if (std::chrono::steady_clock::now() > until) return false;
+    const auto now = std::chrono::steady_clock::now();
+    if (now > until) return false;
+    // what the rendering thread is doing meanwhile (rollback's frames run again: what costs their time)
+    if (g_sample_render.load(std::memory_order_relaxed) && now - sampled >= std::chrono::microseconds(100)) {
+      sampled = now;
+      if (PPCContext* rc = g_render_ctx.load()) {
+        std::array<uint32_t, 3> where{uint32_t(rc->lr), 0, 0};
+        uint32_t returns[2] = {};
+        const int n = game::StackReturns(*rc, returns, 2);
+        for (int i = 0; i < n && i < 2; i++) where[1 + i] = returns[i];
+        g_render_samples[where]++;
+        g_render_sample_count++;
+        if (const uint32_t at = game::ReadU32(kRenderRing + 20); at)
+          g_render_commands[{game::ReadU32(at), game::ReadU32(at + 4)}]++;
+      }
+    }
     if (spins > 64) std::this_thread::yield();
   }
 }

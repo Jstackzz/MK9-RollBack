@@ -19,7 +19,8 @@ The SDK is ReXGlue v0.10.0 in `external\rexglue-sdk` with this project's changes
 (`patches\rexglue-sdk-v0.10.0.patch`: file reads into write-protected guest pages, the critical
 section hook rollback uses, bounded stack walks in two crash reports, no resolve copying in what draws
 dropped while their pipelines are created left out: see "Blood and damage textures"; ImGui dialogs that
-ask for no continuous repaint: see "Names over the fight"). On a fresh
+ask for no continuous repaint: see "Names over the fight"; the frames a rollback runs again drawn only
+into small targets and waiting for no vertical blank: see "What a rollback costs"). On a fresh
 checkout of the SDK: `git -C external\rexglue-sdk apply ..\..\patches\rexglue-sdk-v0.10.0.patch`; the
 patch is `git -C external\rexglue-sdk diff --ignore-submodules`. A change to the SDK's GPU code alone
 does not link `mk9.exe` again, and the GPU plugin is copied beside it only when it does: after such a
@@ -356,6 +357,45 @@ included, so it always reports differences; the two-game test is the real check:
 over the first 80 seconds of the fight and their checks agree (162-172 checks a run), and so do
 their scripts, frame for frame (`-TraceScript`, `scriptcmp.py`: every process made and every
 number drawn on the same frame in both games).
+
+### What a rollback costs
+
+A rollback runs its frames again and then the frame due, and all of it before the next vertical
+blank, or the game misses it and the fight slows down: what players of a lagged match feel as slow
+and muddy. Every 10 s of a fight that rolls back the log has the rollbacks (`mk9 net: n rollbacks
+in 10 s, m frames run again (x ms a frame)`, split into putting memory back, the game's own frames,
+waiting for the rendering thread and the page logs), what keeping frames costs every frame (`frames
+kept for rollback`), and from the GPU what the frames run again skipped (`Frames nobody sees`).
+Since 0.5.1 (numbers from the two-game test: 50 ms lag, 30 of jitter, both attacking, 30-40
+rollbacks every 10 s of the fight's busiest stretch):
+
+- **Keeping frames.** A fault in a 64 KB block of the simulation heap that frames write densely (4
+  pages or more, measured every 16th frame) takes every clean page of the block at once and lifts
+  the protection of runs of pages in one call (`MK9_RB_NO_AHEAD=1`: page by page), undo logs keep
+  their buffers from one frame to the next, and a restore puts each page back once, from the oldest
+  log, protecting in runs: the fault handler went from 11 ms a frame to about 2, a restore from
+  9.5 ms to 3.
+- **Frames nobody sees.** Only the frame due is shown, yet the GPU drew every frame run again in
+  full, and each waited for a vertical blank: MK9's swap ends in a `WAIT_REG_MEM` on a word of the
+  D3D device that the guest's vertical blank interrupt clears when it flips the image
+  (`sub_82BF65B0`, from the queue `sub_82BF66D0` fills, one flip a blank), so the GPU ran one frame
+  a 60 Hz blank and the rendering thread waited behind it for room in the command ring: a frame
+  run again took 14.1 ms, 13 of them that wait, rollbacks took up to 108-114 ms, and that stretch
+  of the fight ran at 53 frames a second (its longest frame 115-121 ms). A rollback now marks
+  where its frames start and end in the GPU's command stream
+  (`IGraphicsSystem::SkipDrawsFromNow`, an SDK addition; the rendering thread is held at both
+  marks; `MK9_RB_DRAW_ALL=1` draws them all), and between the marks the GPU skips the swaps and
+  every draw to a target of at least 640x320 (the frame's image, its half-size copies, the
+  1014x1014 shadow map), copies nothing in those passes' resolves (clears still happen), and when
+  a wait is not met gives the guest its vertical blank at once (up to 3 a wait). The small targets
+  are drawn as ever: the fighters' blood and damage textures (128 to 512 square), the floor's
+  (2048x256), the quarter-size effects. A frame run again now takes 6.5 ms (3.9 the game's own,
+  1.7 the rendering thread, 0.9 the page logs), the longest rollback 37-40 ms, and the same
+  stretch ran at 58 frames a second (its longest frame 46-60 ms); the checks and the scripts of
+  both games agreed as before. The two games' blood differs a little either way
+  (snapshots of both at the same frames: a spot on a fighter's arm, the floor's splashes; 0.05-0.6 %
+  of the screen with the skip, 1.1-1.5 % with every frame drawn): the GPU's textures do not go
+  back, so the blood of a hit a rollback took back stays painted.
 
 Diagnostics: `MK9_RB_TRACE_FOREIGN=1` (who writes which pages first, stacks of foreign writers),
 `MK9_GMALLOC_TRACE=1` (frees traced, double frees explained), `MK9_NET_SITES_LOG` (draws per

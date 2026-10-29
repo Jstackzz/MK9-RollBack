@@ -24,6 +24,7 @@
 //   MK9_NET_WATCH=1                      this game is a spectator: it reads every player from the
 //                                        feed and plays the match without a player of its own
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -83,6 +84,10 @@ bool FrameInput(uint32_t user, input::Pad& out);
 
 // a check both PCs compare (the game layer's state hash at the top of a frame)
 void Check(uint32_t frame, uint32_t hash);
+
+// how a rollback tells the GPU that the frames it runs again are not shown (true) and that they are
+// over (false), while the rendering thread is held: the app's graphics system (at start)
+void SetDrawSkip(std::function<void(bool skip)> skip);
 
 struct Stats {
   uint32_t frames = 0, waits = 0, rollbacks = 0, max_rollback = 0, resent = 0;

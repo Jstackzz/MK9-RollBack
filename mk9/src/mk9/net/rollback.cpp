@@ -66,6 +66,23 @@ uint8_t* g_base = nullptr;
 PVOID g_veh = nullptr;
 std::vector<uint32_t> g_dirty;  // pages made writable since the last CloseFrame
 
+// 64 KB blocks of the simulation heap: the pages first written in this frame (each one a fault), and which blocks had
+// most of their pages written when last measured, whose clean pages a fault takes all at once (Take). Every 16th frame
+// takes none ahead and measures again (pages taken ahead are written without a fault, so they cannot be counted).
+// About 2,200 pages a fight frame were first written, 95 % of them in the simulation heap, five to a block, each fault
+// some 7 us. MK9_RB_NO_AHEAD=1 takes pages one at a time.
+constexpr uint16_t kDenseMin = 4;  // of a block's 16 pages
+std::vector<uint16_t> g_block_writes(0x10000, 0);
+std::vector<uint32_t> g_written_blocks;  // the blocks g_block_writes counts in this frame
+std::vector<uint8_t> g_dense(0x10000, 0);
+std::vector<uint32_t> g_dense_list;
+bool g_speculating = false;
+uint32_t g_closed_frames = 0;
+const bool g_no_ahead = [] {
+  const char* v = std::getenv("MK9_RB_NO_AHEAD");
+  return v && *v == '1';
+}();
+
 // bytes another thread owns on pages the main thread also writes
 struct Mask {
   uint64_t bits[kPage / 64] = {};
@@ -82,6 +99,25 @@ struct FrameState {
   uint64_t hash = 0;
 };
 std::deque<FrameState> g_frames;
+// frames no longer kept (the oldest past kKeepFrames, those a restore went back over): their buffers taken again by
+// new frames, so a page taken is copied into memory already there (a new frame's growing log reallocated, and every
+// page of it was first touched in the fault handler, at about 14 MB of pages a frame)
+std::vector<FrameState> g_spare_frames;
+
+void Retire(FrameState&& f) {
+  f.pages.clear();
+  f.data.clear();
+  f.closed = false;
+  f.hash = 0;
+  g_spare_frames.push_back(std::move(f));
+}
+
+FrameState& NewFrame() {
+  if (g_spare_frames.empty()) return g_frames.emplace_back();
+  g_frames.push_back(std::move(g_spare_frames.back()));
+  g_spare_frames.pop_back();
+  return g_frames.back();
+}
 std::vector<uint32_t> g_pending_pages;  // taken while no frame is open
 std::vector<uint8_t> g_pending_data;
 Stats g_stats;
@@ -161,7 +197,12 @@ void MarkVolatile(uint32_t va, uint32_t size) {
 // the first write of a page since it was protected (at va); g_lock held
 void Take(uint32_t page, uint32_t va) {
   g_stats.faults++;
-  const bool sim = SimThread(GetCurrentThreadId());
+  const DWORD tid = GetCurrentThreadId();
+  const bool sim = SimThread(tid);
+  if (tid == g_main_tid) g_stats.faults_main++;
+  else if (!g_sim_tids.empty() && tid == g_sim_tids.front()) g_stats.faults_render++;
+  else if (sim) g_stats.faults_sim++;
+  else g_stats.faults_other++;
   const bool region = page >= g_sim_region.lo && page < g_sim_region.hi;
   if (region && !sim && g_other_writes.size() < 4096) {
     OtherWrite w{va, GetCurrentThreadId(), {}};
@@ -188,13 +229,39 @@ void Take(uint32_t page, uint32_t va) {
   if (sim || region || g_shared[page >> 12]) {
     std::vector<uint32_t>& pages = g_frames.empty() || g_frames.back().closed ? g_pending_pages : g_frames.back().pages;
     std::vector<uint8_t>& data = g_frames.empty() || g_frames.back().closed ? g_pending_data : g_frames.back().data;
-    pages.push_back(page);
-    size_t at = data.size();
-    data.resize(at + kPage);
-    std::memcpy(data.data() + at, g_base + page, kPage);
-    g_stats.logged_bytes += kPage;
-    g_page[page >> 12] = kDirty;
-    g_dirty.push_back(page);
+    const auto take = [&](uint32_t p) {
+      pages.push_back(p);
+      size_t at = data.size();
+      data.resize(at + kPage);
+      std::memcpy(data.data() + at, g_base + p, kPage);
+      g_stats.logged_bytes += kPage;
+      g_page[p >> 12] = kDirty;
+      g_dirty.push_back(p);
+    };
+    if (g_block_writes[page >> 16]++ == 0) g_written_blocks.push_back(page >> 16);
+    if (region && g_speculating && g_dense[page >> 16]) {
+      // a 64 KB block of the simulation heap whose pages were mostly written when last measured: every clean page of
+      // it now, made writable in runs, one fault for what would be several. Each is copied as the frame's top left it
+      // (protected since, so written by no one); in the simulation heap a page is kept whoever writes it, so what a
+      // restore puts back is the same
+      const uint32_t lo = page & ~0xFFFFu;
+      uint32_t run = 0, count = 0;
+      for (uint32_t q = lo; q < lo + 0x10000; q += kPage) {
+        const bool mine = q == page || (g_page[q >> 12] == kClean && q >= g_sim_region.lo && q < g_sim_region.hi);
+        if (mine) {
+          take(q);
+          if (q != page) g_stats.pages_ahead++;
+          if (!count) run = q;
+          count++;
+          continue;
+        }
+        if (count) ProtectRun(run, count, false);
+        count = 0;
+      }
+      if (count) ProtectRun(run, count, false);
+      return;
+    }
+    take(page);
   } else {
     g_page[page >> 12] = kForeign;
     g_stats.foreign_pages++;
@@ -233,7 +300,12 @@ LONG CALLBACK OnFault(EXCEPTION_POINTERS* ep) {
   if (!g_base || a < uintptr_t(g_base) || a - uintptr_t(g_base) >= (uint64_t(1) << 32)) return EXCEPTION_CONTINUE_SEARCH;
   const uint32_t va = uint32_t(a - uintptr_t(g_base));
   const uint32_t page = va & ~(kPage - 1);
+  const auto entered = Clock::now();
   std::lock_guard<std::mutex> lock(g_lock);
+  struct Timed {
+    Clock::time_point t;
+    ~Timed() { g_stats.fault_us += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t).count()); }
+  } timed{entered};
   const uint8_t st = g_page[page >> 12];
   if (st == kUntracked) {
     // Disarm may have let the page go while this thread waited for the lock: retry the write
@@ -311,6 +383,13 @@ bool Arm(PPCContext& ctx, uint32_t frame) {
   std::fill(g_page.begin(), g_page.end(), kUntracked);
   std::fill(g_shared.begin(), g_shared.end(), uint8_t(0));
   g_masks.clear();
+  // the first frame measures which blocks to take whole
+  for (const uint32_t b : g_dense_list) g_dense[b] = 0;
+  g_dense_list.clear();
+  for (const uint32_t b : g_written_blocks) g_block_writes[b] = 0;
+  g_written_blocks.clear();
+  g_speculating = false;
+  g_closed_frames = 0;
   g_pending_pages.clear();
   g_pending_data.clear();
   g_stats = Stats{};
@@ -394,6 +473,9 @@ void Disarm() {
   }
   if (count) ProtectRun(run, count, false);
   g_frames.clear();
+  g_spare_frames.clear();  // the logs' memory given back between fights
+  std::vector<uint32_t>().swap(g_pending_pages);
+  std::vector<uint8_t>().swap(g_pending_data);
   g_dirty.clear();
   g_armed = false;
   REXLOG_INFO("mk9 rollback: disarmed ({} faults, {} foreign pages)", g_stats.faults, g_stats.foreign_pages);
@@ -412,11 +494,40 @@ void CloseFrame() {
     g_last_hash = f.hash;
   }
   g_stats.last_pages = uint32_t(f.pages.size());
+  {
+    uint32_t region = 0;
+    std::vector<uint32_t> blocks;
+    blocks.reserve(f.pages.size());
+    for (const uint32_t p : f.pages) {
+      if (p >= g_sim_region.lo && p < g_sim_region.hi) region++;
+      blocks.push_back(p >> 16);
+    }
+    std::sort(blocks.begin(), blocks.end());
+    g_stats.last_region_pages = region;
+    g_stats.last_blocks = uint32_t(std::unique(blocks.begin(), blocks.end()) - blocks.begin());
+  }
+  // a measuring frame: the blocks with most of their pages written are taken whole from the next frame on
+  if (!g_speculating) {
+    for (const uint32_t b : g_dense_list) g_dense[b] = 0;
+    g_dense_list.clear();
+    for (const uint32_t b : g_written_blocks)
+      if (g_block_writes[b] >= kDenseMin) {
+        g_dense[b] = 1;
+        g_dense_list.push_back(b);
+      }
+    g_stats.dense_blocks = uint32_t(g_dense_list.size());
+  }
+  for (const uint32_t b : g_written_blocks) g_block_writes[b] = 0;
+  g_written_blocks.clear();
+  g_speculating = !g_no_ahead && ++g_closed_frames % 16 != 0;
   f.closed = true;
   ProtectDirty();
   if (g_trace_foreign)
     for (uint32_t p : g_foreign_list) Protect(p, true);
-  while (g_frames.size() > size_t(kKeepFrames)) g_frames.pop_front();
+  while (g_frames.size() > size_t(kKeepFrames)) {
+    Retire(std::move(g_frames.front()));
+    g_frames.pop_front();
+  }
   g_stats.close_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
 
@@ -450,16 +561,39 @@ bool RestoreLocked(uint32_t frame, PPCContext& ctx) {
   } restoring;
   std::vector<uint32_t> touched;
   static std::vector<uint8_t> mark(0x100000, 0);
-  // newest frame first, newest entry first: the oldest copy of a page is put back last
+  // every page to put back made writable first, runs of neighbours in one call each (a call a page, twice, was
+  // most of a restore's time: about 9 ms for a rollback of 3-4 frames)
   for (auto f = g_frames.rbegin(); f != g_frames.rend(); ++f) {
-    for (size_t i = f->pages.size(); i-- > 0;) {
-      const uint32_t p = f->pages[i];
-      if (g_page[p >> 12] == kForeign || g_page[p >> 12] == kUntracked) continue;
-      if (!mark[p >> 12]) {
-        mark[p >> 12] = 1;
-        Protect(p, false);
-        touched.push_back(p);
+    for (const uint32_t p : f->pages) {
+      if (g_page[p >> 12] == kForeign || g_page[p >> 12] == kUntracked || mark[p >> 12]) continue;
+      mark[p >> 12] = 1;
+      touched.push_back(p);
+    }
+    if (f->frame == frame) break;
+  }
+  std::sort(touched.begin(), touched.end());
+  const auto protect_runs = [&](bool read_only) {
+    uint32_t run = 0, count = 0;
+    for (const uint32_t p : touched) {
+      if (count && p == run + count * kPage) {
+        count++;
+        continue;
       }
+      if (count) ProtectRun(run, count, read_only);
+      run = p;
+      count = 1;
+    }
+    if (count) ProtectRun(run, count, read_only);
+  };
+  protect_runs(false);
+  // each page put back once, from the oldest of these frames that kept it: its contents at that frame's top are its
+  // contents at this one's, nothing having written it in between (a copy from every frame that kept it, newest first,
+  // copied a page written every frame once for each frame gone back)
+  for (auto f = it; f != g_frames.end(); ++f) {
+    for (size_t i = 0; i < f->pages.size(); i++) {
+      const uint32_t p = f->pages[i];
+      if (mark[p >> 12] != 1) continue;  // foreign, untracked, or put back already
+      mark[p >> 12] = 2;
       if (g_shared[p >> 12]) {
         alignas(8) uint8_t now[kPage];
         std::memcpy(now, g_base + p, kPage);
@@ -469,14 +603,14 @@ bool RestoreLocked(uint32_t frame, PPCContext& ctx) {
         std::memcpy(g_base + p, f->data.data() + i * kPage, kPage);
       }
     }
-    if (f->frame == frame) break;
   }
   for (uint32_t p : touched) {
     mark[p >> 12] = 0;
     g_page[p >> 12] = kClean;
-    Protect(p, true);
   }
+  protect_runs(true);
   ctx = it->ctx;
+  for (auto f = it; f != g_frames.end(); ++f) Retire(std::move(*f));
   g_frames.erase(it, g_frames.end());
   g_dirty.erase(std::remove_if(g_dirty.begin(), g_dirty.end(), [](uint32_t p) { return g_page[p >> 12] != kDirty; }),
                 g_dirty.end());
@@ -498,8 +632,7 @@ void OpenFrame(uint32_t frame, PPCContext& ctx) {
 void OpenFrameLocked(uint32_t frame, PPCContext& ctx) {
   g_current = frame;
   if (!g_frames.empty() && !g_frames.back().closed && g_frames.back().frame == frame) return;
-  g_frames.emplace_back();
-  FrameState& f = g_frames.back();
+  FrameState& f = NewFrame();
   f.frame = frame;
   f.ctx = ctx;
   // pages taken between the last close and now: written before this frame ran, their contents then belong here

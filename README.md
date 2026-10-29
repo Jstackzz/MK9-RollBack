@@ -52,6 +52,11 @@ the MK9 Online server, so whoever runs it can see what went wrong.
   player. And every release presented the window about 300 times a second (frame counters read it as
   uncapped; the game itself stayed at 60): the SDK's achievement toast overlay, open the whole time, kept
   it repainting. Both fixed in 0.5.1 (docs/GAME.md, "The launcher link", "Frame rate").
+- Until 0.5.1 every rollback held the game up: the GPU emulation drew the frames a rollback runs again in
+  full, and each of them waited for the display's 60 Hz blank, so a lagged fight slowed down where it rolled
+  back (to about 53 frames a second, with rollbacks of up to 120 ms) and felt muddy. In 0.5.1 those frames
+  draw only the fighters' and the floor's blood and wait for no blank: less than half the cost a frame,
+  rollbacks of 40 ms at most on the same test (docs/GAME.md, "What a rollback costs").
 
 ## Building from source
 

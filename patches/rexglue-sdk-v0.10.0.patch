@@ -1,16 +1,82 @@
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+index da8e432..e636672 100644
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -12,7 +12,9 @@
+ #pragma once
+ 
+ #include <atomic>
++#include <chrono>
+ #include <cstring>
++#include <deque>
+ #include <functional>
+ #include <memory>
+ #include <mutex>
+@@ -120,6 +122,9 @@ class CommandProcessor {
+ 
+   void UpdateWritePointer(uint32_t value);
+ 
++  // see system::IGraphicsSystem::SkipDrawsFromNow (any thread)
++  void SkipDrawsFromNow(bool skip);
++
+   void ExecutePacket(uint32_t ptr, uint32_t count);
+ 
+   bool is_paused() const { return paused_; }
+@@ -230,6 +235,16 @@ class CommandProcessor {
+   // Shared memexport readback enable state with backend legacy-flag override support.
+   bool IsReadbackMemexportEnabled(bool legacy_backend_flag) const;
+ 
++  // Between SkipDrawsFromNow's marks: the commands are of frames nobody sees. The backends skip
++  // their swaps and their draws to full-size render targets, and count here what they skipped.
++  bool skipping_draws() const { return skipping_draws_; }
++  struct SkippedDraws {
++    uint32_t runs = 0, swaps = 0, draws = 0, resolves = 0;
++    uint32_t vblanks = 0;  // vertical blanks given at once (see ExecutePacketType3_WAIT_REG_MEM)
++    uint32_t kept = 0, kept_width = 0, kept_height = 0;  // draws done, the largest target's size
++  };
++  SkippedDraws skipped_;
++
+   memory::Memory* memory_ = nullptr;
+   system::KernelState* kernel_state_ = nullptr;
+   GraphicsSystem* graphics_system_ = nullptr;
+@@ -278,6 +293,18 @@ class CommandProcessor {
+   const char* legacy_readback_memexport_cvar_name_ = nullptr;
+ 
+  private:
++  // the write index to execute up to: the next SkipDrawsFromNow mark, if it comes first (the marks
++  // at the read index switch skipping_draws_ first)
++  uint32_t SkipMarkedEnd(uint32_t write_ptr_index);
++  void SetSkippingDraws(bool skip);
++
++  // marks not reached yet: a ring index (dwords), and whether skipping starts or ends there
++  std::mutex skip_marks_mutex_;
++  std::deque<std::pair<uint32_t, bool>> skip_marks_;
++  std::atomic<bool> skip_marks_waiting_{false};
++  bool skipping_draws_ = false;
++  std::chrono::steady_clock::time_point skipped_logged_;
++
+   reg::DC_LUT_30_COLOR gamma_ramp_256_entry_table_[256] = {};
+   reg::DC_LUT_PWL_DATA gamma_ramp_pwl_rgb_[128][3] = {};
+   uint32_t gamma_ramp_rw_component_ = 0;
 diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
-index 96d362b..12d0aa1 100644
+index 96d362b..f20365b 100644
 --- a/include/rex/graphics/d3d12/command_processor.h
 +++ b/include/rex/graphics/d3d12/command_processor.h
-@@ -365,7 +365,14 @@ class D3D12CommandProcessor : public CommandProcessor {
+@@ -365,7 +365,20 @@ class D3D12CommandProcessor : public CommandProcessor {
                                    uint32_t normalized_color_mask);
    bool UpdateBindings(const D3D12Shader* vertex_shader, const D3D12Shader* pixel_shader,
                        ID3D12RootSignature* root_signature, bool shared_memory_is_uav);
 -  bool IssueCopy_ReadbackResolvePath();
 +  bool IssueCopy_ReadbackResolvePath(bool copy);
-+  // A pass, here: the draws since the last resolve. Notes a draw of the pass, done or dropped while its
-+  // pipeline was still being created, and for a dropped one what it sampled (see IssueCopy).
-+  void NotePassDraw(bool dropped, const Shader* vertex_shader, const Shader* pixel_shader);
++  // A pass, here: the draws since the last resolve. Notes a draw of the pass: done, dropped while its
++  // pipeline was still being created (and what it sampled, see IssueCopy), or skipped in a frame
++  // nobody sees (skipping_draws, see IsSkippedTarget).
++  enum class PassDraw { kDone, kDropped, kSkipped };
++  void NotePassDraw(PassDraw draw, const Shader* vertex_shader, const Shader* pixel_shader);
++  // In frames nobody sees: whether the render target the registers describe is one whose draws are
++  // skipped (and whose passes' resolves copy nothing): the screen's size, not the small textures a
++  // game paints and keeps.
++  bool IsSkippedTarget() const;
 +  // Whether the resolve the registers describe would copy into guest memory what the pass's dropped
 +  // draws should have drawn: every draw of the pass was dropped, or a dropped one sampled memory the
 +  // copy writes. Logs each resolve it holds back.
@@ -18,7 +84,7 @@ index 96d362b..12d0aa1 100644
    bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
    bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
  
-@@ -760,6 +767,13 @@ class D3D12CommandProcessor : public CommandProcessor {
+@@ -760,6 +773,14 @@ class D3D12CommandProcessor : public CommandProcessor {
  
    // Temporary storage for memexport stream constants used in the draw.
    std::vector<draw_util::MemExportRange> memexport_ranges_;
@@ -27,6 +93,7 @@ index 96d362b..12d0aa1 100644
 +  // physical base addresses of the textures its dropped draws sampled.
 +  uint32_t pass_draws_done_ = 0;
 +  uint32_t pass_draws_dropped_ = 0;
++  uint32_t pass_draws_skipped_ = 0;
 +  bool pass_resolved_ = false;
 +  std::vector<uint32_t> pass_dropped_draw_textures_;
  };
@@ -49,6 +116,22 @@ index cd7693a..25fbe3f 100644
  
    // For host render targets.
  
+diff --git a/include/rex/graphics/graphics_system.h b/include/rex/graphics/graphics_system.h
+index ac6b056..25c6902 100644
+--- a/include/rex/graphics/graphics_system.h
++++ b/include/rex/graphics/graphics_system.h
+@@ -77,6 +77,11 @@ class GraphicsSystem : public system::IGraphicsSystem {
+   void SetInterruptCallback(uint32_t callback, uint32_t user_data) override;
+   void DispatchInterruptCallback(uint32_t source, uint32_t cpu);
+ 
++  void SkipDrawsFromNow(bool skip) override;
++  // A vertical blank now, besides the timer's (frames nobody sees wait for no display: the
++  // command processor's thread, see CommandProcessor::skipping_draws)
++  void VblankNow() { MarkVblank(); }
++
+   virtual void ClearCaches();
+   virtual void InvalidateGpuMemory();
+ 
 diff --git a/include/rex/kernel/xboxkrnl/rtl.h b/include/rex/kernel/xboxkrnl/rtl.h
 index 540f698..2445560 100644
 --- a/include/rex/kernel/xboxkrnl/rtl.h
@@ -64,6 +147,24 @@ index 540f698..2445560 100644
  X_STATUS xeRtlInitializeCriticalSectionAndSpinCount(X_RTL_CRITICAL_SECTION* cs, uint32_t cs_ptr,
                                                      uint32_t spin_count);
  
+diff --git a/include/rex/system/interfaces/graphics.h b/include/rex/system/interfaces/graphics.h
+index d54df86..e542cb9 100644
+--- a/include/rex/system/interfaces/graphics.h
++++ b/include/rex/system/interfaces/graphics.h
+@@ -79,6 +79,13 @@ class IGraphicsSystem {
+     (void)blocking;
+   }
+ 
++  // Rollback netplay runs frames again and shows only the last: true starts frames nobody sees at
++  // the commands the guest has given the GPU so far, false ends them there. The GPU skips their
++  // swaps and their draws to full-size render targets (small ones are drawn: games paint textures
++  // they keep that way), and their waits for the vertical blank get one at once. Call while the
++  // guest gives the GPU nothing (its rendering idle).
++  virtual void SkipDrawsFromNow(bool skip) { (void)skip; }
++
+   // One-shot convenience for callers that don't care about the split.
+   X_STATUS Setup(runtime::FunctionDispatcher* function_dispatcher, KernelState* kernel_state,
+                  ui::WindowedAppContext* app_context, bool with_presentation) {
 diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
 index a7ab6b3..c120291 100644
 --- a/include/rex/ui/imgui_dialog.h
@@ -182,28 +283,162 @@ index c5a2c5d..854cb82 100644
        return false;
      }
    }
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index a744375..6eb72c3 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -239,7 +239,7 @@ void CommandProcessor::WorkerThreadMain() {
+     assert_true(read_ptr_index_ != write_ptr_index);
+ 
+     // Execute. Note that we handle wraparound transparently.
+-    read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
++    read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, SkipMarkedEnd(write_ptr_index));
+ 
+     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
+     //     that many indices.
+@@ -332,6 +332,61 @@ void CommandProcessor::UpdateWritePointer(uint32_t value) {
+   write_ptr_index_event_->Set();
+ }
+ 
++// The guest writes no commands meanwhile (see IGraphicsSystem::SkipDrawsFromNow), so the write index
++// now is where its last frame ends: the worker has not passed it, and stops there to switch.
++void CommandProcessor::SkipDrawsFromNow(bool skip) {
++  uint32_t write_ptr_index = write_ptr_index_.load();
++  if (write_ptr_index == 0xBAADF00D) {
++    return;
++  }
++  std::lock_guard<std::mutex> lock(skip_marks_mutex_);
++  skip_marks_.emplace_back(write_ptr_index, skip);
++  skip_marks_waiting_ = true;
++}
++
++uint32_t CommandProcessor::SkipMarkedEnd(uint32_t write_ptr_index) {
++  if (!skip_marks_waiting_) {
++    return write_ptr_index;
++  }
++  std::lock_guard<std::mutex> lock(skip_marks_mutex_);
++  while (!skip_marks_.empty() && skip_marks_.front().first == read_ptr_index_) {
++    SetSkippingDraws(skip_marks_.front().second);
++    skip_marks_.pop_front();
++  }
++  skip_marks_waiting_ = !skip_marks_.empty();
++  if (skip_marks_.empty()) {
++    return write_ptr_index;
++  }
++  // how far ahead of the read index the mark and the write index are, around the ring
++  uint32_t ring_dwords = primary_buffer_size_ / sizeof(uint32_t);
++  uint32_t mark = skip_marks_.front().first;
++  uint32_t to_mark = (mark + ring_dwords - read_ptr_index_) % ring_dwords;
++  uint32_t to_write = (write_ptr_index + ring_dwords - read_ptr_index_) % ring_dwords;
++  return to_mark < to_write ? mark : write_ptr_index;
++}
++
++void CommandProcessor::SetSkippingDraws(bool skip) {
++  if (skip == skipping_draws_) {
++    return;
++  }
++  skipping_draws_ = skip;
++  if (skip) {
++    ++skipped_.runs;
++    return;
++  }
++  auto now = std::chrono::steady_clock::now();
++  if (now - skipped_logged_ < std::chrono::seconds(10)) {
++    return;
++  }
++  REXGPU_INFO(
++      "Frames nobody sees, {} runs of them: {} swaps, {} draws and {} resolves skipped, {} "
++      "vertical blanks given at once; {} draws done (targets up to {}x{})",
++      skipped_.runs, skipped_.swaps, skipped_.draws, skipped_.resolves, skipped_.vblanks,
++      skipped_.kept, skipped_.kept_width, skipped_.kept_height);
++  skipped_logged_ = now;
++  skipped_ = {};
++}
++
+ uint32_t CommandProcessor::ReadRegisterValue(uint32_t index) const {
+   if (index < RegisterFile::kRegisterCount) {
+     return register_file_->values[index];
+@@ -990,6 +1045,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+   bool is_memory = (wait_info & 0x10) != 0;
+ 
+   bool matched = false;
++  uint32_t vblanks_now = 0;
+   do {
+     uint32_t value = 0;
+     if (is_memory) {
+@@ -1030,6 +1086,15 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+         break;
+     }
+     if (!matched) {
++      // Frames nobody sees wait for no display. A game paces its swaps by the vertical blank (the
++      // flip of one swap's image happens at a blank, in the guest's interrupt, and the next frame
++      // waits here for it), so these get the blank at once instead of the timer's next.
++      if (skipping_draws_ && vblanks_now < 3) {
++        ++vblanks_now;
++        ++skipped_.vblanks;
++        graphics_system_->VblankNow();
++        continue;
++      }
+       // Wait.
+       if (wait >= 0x100) {
+         PrepareForWait();
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
-index 19874a5..a3f9435 100644
+index 19874a5..9a0a4a7 100644
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
-@@ -2400,6 +2400,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -1897,6 +1897,13 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+   vertex_buffers_in_sync_[0] = 0;
+   vertex_buffers_in_sync_[1] = 0;
+ 
++  // A frame nobody sees (see IssueDraw) gives the presenter nothing to show, but ends.
++  if (skipping_draws()) {
++    ++skipped_.swaps;
++    EndSubmission(true);
++    return;
++  }
++
+   if (!graphics_system_)
+     return;
+   ui::Presenter* presenter = graphics_system_->presenter();
+@@ -2327,6 +2334,20 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   bool memexport_used_pixel = pixel_shader && (pixel_shader->memexport_eM_written() != 0);
+   bool memexport_used = memexport_used_vertex || memexport_used_pixel;
+ 
++  // A frame nobody sees draws nothing to the screen's targets; memory it exports is written still.
++  if (skipping_draws() && !memexport_used) {
++    if (IsSkippedTarget()) {
++      ++skipped_.draws;
++      NotePassDraw(PassDraw::kSkipped, nullptr, nullptr);
++      return true;
++    }
++    draw_util::Scissor scissor;
++    draw_util::GetScissor(regs, scissor);
++    ++skipped_.kept;
++    skipped_.kept_width = std::max(skipped_.kept_width, scissor.extent[0]);
++    skipped_.kept_height = std::max(skipped_.kept_height, scissor.extent[1]);
++  }
++
+   if (!BeginSubmission(true)) {
+     return false;
+   }
+@@ -2400,6 +2421,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
    }
    if (REXCVAR_GET(async_shader_compilation) &&
        pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
-+    NotePassDraw(true, vertex_shader, pixel_shader);
++    NotePassDraw(PassDraw::kDropped, vertex_shader, pixel_shader);
      return true;
    }
  
-@@ -2694,6 +2695,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -2694,6 +2716,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
      }
    }
  
-+  NotePassDraw(false, nullptr, nullptr);
++  NotePassDraw(PassDraw::kDone, nullptr, nullptr);
 +
    if (memexport_used) {
      // Make sure this memexporting draw is ordered with other work using shared
      // memory as a UAV.
-@@ -2877,19 +2880,87 @@ bool D3D12CommandProcessor::IssueCopy() {
+@@ -2877,19 +2901,105 @@ bool D3D12CommandProcessor::IssueCopy() {
    if (!BeginSubmission(true)) {
      return false;
    }
@@ -214,7 +449,12 @@ index 19874a5..a3f9435 100644
 +  // fighters' damage textures that way, and a pass dropped whole at a fight's first hit copied the last
 +  // frame's image (the arena and the HUD) from EDRAM into one, which the fighter then wore in stripes
 +  // for the rest of the fight. Such a resolve copies nothing; the destination keeps its last contents.
-+  bool copy = !IsResolveOfDroppedDraws();
++  // Nor does a resolve of a pass whose draws a frame nobody sees skipped (see IssueDraw): EDRAM does
++  // not hold what they would have drawn either.
++  bool copy = !pass_draws_skipped_ && !IsResolveOfDroppedDraws();
++  if (pass_draws_skipped_) {
++    ++skipped_.resolves;
++  }
 +  pass_resolved_ = true;
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve));
    if (readback_mode == ReadbackResolveMode::kDisabled) {
@@ -226,19 +466,23 @@ index 19874a5..a3f9435 100644
 +  return IssueCopy_ReadbackResolvePath(copy);
 +}
 +
-+void D3D12CommandProcessor::NotePassDraw(bool dropped, const Shader* vertex_shader,
++void D3D12CommandProcessor::NotePassDraw(PassDraw draw, const Shader* vertex_shader,
 +                                         const Shader* pixel_shader) {
 +  if (pass_resolved_) {
 +    pass_resolved_ = false;
 +    pass_draws_done_ = 0;
 +    pass_draws_dropped_ = 0;
++    pass_draws_skipped_ = 0;
 +    pass_dropped_draw_textures_.clear();
 +  }
-+  if (!dropped) {
++  if (draw == PassDraw::kDone) {
 +    ++pass_draws_done_;
 +    return;
-   }
--  return IssueCopy_ReadbackResolvePath();
++  }
++  if (draw == PassDraw::kSkipped) {
++    ++pass_draws_skipped_;
++    return;
++  }
 +  ++pass_draws_dropped_;
 +  for (const Shader* shader : {vertex_shader, pixel_shader}) {
 +    if (!shader) {
@@ -254,10 +498,19 @@ index 19874a5..a3f9435 100644
 +  }
 +}
 +
++// The screen's targets are at least 640x320 (its own image, half-size copies, shadows); the
++// textures Mortal Kombat 9 paints its fighters' blood and damage into are 128 to 512 square.
++bool D3D12CommandProcessor::IsSkippedTarget() const {
++  draw_util::Scissor scissor;
++  draw_util::GetScissor(*register_file_, scissor);
++  return scissor.extent[0] >= 640 && scissor.extent[1] >= 320;
++}
++
 +bool D3D12CommandProcessor::IsResolveOfDroppedDraws() {
 +  if (!pass_draws_dropped_) {
 +    return false;
-+  }
+   }
+-  return IssueCopy_ReadbackResolvePath();
 +  draw_util::ResolveInfo resolve_info;
 +  bool fixed_16_truncated = render_target_cache_->IsFixed16TruncatedToMinus1To1();
 +  if (!draw_util::GetResolveInfo(*register_file_, *memory_,
@@ -318,6 +571,23 @@ index dd321a5..57d0078 100644
      draw_util::ResolveCopyShaderConstants copy_shader_constants;
      uint32_t copy_group_count_x, copy_group_count_y;
      draw_util::ResolveCopyShaderIndex copy_shader =
+diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
+index 8f2fcb0..3c50529 100644
+--- a/src/graphics/graphics_system.cpp
++++ b/src/graphics/graphics_system.cpp
+@@ -288,6 +288,12 @@ void GraphicsSystem::EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_siz
+   command_processor_->EnableReadPointerWriteBack(ptr, block_size_log2);
+ }
+ 
++void GraphicsSystem::SkipDrawsFromNow(bool skip) {
++  if (command_processor_) {
++    command_processor_->SkipDrawsFromNow(skip);
++  }
++}
++
+ void GraphicsSystem::SetInterruptCallback(uint32_t callback, uint32_t user_data) {
+   interrupt_callback_ = callback;
+   interrupt_callback_data_ = user_data;
 diff --git a/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp b/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
 index 8b862fc..a83e3d7 100644
 --- a/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp

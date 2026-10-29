@@ -1,6 +1,7 @@
 #pragma once
 // What rollback needs to know about UE3's threads in MK9 (see engine.cpp).
 #include <cstdint>
+#include <string>
 
 namespace mk9::engine {
 
@@ -23,5 +24,10 @@ bool IsSimulationThread(uint32_t host_tid);
 // lets them go. Main thread, top of a frame; a second Hold is the same hold.
 bool Hold(int timeout_ms = 200);
 void Release();
+
+// Where the rendering thread was while Hold waited for it, sampled every 100 us while on: the guest's
+// return address and its two callers, most seen first, with the share of samples ("" when none)
+void SampleRenderWaits(bool on);
+std::string TakeRenderWaitSamples(int top);
 
 }  // namespace mk9::engine

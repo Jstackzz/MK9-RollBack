@@ -680,10 +680,71 @@ bool StartRolling(PPCContext& ctx) {
   return true;
 }
 
+// What rollbacks cost, for the log every 10 s of a fight that rolls back (and at its end): putting the memory
+// back, and in the frames run again the game's own frame, the wait for the rendering thread to have drawn it
+// (engine::Hold), and the pages' undo logs
+struct ReplayTimes {
+  uint32_t rollbacks = 0, frames = 0;
+  double restore_ms = 0, run_ms = 0, render_ms = 0, logs_ms = 0, longest_ms = 0;
+};
+ReplayTimes g_replay;
+Clock::time_point g_replay_since{};
+
+// the GPU told that frames run again are not shown (SetDrawSkip); MK9_RB_DRAW_ALL has them drawn (comparisons)
+std::function<void(bool)> g_draw_skip;
+void SkipDraws(bool skip) {
+  static const bool draw_all = std::getenv("MK9_RB_DRAW_ALL") != nullptr;
+  if (g_draw_skip && !draw_all) g_draw_skip(skip);
+}
+
+double Ms(Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); }
+
+void LogReplayTimes(bool now) {
+  const auto t = Clock::now();
+  static rb::Stats last_rb{};
+  static uint32_t last_frames = 0;
+  if (g_replay_since == Clock::time_point{}) {
+    g_replay_since = t;
+    last_rb = rb::GetStats();
+    last_frames = g_stats.frames;
+  }
+  if (!now && t - g_replay_since < std::chrono::seconds(10)) return;
+  const ReplayTimes& r = g_replay;
+  if (r.rollbacks)
+    REXLOG_INFO("mk9 net: {} rollbacks in {:.0f} s, {} frames run again ({:.1f} ms a frame): putting memory back {:.1f} "
+                "ms, the game's frames {:.1f} ms, waiting for the rendering thread {:.1f} ms, page logs {:.1f} ms; "
+                "longest rollback {:.1f} ms",
+                r.rollbacks, Ms(t - g_replay_since) / 1000.0, r.frames,
+                r.frames ? (r.run_ms + r.render_ms + r.logs_ms) / r.frames : 0.0, r.restore_ms, r.run_ms, r.render_ms,
+                r.logs_ms, r.longest_ms);
+  if (const std::string where = engine::TakeRenderWaitSamples(4); !where.empty())
+    REXLOG_INFO("mk9 net: the rendering thread while frames run again waited for it: {}", where);
+  // what keeping the frames costs every frame, rolled back or not: the pages first written (each a fault)
+  const rb::Stats s = rb::GetStats();
+  const uint32_t frames = g_stats.frames - last_frames;
+  if (frames)
+    REXLOG_INFO("mk9 net: frames kept for rollback: {:.0f} pages first written a frame ({:.0f} by the main thread, {:.0f} "
+                "the rendering thread, {:.0f} other simulation threads, {:.0f} others; {:.2f} ms in the fault handler, "
+                "{:.1f} MB logged, {:.0f} pages taken ahead with their block); the last frame {} pages, {} in the "
+                "simulation heap, in {} 64 KB blocks, {} blocks taken whole; close {:.2f} ms",
+                double(s.faults - last_rb.faults) / frames, double(s.faults_main - last_rb.faults_main) / frames,
+                double(s.faults_render - last_rb.faults_render) / frames, double(s.faults_sim - last_rb.faults_sim) / frames,
+                double(s.faults_other - last_rb.faults_other) / frames,
+                double(s.fault_us - last_rb.fault_us) / 1000.0 / frames,
+                double(s.logged_bytes - last_rb.logged_bytes) / frames / (1024.0 * 1024.0),
+                double(s.pages_ahead - last_rb.pages_ahead) / frames, s.last_pages, s.last_region_pages, s.last_blocks,
+                s.dense_blocks, s.close_ms);
+  last_rb = s;
+  last_frames = g_stats.frames;
+  g_replay = {};
+  g_replay_since = t;
+}
+
 void StopRolling() {
   if (!g_rolling) return;
   rb::Disarm();
   g_rolling = false;
+  LogReplayTimes(true);
   REXLOG_INFO("mk9 net: lockstep from frame {} of match {} ({} rollbacks so far, longest {} frames)", g_frame,
               g_match, g_stats.rollbacks, g_stats.max_rollback);
 }
@@ -713,28 +774,47 @@ bool CorrectGuesses(PPCContext& ctx, uint8_t* base) {
   if (wrong >= g_frame) return true;
   const uint32_t now = g_frame;
   const PPCContext top = ctx;
+  const auto t0 = Clock::now();
   if (!rb::Restore(wrong, ctx)) {
     ctx = top;
     REXLOG_ERROR("mk9 net: cannot go back to frame {} from {}", wrong, now);
     return false;
   }
+  g_replay.restore_ms += Ms(Clock::now() - t0);
   game::RolledBack(wrong);
   frame::SetCount(frame::Count() - (now - wrong));
+  // nobody sees the frames run again: the GPU skips drawing them (the rendering thread is held, so all it was given
+  // so far is of the frames before)
+  SkipDraws(true);
+  engine::SampleRenderWaits(true);
   for (uint32_t f = wrong; f < now; f++) {
+    const auto a = Clock::now();
     g_frame = f;
     SetFrameInputs(f);
     ctx = top;  // the registers at the top of a frame are GuardedMain's loop's, the same every frame
     rb::OpenFrame(f, ctx);
     Tentative(f, ctx, base);
     engine::Release();
+    const auto b = Clock::now();
     frame::RunAgain(ctx, base);  // its end hook moves g_frame on
+    const auto c = Clock::now();
     engine::Hold();
+    const auto d = Clock::now();
     rb::CloseFrame();
+    g_replay.logs_ms += Ms(b - a) + Ms(Clock::now() - d);
+    g_replay.run_ms += Ms(c - b);
+    g_replay.render_ms += Ms(d - c);
   }
+  engine::SampleRenderWaits(false);
+  SkipDraws(false);
   ctx = top;
   g_frame = now;
   g_stats.rollbacks++;
   g_stats.max_rollback = std::max(g_stats.max_rollback, now - wrong);
+  g_replay.rollbacks++;
+  g_replay.frames += now - wrong;
+  g_replay.longest_ms = std::max(g_replay.longest_ms, Ms(Clock::now() - t0));
+  LogReplayTimes(false);
   return true;
 }
 
@@ -863,6 +943,8 @@ void OnEnd(PPCContext&, uint8_t*) {
 }
 
 }  // namespace
+
+void SetDrawSkip(std::function<void(bool skip)> skip) { g_draw_skip = std::move(skip); }
 
 const char* StatusName(Status s) {
   switch (s) {

@@ -124,6 +124,59 @@ bool GuestReadable(uint32_t a, size_t n) {
   return p && Readable(p, n);
 }
 
+// Guest memory crash.dmp takes besides what it finds itself: a debugger follows host pointers, and guest
+// addresses are offsets into guest memory it cannot follow. The crashed guest thread's stack from 1 KB
+// below r1 up (256 KB at most), and 1 KB around every register that holds a guest address; in host
+// addresses, the readable pages only
+struct DumpRanges {
+  struct Range {
+    ULONG64 host;
+    ULONG size;
+  } list[64];
+  int count = 0, next = 0;
+};
+DumpRanges g_dump_ranges;
+
+void AddGuest(DumpRanges& d, uint32_t lo, uint32_t hi) {
+  auto* ks = REX_KERNEL_STATE();
+  if (!ks || hi <= lo) return;
+  for (uint64_t p = lo & ~0xFFFull; p < hi && d.count < int(std::size(d.list)); p += 0x1000) {
+    const uint32_t a = std::max(uint32_t(p), lo), b = uint32_t(std::min<uint64_t>(p + 0x1000, hi));
+    if (!GuestReadable(a, b - a)) continue;
+    const auto host = reinterpret_cast<ULONG64>(ks->memory()->TranslateVirtual<const uint8_t*>(a));
+    if (d.count && d.list[d.count - 1].host + d.list[d.count - 1].size == host) d.list[d.count - 1].size += b - a;
+    else d.list[d.count++] = {host, b - a};
+  }
+}
+
+void GuestDumpRanges(DumpRanges& d, const PPCContext* g) {
+  d = DumpRanges{};
+  if (!g) return;
+  const uint32_t sp = g->r1.u32, pcr = g->r13.u32;
+  if (pcr && GuestReadable(pcr + 0x70, 8)) {
+    const uint32_t hi = game::ReadU32(pcr + 0x70), lo = game::ReadU32(pcr + 0x74);
+    if (hi > lo && sp >= lo && sp <= hi) AddGuest(d, std::max(lo, sp - 0x400), std::min(hi, sp + 0x40000));
+  }
+  const PPCRegister* r[32] = {&g->r0,  &g->r1,  &g->r2,  &g->r3,  &g->r4,  &g->r5,  &g->r6,  &g->r7,
+                              &g->r8,  &g->r9,  &g->r10, &g->r11, &g->r12, &g->r13, &g->r14, &g->r15,
+                              &g->r16, &g->r17, &g->r18, &g->r19, &g->r20, &g->r21, &g->r22, &g->r23,
+                              &g->r24, &g->r25, &g->r26, &g->r27, &g->r28, &g->r29, &g->r30, &g->r31};
+  uint32_t at[34] = {uint32_t(g->lr), g->ctr.u32};
+  for (int i = 0; i < 32; i++) at[2 + i] = r[i]->u32;
+  for (uint32_t v : at)
+    if (v >= 0x10000 && v < 0xA0000000u) AddGuest(d, (v & ~15u) - std::min(v & ~15u, 0x100u), (v & ~15u) + 0x300);
+}
+
+BOOL CALLBACK DumpMore(PVOID param, PMINIDUMP_CALLBACK_INPUT in, PMINIDUMP_CALLBACK_OUTPUT out) {
+  auto* d = static_cast<DumpRanges*>(param);
+  if (!in || !out || in->CallbackType != MemoryCallback) return TRUE;
+  if (d->next >= d->count) return FALSE;
+  out->MemoryBase = d->list[d->next].host;
+  out->MemorySize = d->list[d->next].size;
+  d->next++;
+  return TRUE;
+}
+
 const char* CodeName(DWORD code) {
   switch (code) {
     case EXCEPTION_ACCESS_VIOLATION: return "access violation";
@@ -255,6 +308,10 @@ void GuestPart(Out& out, const PPCContext* g) {
   for (int i = 0; i < 32; i += 8)
     out("  r%-2d %08X %08X %08X %08X %08X %08X %08X %08X\n", i, r[i]->u32, r[i + 1]->u32, r[i + 2]->u32,
         r[i + 3]->u32, r[i + 4]->u32, r[i + 5]->u32, r[i + 6]->u32, r[i + 7]->u32);
+  if (auto* ks = REX_KERNEL_STATE())
+    out("guest memory at host %p (in crash.dmp: this thread's stack from r1 - 1 KB up, 1 KB around each address "
+        "above)\n",
+        static_cast<const void*>(ks->memory()->virtual_membase()));
   // the guest stack's bounds from the thread's PCR (r13), all of it readable, before walking it
   const uint32_t pcr = g->r13.u32;
   if (!pcr || !GuestReadable(pcr + 0x70, 8)) return;
@@ -353,7 +410,8 @@ HANDLE CreateIn(const wchar_t* name) {
     FlushFileBuffers(f);
     CloseHandle(f);
   }
-  // the dump: the threads' stacks and what they point at, for a debugger
+  // the dump: the threads' stacks and what they point at, for a debugger, and the crashed guest thread's
+  // stack and what its registers point at (DumpRanges)
   HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll");
   using WriteDump = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUMP_EXCEPTION_INFORMATION,
                                   PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION);
@@ -363,10 +421,12 @@ HANDLE CreateIn(const wchar_t* name) {
   HANDLE d = write ? CreateIn(L"crash.dmp") : INVALID_HANDLE_VALUE;
   if (d != INVALID_HANDLE_VALUE) {
     MINIDUMP_EXCEPTION_INFORMATION mei{q.tid, q.ep, FALSE};
+    GuestDumpRanges(g_dump_ranges, q.guest && Readable(q.guest, sizeof *q.guest) ? q.guest : nullptr);
+    MINIDUMP_CALLBACK_INFORMATION more{&DumpMore, &g_dump_ranges};
     write(GetCurrentProcess(), GetCurrentProcessId(), d,
           MINIDUMP_TYPE(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo |
                         MiniDumpWithUnloadedModules),
-          q.ep ? &mei : nullptr, nullptr, nullptr);
+          q.ep ? &mei : nullptr, nullptr, &more);
     CloseHandle(d);
   }
 }

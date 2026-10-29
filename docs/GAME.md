@@ -150,7 +150,10 @@ crashed guest thread's registers and guest call stack; frames run, the launcher 
 state, the game's phase, screen and round; the modules) and `crash.dmp` (a minidump, about 1 MB, more after a stack
 overflow) into `MK9_SESSION_DIR` (else `crashes\` beside the exe). The process then ends with the crash's code; the
 launcher builds the player's report from these (LAUNCHER.md, "Crash reports"). `MK9_CRASH_TEST=<frame>[:abort|
-:overflow|:throw]` crashes on purpose; all four kinds were tested.
+:overflow|:throw]` crashes on purpose; all four kinds were tested. A debugger follows host pointers and finds none
+into guest memory, so `crash.dmp` also takes the crashed guest thread's stack (from 1 KB below r1 up, 256 KB at most)
+and 1 KB around every guest address in its registers; `crash.txt` says where guest memory sits (`guest memory at
+host ...`: guest address a is host address that plus a).
 
 ## Crashes in the game's own code
 
@@ -366,9 +369,20 @@ process made and every script random draw, with the frame and the rollbacks; `-T
   first script draws and round timer, which each PC makes when its loading ends: no checks while a fight
   loads now. Since: 4 lagged runs in a row with no DESYNC and 0 check differences, lockstep agreeing.
 - Sounds started in frames a rollback takes back keep playing (FMOD is not rolled back).
-- Seen once in about twenty test boots (2026-10-28, three games starting at the same moment): a crash in
-  `main()` before the first frame (`sub_823669D8`, a write through a null pointer, the job workers then
-  reading through one too). Not looked into yet.
+- A crash before the first frame, seen once in about 130 test boots (2026-10-28, three games starting at the
+  same moment) and in none of 107 more that tried to bring it back (2026-10-29, three or four at once with the same
+  settings). `main()` (`sub_823669D8`) stored through r31 = 0 right after engine pre-init (`sub_82576640`)
+  returned: the slots where pre-init had saved main's r30 and r31 and the address to go back to
+  (0x7018F8E8-0x7018F8FB, just under main's frame) held zeros when it put them back, and the job workers it had
+  just started read a null manager from their object (`worker+16`, in the simulation heap). So zeros landed on
+  the main thread's stack and on a heap block while pre-init ran. Not the GPU (it writes physical memory, a view
+  of its own), the stacks' fill (0xBE, not 0), APCs or the GPU interrupt (they run on contexts of their own) or the
+  file read patch (it writes back what it read); what did is open. `crash.dmp` now holds the crashed guest
+  thread's stack, so a next one shows those bytes.
+  Found on the way, harmless as things lie: pre-init appends the command line (`"default.xex"`) to a stack buffer it
+  never clears (`r31+240`). New stacks are zero on the console but 0xBE in the SDK, so the text lands after the first
+  zero byte above: the top of the performance frequency read just before, over 6 bytes of a saved r30 that main
+  never reads again.
 - Four-player TWO VS TWO (slots 2-3) is in the netplay core but untested.
 - The autopilot steers menus by fixed steps from a fresh save's cursor; the roster grid is not
   mapped yet, so the launcher cannot pick a named fighter (players pick in the game).

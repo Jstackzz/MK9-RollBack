@@ -59,15 +59,18 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
   Fighters are always picked on the game's own select screen (the start line says `p1=- p2=-`). The page says how
   many play MK9 right now, how many search (and for this page's queue), are in matches and in lobbies, and who
   searches (the server's `online` counts); a long search says when the server raised its max ping ("Max ping raised
-  to N ms to find you a match"). One game runs at a time. *Play single player while you wait* (on by default) makes
-  single player the search's game: FIND MATCH opens it (one open already is taken over, and a match's game left from
-  before closes for it), the match's game does not start yet. A match found pauses it (`winutil::freezeProcess`: the
+  to N ms to find you a match"). No game waits for a match: a match's game boots only once its match is on its way
+  (here, once it is accepted) and closes when nothing more wants it, so no game sits at its menu, where MK9 goes back
+  to its title after a minute and then plays its attract fight by itself. One game runs at a time. *Play single
+  player while you wait* (on by default) makes single player the search's game: FIND MATCH opens it (one open already
+  is taken over, a match's game left from before closes). A match found pauses it (`winutil::freezeProcess`: the
   process suspended, its window hidden), so MATCH FOUND has the screen and the foreground; ACCEPT closes it and the
-  match's game starts once it has gone, in front when it reaches its hold point; a match declined, cancelled or not
-  accepted in time lets single player run on where it stood, in front again (a search sent back to the queue waits on
-  in it). Off, the match's game boots in the background to its hold point while the search runs, ready at once.
-  CANCEL SEARCH closes the search's game either way (single player, or the match's game the search or its accepted
-  match started), unless a lobby's Ready wants it. A match found has 20 s to be accepted: MATCH FOUND stays on top of
+  match's game starts once it has gone, cold (about 30 s to its hold point, where its start line waits for it; both
+  players' games boot at about the same moment), in front when it gets there; a match declined, cancelled or not
+  accepted in time lets single player run on where it stood, in front again (sent back to the queue after accepting,
+  the search waits in single player again). Off, no game runs during the search. CANCEL SEARCH closes the search's
+  game either way (single player, or the game an accepted match started). A match found has 20 s to be accepted:
+  MATCH FOUND stays on top of
   the games (brought back in front every 400 ms while a game window takes it), plays a chime (Settings), and shows the
   opponent's connection, ranked too:
   the Wi-Fi fan (amber) or the wired bars (green) and the ping, "about N ms between you" when the server knows it
@@ -83,20 +86,25 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
   the game (on top, the controllers' even when the game kept the front: the game at its CONTINUE? menu takes no
   presses while the launcher holds it); a ranked set (first to 2) plays on by itself. When both games still wait at
   their CONTINUE? menu the next match starts right there with the game's own `rematch` (no new connection), otherwise
-  as a new match; the game comes back in front for it. A Kasual match that a game closed during, or whose games lost
+  as a new match with games booted for it; the game comes back in front for it, and closes once the series is over
+  (or 8 s after a result no series followed). A Kasual match that a game closed during, or whose games lost
   each other, does not count and the rematch is offered again (from new games): "Your game closed during the match
   against X: it does not count." A ranked one still loses the set.
 - **Lobby**: create (name, mode, optional password, best of 1/3/5, *King of the Hill*), join from the list or by its
-  5-letter code, chat, Ready. The two to play ready (both players, or the first two in a King of the Hill line), the
-  server starts the match after a 3 s countdown (STARTING IN 3, 2, 1, then MATCH IN PROGRESS); with a server before
-  0.3.0 the host's START does it. The members' table has a Connection column (the Wi-Fi or wired icon, their ping to
-  the server). START on a controller presses Ready, and after a lobby match the lobby comes back in front with Ready
-  focused, the controllers' until the next match is on its way even if the game kept the front (its game at the
-  hold point takes no presses); the game comes to the front for each match, played or watched. Leaving the lobby
-  closes its game once nothing needs it (a match it plays or watches ends first). A
-  dropped connection keeps the place 60 s: the next login takes it back, and a spectator's game watches on meanwhile.
-  *Watch selected* / *Watch* make you a spectator: each of the lobby's
-  matches plays in your game from both players' feeds (`FeedLink`, a TCP port of the launcher on 127.0.0.1).
+  5-letter code, chat, Ready. Ready starts no game (it only checks that the game is built and the disc extracted).
+  The two to play ready (both players, or the first two in a King of the Hill line), the server starts the match
+  after a 3 s countdown (STARTING IN 3, 2, 1, then MATCH IN PROGRESS), and the countdown boots both players' games
+  at once (`MatchController::lobbyMatchComing`; single player open closes first, a countdown called off closes the
+  game again); each takes its start line once at its hold point. With a server before 0.3.0 the host's START does
+  it, and the games boot at `match_found`. After the match the game closes: no game waits in a lobby. The members'
+  table has a Connection column (the Wi-Fi or wired icon, their ping to the server). START on a controller presses
+  Ready, and after a lobby match the lobby comes back in front with Ready focused, the controllers' until the next
+  match is on its way even if another window kept the front; the game comes to the front for each match, played or
+  watched. Leaving the lobby closes a game its countdown started (one playing or watching a match closes after it).
+  A dropped connection keeps the place 60 s: the next login takes it back, and a spectator's game watches on
+  meanwhile. *Watch selected* / *Watch* make you a spectator: each of the lobby's matches plays in a game booted for
+  it when it comes (`spectate`), from both players' feeds buffered meanwhile (`FeedLink`, a TCP port of the launcher
+  on 127.0.0.1), and the game closes after it.
   King of the Hill: up to 8 players in line, the first two fight (the first as P1), the winner stays, the loser
   goes to the end; a match without a result keeps the king and sends the challenger to the end, and a player who
   leaves a match or ends it gives up their place.
@@ -136,8 +144,9 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
 A controller steers the launcher as in MK3D (`GamepadNav`, SDL3): d-pad or stick moves the gold focus, A presses, B
 backs out of dialogs (never MATCH FOUND or the rematch prompt), LB/RB switch pages, START finds a match (in a lobby:
 Ready). It steers a launcher window in front, and before any other what needs an answer now (`GamepadNav::priority`)
-even when Windows kept a game in front of it: MATCH FOUND, the Rematch? prompt, the lobby's Ready after its match (the
-game behind takes no presses then). While a match is set up, played or watched the buttons are the game's alone (a
+even when Windows kept a game in front of it: MATCH FOUND (single player paused), the Rematch? prompt (the game at its
+CONTINUE? menu takes no presses), the lobby's Ready after its match (its game closed). While a match is set up, played
+or watched the buttons are the game's alone (a
 launcher left in front must not act on a fight's presses), and Sign out waits for the match's end.
 
 What the launcher shows and logs never names an address: not the opponent's (the start line's `peers=` is logged as

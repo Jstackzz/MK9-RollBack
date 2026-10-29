@@ -115,7 +115,7 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     pad_->paused = [this] { return controller_->inMatch(); };
     // what needs an answer now steers before anything, in front of the game or not (Windows may keep a game in front
     // of a window that pops up): MATCH FOUND (single player paused under it), the rematch prompt (the game at its
-    // CONTINUE? menu takes no presses), the lobby's Ready after its match (the game at its hold point takes none)
+    // CONTINUE? menu takes no presses), the lobby's Ready after its match (its game closed)
     pad_->priority = [this]() -> QWidget* {
         if (matchDialog_ && matchDialog_->isVisible()) return matchDialog_;
         if (rematchDialog_ && rematchDialog_->isVisible()) return rematchDialog_;

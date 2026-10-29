@@ -420,6 +420,7 @@ void LobbyPage::showLobby(const QJsonObject& lobby) {
     // who must be ready for the host's START: both players, or the first two in a King of the Hill line
     bool allReady = koth ? playersIn >= 2 : playersIn == 2;
     bool meReady = false, meWatching = false;
+    int myPlace = -1;
     QString myChar;
     for (int i = 0; i < members.size(); ++i) {
         const QJsonObject mem = members.at(i).toObject();
@@ -429,6 +430,7 @@ void LobbyPage::showLobby(const QJsonObject& lobby) {
         if (s(mem, "name") == server_->accountName()) {
             meReady = ready;
             meWatching = spectator;
+            myPlace = i;
             myChar = s(mem, "character");
         }
         const QString name = s(mem, "name") + (mem.value(QStringLiteral("host")).toBool() ? tr("  (host)") : QString());
@@ -482,6 +484,11 @@ void LobbyPage::showLobby(const QJsonObject& lobby) {
     const double startsIn = lobby.value(QStringLiteral("starts_in")).toDouble(-1);
     startsAtMs_ = countsDown && !inMatch && startsIn >= 0
                       ? QDateTime::currentMSecsSinceEpoch() + qint64(startsIn * 1000.0) : 0;
+    // Ready starts no game: this player's boots once the countdown for their match begins, on both PCs at once (at its
+    // hold point by the time the match is set up); a countdown called off closes it again, nothing waits in a lobby
+    const bool myMatch = !meWatching && meReady && myPlace >= 0 && (!koth || myPlace < 2);
+    if (startsAtMs_ && myMatch) controller_->lobbyMatchComing(s(lobby, "game"));
+    else if (!inMatch) controller_->lobbyMatchCalledOff();
     start_->setVisible(host && !countsDown);
     start_->setEnabled(host && allReady && !inMatch);
     start_->setText(inMatch ? tr("MATCH IN PROGRESS") : koth && playersIn >= 2 ? tr("START: %1 VS %2")

@@ -141,8 +141,8 @@ QueuePage::QueuePage(bool ranked, ServerClient* server, MatchController* control
     solo_->setChecked(cfg::soloWhileWaiting());
     solo_->setToolTip(tr("While the search runs, the game opens single player (your saves, its own menus: practice, "
                          "the ladder...), the only game running. A match found pauses it: ACCEPT closes it and the "
-                         "match's game starts, Decline goes back to it, CANCEL SEARCH closes it. Off: the match's game "
-                         "waits in the background instead, ready at once."));
+                         "match's game starts, Decline goes back to it, CANCEL SEARCH closes it. Off: no game runs "
+                         "while you search; the match's game starts when you accept."));
     mm->addWidget(solo_);
     delayInfo_ = ui::label(QString(), "Muted");
     delayInfo_->setWordWrap(true);
@@ -622,7 +622,7 @@ void QueuePage::updateButton() {
         clock_.stop();
         timer_->clear();
     } else {
-        find_->setText(p == P::Playing || p == P::Starting || p == P::Finishing ? tr("IN MATCH") : tr("BUSY"));
+        find_->setText(p == P::Playing || p == P::Starting ? tr("IN MATCH") : tr("BUSY"));
         find_->setEnabled(false);
         clock_.stop();
         timer_->clear();

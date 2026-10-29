@@ -29,8 +29,8 @@ public:
     std::function<void()> onStart;
     std::function<bool()> paused;
     // the launcher window the controllers steer before any other, in front or not (nullptr: none): what needs an
-    // answer now, over a game that takes no presses meanwhile (MATCH FOUND over single player paused, the rematch
-    // prompt over the game held at its CONTINUE? menu, a lobby's Ready with the game at its hold point)
+    // answer now, with no game taking presses meanwhile (MATCH FOUND over single player paused, the rematch prompt
+    // over the game held at its CONTINUE? menu, a lobby's Ready after its match, that game closed)
     std::function<QWidget*()> priority;
     // a dialog that B leaves alone (its own buttons decide)
     static void keepFromBack(QWidget* dialog);

@@ -24,3 +24,26 @@ ConvertThreadToFiber = 0x82BDC240
 ConvertFiberToThread = 0x82BDC2D0
 DeleteFiber = 0x82BDC320
 SwitchToFiber = 0x82BDC380
+
+# Checks inserted into the game's code (mk9/src/mk9/guards.cpp): where its own code went on through a
+# pointer that can be empty here and crashed, the function's own way out instead.
+# sub_82A30C20, a script command spawning an effect: none came back (every effect in use, mk9/fx.h)
+[[midasm_hook]]
+name = "Mk9SpawnFailed"
+address = 0x82A30CC8          # cmplwi cr6,r3,0 after the spawn
+registers = ["r3"]
+jump_address_on_true = 0x82A30C5C   # li r3,-1: its failure exit
+
+# sub_828E4720 spawning an effect: none came back
+[[midasm_hook]]
+name = "Mk9EffectMissing"
+address = 0x828E4890          # lwz r10,168(r3)
+registers = ["r3"]
+jump_address_on_true = 0x828E4898   # it returns what it got
+
+# sub_82A569E0, run by a rendering command: the render object's entry it sets is not there
+[[midasm_hook]]
+name = "Mk9RenderEntryMissing"
+address = 0x82A56A10          # stw r10,32(r11)
+registers = ["r11"]
+return_on_true = true

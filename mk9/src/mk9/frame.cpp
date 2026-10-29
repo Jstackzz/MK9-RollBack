@@ -3,9 +3,11 @@
 #include "mk9/frame.h"
 #include "mk9/crash.h"
 #include "mk9/diag.h"
+#include "mk9/fx.h"
 #include "mk9/game.h"
 #include "mk9/gmalloc.h"
 #include "mk9/link.h"
+#include "mk9/names.h"
 #include "mk9/snap.h"
 
 namespace mk9::fibers {
@@ -254,6 +256,7 @@ REX_HOOK_RAW(sub_823621F8) {
   mk9::snap::OnFrame(n);
   mk9::diag::OnFrame(n);
   mk9::link::OnFrame(n);
+  mk9::names::OnFrame(n);
 
   // the frame rate, every ten seconds of frames
   static auto since = std::chrono::steady_clock::now();
@@ -261,11 +264,12 @@ REX_HOOK_RAW(sub_823621F8) {
   if (n - since_frames >= 600) {
     auto now = std::chrono::steady_clock::now();
     double s = std::chrono::duration<double>(now - since).count();
+    const mk9::fx::Stats fx = mk9::fx::GetStats();
     REXLOG_INFO("mk9: frame {}: {:.1f} frames/s ({} under 15 ms, {} over 20 ms, longest {:.1f} ms), timer {}, "
-                "{} fiber switches",
+                "{} fiber switches, {} effects taken ({} with every one in use, {} made room)",
                 n, double(n - since_frames) / s, g_pacing.early, g_pacing.late,
                 std::chrono::duration<double, std::milli>(g_pacing.longest).count(), mk9::game::RoundTimer(),
-                mk9::fibers::Switches());
+                mk9::fibers::Switches(), fx.taken, fx.empty, fx.reclaimed);
     since = now;
     since_frames = n;
     g_pacing.early = g_pacing.late = 0;

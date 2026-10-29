@@ -5,6 +5,7 @@
 //
 //   start mode=versus|tag|tyl|practice slot=0 players=2 local_port=7001 peers=1@1.2.3.4:7002[,...]
 //         delay=2 netcode=rollback|lockstep seed=N match=<id> [p1=..] [p2=..] [p3=..] [p4=..]
+//         [p1_name=.. p2_name=..]  the players' account names, shown over the fight (mk9/names.h)
 //         (remote=ip:port with side=1|2 is taken for a two-player match too)
 //         [feed=127.0.0.1:port]  the launcher's spectator feed: this game writes its part there
 //   start mode=... watch=1 feed=127.0.0.1:port players=2 seed=N match=<id>
@@ -38,6 +39,7 @@
 
 #include "mk9/autopilot.h"
 #include "mk9/crash.h"
+#include "mk9/names.h"
 #include "mk9/net/netplay.h"
 
 namespace mk9::link {
@@ -168,6 +170,7 @@ void Start(const Command& c) {
     if (size_t at = st.log.find("{slot}"); at != std::string::npos) st.log.replace(at, 6, std::to_string(slot));
   }
   g_online = plan.mode != autopilot::Mode::Practice && (!st.peers.empty() || st.watch);
+  names::SetPlayers(g_online ? Key(c, "p1_name") : std::string(), g_online ? Key(c, "p2_name") : std::string());
   if (g_online) {
     net::Configure(st);
     net::RequestMeet(plan.seed);  // at the hold point, every player's game at its next frame
@@ -192,6 +195,7 @@ void Park() {
   autopilot::Park();
   g_in_match = false;
   g_online = false;
+  names::SetPlayers(std::string(), std::string());
   crash::SetNote(crash::Note::Match, "");
   REXLOG_INFO("mk9 link: park");
 }

@@ -74,6 +74,9 @@ constexpr auto kBarrierTimeout = std::chrono::seconds(60);
 // rollback: frames run ahead of the last input someone sent, at most (well within what rollback
 // keeps, rb::kKeepFrames)
 constexpr uint32_t kMaxPredict = 8;
+// how far ahead of this game's frame a peer's inputs and checks are kept, at most (a spectator's feed:
+// it may watch far behind the players); what lies beyond is left out
+constexpr uint32_t kMaxAhead = 600, kMaxFeedAhead = 60 * 3600;
 
 struct Wire {
   uint16_t buttons = 0;
@@ -247,8 +250,11 @@ void SendInputs(PeerState& p) {
 // what a spectator's feed brought for matches it has not reached yet (the feed sends each once)
 std::map<uint16_t, std::vector<std::string>> g_feed_later;
 
+uint32_t Horizon() { return g_frame + (g_cfg.watch ? kMaxFeedAhead : kMaxAhead); }
+
 void TakeInputs(PeerState* p, uint32_t first, int count, const uint8_t* at, int room) {
   for (int i = 0; i < count && i * 8 + 8 <= room; i++) {
+    if (first + uint32_t(i) > Horizon()) break;
     Wire in;
     std::memcpy(&in, at + i * 8, 8);
     p->inputs.emplace(first + uint32_t(i), in);
@@ -307,7 +313,7 @@ void HandlePacket(const uint8_t* b, int n) {
     TakeInputs(p, u32(20), b[24], b + 25, n - 25);
   } else if (type == kFeedOwn && n >= 13 && match == g_match) {
     TakeInputs(p, u32(8), b[12], b + 13, n - 13);
-  } else if ((type == kCheck || type == kFeedCheck) && n >= 16 && match == g_match) {
+  } else if ((type == kCheck || type == kFeedCheck) && n >= 16 && match == g_match && u32(8) <= Horizon()) {
     p->checks[u32(8)] = u32(12);
   } else if ((type == kBye || type == kFeedEnd) && match == g_match) {
     p->left = true;
@@ -420,6 +426,23 @@ void Receive() {
     int fl = sizeof from;
     int n = recvfrom(g_sock, reinterpret_cast<char*>(b), sizeof b, 0, reinterpret_cast<sockaddr*>(&from), &fl);
     if (n < 8) return;
+    uint32_t magic;
+    std::memcpy(&magic, b, 4);
+    if (magic != kMagic) continue;  // not a game's (a launcher's punch that came late)
+    // only the address this match set up for the player a packet names (their game, the server's relay or
+    // the launcher's tunnel) is heard: a game that played this PC before on this port, or anyone else who
+    // learned it, could otherwise put inputs into this match or end it
+    const PeerState* p = PeerBySlot(b[5]);
+    if (!p || from.sin_family != AF_INET || from.sin_addr.s_addr != p->addr.sin_addr.s_addr ||
+        from.sin_port != p->addr.sin_port) {
+      if (++g_stats.ignored == 1 || g_stats.ignored % 1000 == 0) {
+        char ip[INET_ADDRSTRLEN] = "?";
+        inet_ntop(AF_INET, &from.sin_addr, ip, sizeof ip);
+        REXLOG_WARN("mk9 net: a packet from {}:{}, not this match's peer: ignored ({} so far)", ip,
+                    ntohs(from.sin_port), g_stats.ignored);
+      }
+      continue;
+    }
     HandlePacket(b, n);
   }
 }

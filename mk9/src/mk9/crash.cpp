@@ -280,8 +280,8 @@ void GamePart(Out& out) {
   const net::Status st = net::GetStatus();
   if (st != net::Status::Off) {
     const net::Stats s = net::GetStats();
-    out("netplay: %s, frame %u, ping %d ms, %u rollbacks (longest %u frames), %u waits\n", net::StatusName(st),
-        net::Frame(), s.ping_ms, s.rollbacks, s.max_rollback, s.waits);
+    out("netplay: %s, frame %u, ping %d ms, %u rollbacks (longest %u frames), %u waits, %u packets from elsewhere\n",
+        net::StatusName(st), net::Frame(), s.ping_ms, s.rollbacks, s.max_rollback, s.waits, s.ignored);
   }
   if (frames > 0)  // the image is loaded and runs: its globals are there
     out("game: phase %d, screen 0x%X, round %d, timer %d, rounds won %d-%d\n", game::Phase(), game::UiScreen(),

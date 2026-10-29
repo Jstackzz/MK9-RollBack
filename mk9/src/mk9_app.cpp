@@ -17,6 +17,7 @@
 #include "mk9/crash.h"
 #include "mk9/diag.h"
 #include "mk9/link.h"
+#include "mk9/names.h"
 #include "mk9/net/netplay.h"
 #include "mk9/snap.h"
 
@@ -154,3 +155,7 @@ void Mk9App::OnPostSetup() {
 }
 
 void Mk9App::OnShutdown() {}
+
+// the players' names over an online fight (mk9/names.h)
+void Mk9App::OnConfigureFonts(ImFontAtlas* atlas) { mk9::names::ConfigureFonts(atlas); }
+void Mk9App::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) { mk9::names::CreateOverlay(drawer); }

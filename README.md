@@ -38,7 +38,12 @@ the MK9 Online server, so whoever runs it can see what went wrong.
   altogether plays through their connection to the server (a little more lag, but the match goes ahead).
 - Tested: One vs One, Two vs Two (two players), Test Your Luck, results, rematches, spectators.
   Four-player Two vs Two is not tested yet.
-- The Xbox 360 GPU emulation draws a striped texture on fighters after hits.
+- In an online match, and one you watch, each player's name stands above their health bar.
+- Most crash reports sent from 0.4.0 were the game running out of its 64 effects (sparks, blood, fire) in
+  busy scenes; since 0.5.0 the oldest effect makes room instead. Players named Cyrax's air grab, Noob
+  Saibot's teleport slam and the Church among the crashes: send the report if one still crashes.
+- The Xbox 360 GPU emulation draws a striped texture on fighters after hits: from the first hits one
+  fighter can look see-through, in bands of the arena's colours (the same happens in the Xenia emulator).
 
 ## Building from source
 

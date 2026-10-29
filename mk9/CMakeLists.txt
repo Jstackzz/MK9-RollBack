@@ -19,6 +19,7 @@ foreach(_v "${CMAKE_SOURCE_DIR}/VERSION" "${CMAKE_SOURCE_DIR}/../VERSION")
     if(NOT MK9_VERSION AND EXISTS "${_v}")
         file(READ "${_v}" MK9_VERSION)
         string(STRIP "${MK9_VERSION}" MK9_VERSION)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_v}")  # a new release builds again
     endif()
 endforeach()
 if(NOT MK9_VERSION)
@@ -39,10 +40,13 @@ set(MK9_SOURCES
     src/mk9/engine.cpp
     src/mk9/fibers.cpp
     src/mk9/frame.cpp
+    src/mk9/fx.cpp
     src/mk9/game.cpp
+    src/mk9/guards.cpp
     src/mk9/gmalloc.cpp
     src/mk9/input.cpp
     src/mk9/link.cpp
+    src/mk9/names.cpp
     src/mk9/net/netplay.cpp
     src/mk9/net/rollback.cpp
     src/mk9/net/synctest.cpp

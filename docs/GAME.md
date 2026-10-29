@@ -26,6 +26,8 @@ SDK: `git -C external\rexglue-sdk apply ..\..\patches\rexglue-sdk-v0.10.0.patch`
 |---|---|
 | `frame.cpp` | the frame boundary: FEngineLoop::Tick (`sub_823621F8`), top/end hooks, frames run again (with the rest of GuardedMain's loop), the 60 frames/s cap |
 | `crash.cpp` | crash reports: `crash.txt` and `crash.dmp` in the session folder when the game crashes (see "Crash reports") |
+| `fx.cpp`, `guards.cpp` | the game's own crashes: its pool of effects making room when full, and checks put into its code where it wrote through a null pointer (see "Crashes in the game's own code") |
+| `names.cpp` | the players' names over an online fight's health bars (see "Names over the fight") |
 | `input.cpp` | XamInputGetState / GetCapabilities / GetKeystrokeEx answered from one pad source chain: autopilot override (offline) > netplay or test scripts > the PC's controllers (remapped, `controls.cpp`) |
 | `game.cpp` | what netplay and the launcher read from MK9 (addresses below), the random generator agreement, per-call-site menu streams |
 | `net/netplay.cpp` | UDP netplay for 2-4 slots: barriers, lockstep, rollback mode, checks, the spectator feed |
@@ -45,6 +47,7 @@ SDK: `git -C external\rexglue-sdk apply ..\..\patches\rexglue-sdk-v0.10.0.patch`
 | `0x833C7A38`, `0x833C7A3C` | rounds won by player 1 / 2 (final once CONTINUE? is up) |
 | `0x833CED28`, `0x833CED24` | round number, round timer |
 | `0x834161D8` | the game's random generator (UE3 LCG; `sub_826D91C0` int, `sub_826D91E8` float, `sub_826D3088` seed) |
+| `0x833CED48` | the fight's HUD (an object of 2168 bytes, 0 outside fights): +4 its top bar's offset down the frame, a float, -146 out of sight, 0 in place |
 
 The C runtime's `rand()` is used only by FMOD (sound variations) and is not part of the simulation.
 
@@ -76,6 +79,32 @@ overflow) into `MK9_SESSION_DIR` (else `crashes\` beside the exe). The process t
 launcher builds the player's report from these (LAUNCHER.md, "Crash reports"). `MK9_CRASH_TEST=<frame>[:abort|
 :overflow|:throw]` crashes on purpose; all four kinds were tested.
 
+## Crashes in the game's own code
+
+Three of the first five player reports (0.4.0, 2026-10-28) were one crash: `sub_82A30C20`, the script command that
+spawns an effect, writing to `[r3+260]` of a spawn that returned nothing. The game's effects (sparks, blood, fire, an
+arena's ambience) come from a pool of 64 (the effect manager, vtable `0x82081C40`: in use at +640, free at +664, both
+UE3 arrays); `sub_82606510` takes one off the free list and returns 0 once it is empty, and the game's code then went
+on through the 0. Players saw it in scenes full of effects (Cyrax's air grab, Noob Saibot's teleport slam, the Church
+arena were named). A scripted fight leaves 47-48 of the 64 free and every released effect goes back (no leak under
+rollback), so the pool runs out only where the game itself spawns that much.
+
+- `fx.cpp`: when the pool is empty, the oldest effect in use is released through the game's own release
+  (`sub_82606650`) and the spawn tries again, on the main thread only (the job workers that also spawn run beside each
+  other). The 10-second status line counts the effects taken, the takes that found the pool full and the effects that
+  made room; the first time (and every hundredth) a line says so, which a crash report quotes.
+- `guards.cpp` (`[[midasm_hook]]` in `mk9_codegen.toml`): where the game's code was seen writing through a nothing it
+  takes the function's own way out instead, and logs it: the script command (`return -1`), `sub_828E4720` reading the
+  new effect's id, and the rendering command `sub_82A569E0` setting values on an entry that was not there yet (a Test
+  Your Luck fight's first seconds).
+
+`MK9_FX_TRACE=1` logs how many effects are free as the game takes them; `MK9_FX_TEST_RECLAIM=<n>` makes room as if
+the pool were full whenever fewer than n are free (tests: the scripted fight to frame 9000 with it at 62, plain and
+under the sync test rolling back 4 frames every 10, ran with no crash and the sync test's notes as before).
+
+Of the other two reports one was the rendering command above; the other, a read of `0x4` in the memory manager
+(`sub_82B0C988`) during a Test Your Luck fight with rollbacks, is not explained yet.
+
 ## Netplay
 
 Each PC is one player slot (0 = P1). All games meet at barriers and from then on every slot's
@@ -101,6 +130,13 @@ Spectators: a player's game writes its barriers, inputs and checks to the launch
 and plays the match in lockstep without a player of its own. The launcher relays feeds through
 the server (FeedLink).
 
+A game hears only its match: a UDP packet counts when it comes from the address set up for the
+slot it names (the other game, the server's relay or the launcher's tunnel), others are dropped
+(a game that played this PC before on the same port, or anyone who learned it, could otherwise
+put inputs into the match or end it; the first and every thousandth are logged, and the crash
+report counts them). Inputs and checks for frames more than 600 ahead of this game's are not
+kept (a spectator's feed: an hour ahead).
+
 ## The launcher link
 
 With `MK9_LINK=1` the launcher owns the game; see the header of `link.cpp` for the exact
@@ -110,6 +146,23 @@ the mode's select screen (ONE VS ONE, TWO VS TWO, TEST YOUR LUCK), where each pl
 their own controller; after the match it reports `result winner=N p1_rounds=.. p2_rounds=..`.
 At the CONTINUE? menu (steered by the loser's controller, as on the console) `rematch` plays the
 same fighters again, `rematch select=1` picks again, `park` quits to the main menu.
+
+## Names over the fight
+
+In an online match, and one watched, each player's account name stands just above their health
+bar (`names.cpp`, drawn with the SDK's ImGui overlay in Segoe UI Black Italic, white with a dark
+outline): P1's from where the left bar's lettering starts, P2's to where the right bar's ends, a
+long name drawn smaller rather than run into the timer. The start line's `p1_name=` and `p2_name=`
+carry them (offline matches and practice have none). They show only while the fight's top bar is
+in place (the fight's HUD, `0x833CED48`, +4: the bar slides in from above as ROUND 1 is called,
+and the names fade in once it has stopped), follow it if it slides away and go at once when the
+fight is over (the phase leaves 8: the finisher). The frame's place in the window is the
+presenter's, 16:9 as large as fits. `MK9_TEST_NAMES=Kitana|Sindel` shows names in any fight, for
+screenshots (the game's own snapshots leave the overlay out; `tools\shot.ps1` takes the window), and
+`Start-LinkLocal -Names "Kitana|Sindel"` puts them on the start lines as the launcher does; the log says
+`mk9 names: ... over the fight` at the start and `mk9 names: up over the fight` once they show. Tested
+2026-10-29: a 4K window, the names after the bars' slide-in and not during it, and an online rollback
+match driven through the link (both games showed them in round 1, `none` again after the park).
 
 ## Testing on one PC
 
@@ -221,4 +274,10 @@ process made and every script random draw, with the frame and the rollbacks; `-T
 - Four-player TWO VS TWO (slots 2-3) is in the netplay core but untested.
 - The autopilot steers menus by fixed steps from a fresh save's cursor; the roster grid is not
   mapped yet, so the launcher cannot pick a named fighter (players pick in the game).
-- GPU emulation draws a striped texture on fighters after hits (also in Xenia).
+- GPU emulation draws a striped texture on fighters after hits (also in Xenia). From the first hits of a fight one
+  fighter (not always the one hit: on the ROV path it was the other) is drawn in bands of the arena's own colours, so
+  it looks see-through, as if its shading read the scene around it (the arena's reflection, say) the wrong way.
+  Tested 2026-10-29 on the scripted fight, each with the same result: `render_target_path_d3d12=rov`,
+  `readback_resolve=full`, `native_2x_msaa=false`, `gpu_allow_invalid_fetch_constants=true`,
+  `texture_cache_memory_limit_render_to_texture=256` and this port's heaps off (`MK9_SIMHEAP=0`). The next step is a
+  GPU capture of the broken fighter's draw (its shaders and fetch constants).

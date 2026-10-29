@@ -86,6 +86,7 @@ void Check(uint32_t frame, uint32_t hash);
 
 struct Stats {
   uint32_t frames = 0, waits = 0, rollbacks = 0, max_rollback = 0, resent = 0;
+  uint32_t ignored = 0;  // packets that came from elsewhere than a peer
   int ping_ms = 0;
 };
 Stats GetStats();

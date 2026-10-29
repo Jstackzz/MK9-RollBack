@@ -24,4 +24,6 @@ class Mk9App : public rex::ReXApp {
   void OnPreSetup(rex::RuntimeConfig& config) override;
   void OnPostSetup() override;
   void OnShutdown() override;
+  void OnConfigureFonts(ImFontAtlas* atlas) override;
+  void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override;
 };

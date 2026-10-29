@@ -74,6 +74,10 @@ constexpr auto kBarrierTimeout = std::chrono::seconds(60);
 // rollback: frames run ahead of the last input someone sent, at most (well within what rollback
 // keeps, rb::kKeepFrames)
 constexpr uint32_t kMaxPredict = 8;
+// rollback: the first frames of a fight take no input on any PC, so no rollback goes back into them. There the game
+// sets the fight's sounds up through FMOD, which rollback does not put back, and every rollback to the fight's first
+// frame crashed in FMOD (docs/GAME.md, "Known gaps"). Half a second, inside the fight's intro
+constexpr uint32_t kQuietFrames = 30;
 // how far ahead of this game's frame a peer's inputs and checks are kept, at most (a spectator's feed:
 // it may watch far behind the players); what lies beyond is left out
 constexpr uint32_t kMaxAhead = 600, kMaxFeedAhead = 60 * 3600;
@@ -890,6 +894,7 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
     if (!autopilot::LocalPad(local) && !testinput::ScriptedPad(uint32_t(g_cfg.slot), local))
       local = input::ReadPhysical(0);
     const uint32_t at = g_frame + uint32_t(Delay());
+    if (g_cfg.rollback && g_match >= 2 && at < kQuietFrames) local = input::Pad{};  // a fight's first frames
     g_mine[at] = Pack(local);
     FeedOwn(at, g_mine[at]);
     for (PeerState& p : g_peers) SendInputs(p);

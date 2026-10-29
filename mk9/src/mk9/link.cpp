@@ -179,6 +179,10 @@ void Start(const Command& c) {
     if (size_t at = st.log.find("{match}"); at != std::string::npos) st.log.replace(at, 7, g_match);
     if (size_t at = st.log.find("{slot}"); at != std::string::npos) st.log.replace(at, 6, std::to_string(slot));
   }
+  // tests: a simulated network on what this game sends, as in a match set up from the environment (mk9/net/netplay.h)
+  if (const char* v = std::getenv("MK9_NET_LAG")) st.lag_ms = std::atoi(v);
+  if (const char* v = std::getenv("MK9_NET_JITTER")) st.jitter_ms = std::atoi(v);
+  if (const char* v = std::getenv("MK9_NET_LOSS")) st.loss_percent = std::atoi(v);
   g_online = plan.mode != autopilot::Mode::Practice && (!st.peers.empty() || st.watch);
   names::SetPlayers(g_online ? Key(c, "p1_name") : std::string(), g_online ? Key(c, "p2_name") : std::string());
   if (g_online) {

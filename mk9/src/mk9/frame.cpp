@@ -256,6 +256,7 @@ void Top(PPCContext& ctx, uint8_t* base) {
 void RunAgain(PPCContext& ctx, uint8_t* base) {
   g_replaying.store(true, std::memory_order_relaxed);
   BeforeTick(ctx, base);
+  ctx.lr = 0x823668D8;  // the tick's return address, as GuardedMain calls it (0x823668D4)
   __imp__sub_823621F8(ctx, base);
   g_frames.fetch_add(1, std::memory_order_relaxed);
   if (g_end) g_end(ctx, base);

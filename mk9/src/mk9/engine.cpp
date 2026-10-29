@@ -104,6 +104,11 @@ constexpr std::pair<uint32_t, uint32_t> kOtherThreadsGlobals[] = {
     // rollback is armed only other threads allocate from the engine heap (mk9/gmalloc.cpp)
     {0x83423BA8, 0x848},
     {0x8342EA60, 0x40},
+    // FMOD's table of the memory it uses, an entry a megabyte (built by sub_82EF4E78 with its pointer at 0x834BFF7C,
+    // kept only by FMOD's allocations and frees, sub_82EF1640 / sub_82EF0C90): FMOD's, as its heap is (mk9/gmalloc.cpp),
+    // which a restore over FMOD's allocations would leave as it was. They happen in a fight's first frames, where no
+    // rollback goes since (mk9/net/netplay.cpp, kQuietFrames); MK9_RB_TRACE_FMOD lists such writes
+    {0x834B7F78, 0x8008},
 };
 std::atomic<uint32_t> g_d3d_device{0};
 std::atomic<uint32_t> g_render_tid{0};
@@ -185,6 +190,9 @@ rex::system::object_ref<rex::system::XEvent> EventOf(uint32_t handle) {
 
 void SaveEvents(uint32_t frame) {
   std::lock_guard lock(g_events_lock);
+  // what is kept from this frame on is a frame being run again or an earlier match's (each match numbers its
+  // frames from 0, and trimming from the front would otherwise throw this frame's away)
+  g_event_states.erase(g_event_states.lower_bound(frame), g_event_states.end());
   auto& states = g_event_states[frame];
   states.clear();
   for (uint32_t h : g_events) {

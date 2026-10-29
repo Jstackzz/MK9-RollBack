@@ -203,7 +203,8 @@ and setting the round timer, until the fight's barrier puts them in step.
 - **Lockstep** (default): a frame runs once every player's input for it is there; input delay 2.
 - **Rollback** (`netcode=rollback`): frames of a fight run ahead on guessed inputs (up to 8) and a
   wrong guess puts the game back to the top of that frame and runs the frames since again with
-  the real inputs (see "Rollback" below). Menus, loading and the match's end run in lockstep.
+  the real inputs (see "Rollback" below). Menus, loading and the match's end run in lockstep, and
+  a fight's first 30 frames take no input on any PC, so no rollback goes back into them ("Known gaps").
 
 With input delay d, what a player's pad holds at the top of frame f is their input for frame f+d on
 every PC, and frame f+d plays on it. A frame's top is the top of GuardedMain's loop (`frame.cpp`):
@@ -280,6 +281,7 @@ the park).
 ```
 . tools\netplay-local.ps1; Start-NetplayLocal -Out <dir>        # two games, scripted menus and fight
 . tools\link-local.ps1;    Start-LinkLocal -Out <dir> -Spectator -Attack -Rematch -Park
+. tools\link-local.ps1;    Start-LinkLocal -Out <dir> -Netcode rollback -Delay 1 -Attack -Rematch -TraceScript -Extra "MK9_NET_LAG=50;MK9_NET_JITTER=30"
 . tools\synctest.ps1;      Start-Synctest -Out <dir> -Depth 4 -From 5400   # rollback restore test
 . tools\netplay-local.ps1; Start-NetplayLocal -Out <dir> -Mode rollback -Delay 1 -Lag 50 -Jitter 30 -AttackB -Sites
 python -I tools\netcmp.py a\net.log b\net.log                  # frame logs of two games side by side
@@ -320,7 +322,10 @@ restore is only right if the memory it puts back is the simulation's and nothing
    in its idle loop; the workers in their 2 ms idle wait; PhysX's threads in `Event::wait` or
    between tasks; the pool's threads in their DoWorkEvent wait with no work given. PhysX's events
    (start, done) are kept with every frame and set back with it (`SaveEvents`), so a step that was
-   running across a frame's top runs again.
+   running across a frame's top runs again. Until 0.5.1 a match's rematch kept none: each match
+   numbers its frames from 0, the kept states were trimmed from the lowest frame, so the last
+   match's stayed and every new one went at once, and rollbacks in a rematch's fight left PhysX's
+   events as they stood (the key presses had the same fault, "Known gaps").
 2. **Whose memory.** `GMalloc` (the MemoryManager at `0x83423BA8`) is routed from boot on
    (`gmalloc.cpp`): the simulation's threads allocate from the simulation heap (a TLSF heap in a
    region of its own, its bookkeeping inside it), FMOD (from its code or UE3's file callbacks for
@@ -330,9 +335,9 @@ restore is only right if the memory it puts back is the simulation's and nothing
    another thread writes (FMOD's file handles, a loader's buffer) is that thread's from then on.
 3. **What a restore leaves alone** (volatile bytes): the rendering command ring and its control
    block, the D3D device, every critical section outside the simulation heap (a lock's state never
-   goes back), the GPU callback's frame-time globals and the engine heap's own state. Pages other
-   threads write first are "foreign" (never put back), but a page holding volatile bytes is logged
-   whoever writes it.
+   goes back), the GPU callback's frame-time globals, the engine heap's own state and FMOD's table
+   of the memory it uses (`0x834B7F78`, below). Pages other threads write first are "foreign" (never
+   put back), but a page holding volatile bytes is logged whoever writes it.
 4. **The host.** `ReadFile` into a write-protected guest page fails in the kernel instead of
    faulting: the SDK's file read takes such pages first (`patches/`).
 5. **Whole frames.** GuardedMain's loop runs more than `FEngineLoop::Tick` each time round: before
@@ -437,6 +442,29 @@ rollbacks left them).
   from 0, the last match's kept frames stayed, and every new one was trimmed at once), and the first frame a
   fight keeps had none; both fixed.
 - Sounds started in frames a rollback takes back keep playing (FMOD is not rolled back).
+- **A rollback into a fight's first frames crashed the game** in every release with rollback until 0.5.1 (found
+  and fixed 2026-10-29): the other player saw it stop answering, and the launcher was left at CONTINUE?.
+  Lagged launcher-link tests (`Start-LinkLocal -Netcode rollback ... -Extra "MK9_NET_LAG=50;MK9_NET_JITTER=30"`,
+  possible since then) roll back from the fight's first frames, as players pressing through a fight's start do;
+  the two-game test's fights only rolled back once the scripted attacks began, a second or more in. Every such
+  run crashed the game that rolled back, in the frame it ran again first (frame 1 of the fight, back from 3 to
+  9), in FMOD (`sub_82E85748`, from the script's sound native `sub_82A38050` through `sub_82E7D078`), reading
+  through freed memory; the same with the GPU skip and the block copies off, and the same in a build of
+  f6a4cd2. In the fight's first frame the game sets the fight's sounds up through FMOD on the main thread, and
+  FMOD's heap is not rolled back, but part of its state is in tracked memory (`MK9_RB_TRACE_FMOD=1` lists the
+  pages FMOD's code writes on a simulation thread): a table of the memory it uses, an entry a megabyte at
+  `0x834B7F78` (built by `sub_82EF4E78`, written only by FMOD's allocations and frees), three pages of the
+  executable's data more, and simulation heap pages written by the game's code FMOD calls back. A restore of
+  that frame put that part back and left the rest. Every crash went back to frame 1; rollbacks to frame 5 and
+  later never crashed (60 s of a fight rolling back from frame 5 on, 36-62 times every 10 s, with FMOD's table
+  left alone), and leaving the table alone did not save frame 1. Since 0.5.1 the first 30 frames of a rollback
+  fight take no input on any PC (`kQuietFrames`, half a second inside the fight's intro, `netplay.cpp`), so no
+  rollback goes back into them, and FMOD's table is left alone with the engine heap's state (`engine.cpp`). The
+  lagged launcher-link test then played a match and its rematch to their KOs (445 and 431 rollbacks, up to 7
+  frames back) with the same results on both PCs, every check equal and both games' scripts the same frame for
+  frame (0 of 6,283 and 0 of 5,427 frames differ), the rematch's PhysX events kept and put back too (`SaveEvents`,
+  "Rollback" 1). On the way: a frame run again called the tick with the return address of the call before it
+  (`0x823668D0`, not GuardedMain's `0x823668D8`; `frame.cpp`), which only the scripts' traces saw.
 - A crash before the first frame, seen once in about 130 test boots (2026-10-28, three games starting at the
   same moment) and in none of 107 more that tried to bring it back (2026-10-29, three or four at once with the same
   settings). `main()` (`sub_823669D8`) stored through r31 = 0 right after engine pre-init (`sub_82576640`)

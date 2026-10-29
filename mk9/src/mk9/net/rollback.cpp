@@ -56,6 +56,12 @@ const bool g_trace_foreign = [] {
   const char* v = std::getenv("MK9_RB_TRACE_FOREIGN");
   return v && *v == '1';
 }();
+// MK9_RB_TRACE_FMOD=1 (diagnostics): the tracked pages a simulation thread first writes from FMOD's code (0x82DC0000 to
+// 0x82F00000, with its memory module), with the guest's stack: FMOD's state a restore would put back without its heap
+const bool g_trace_fmod = [] {
+  const char* v = std::getenv("MK9_RB_TRACE_FMOD");
+  return v && *v == '1';
+}();
 std::vector<uint32_t> g_foreign_list;  // to protect again at each CloseFrame
 uint64_t g_foreign_hits = 0;
 
@@ -223,6 +229,24 @@ void Take(uint32_t page, uint32_t va) {
         for (int i = 0; i < n; i++) chain += fmt::format(" {:08X}", returns[i]);
         REXLOG_WARN("mk9 rollback: host thread {} wrote the simulation heap at page {:08X} (guest lr {:08X}, stack{})",
                     GetCurrentThreadId(), page, uint32_t(ts->context()->lr), chain);
+      }
+    }
+  }
+  if (g_trace_fmod && sim) {
+    // a simulation thread writing tracked memory from FMOD's code (FMOD's own memory and the audio heap are FMOD's:
+    // rollback puts back what the simulation wrote, never what FMOD keeps for itself)
+    if (auto* ts = rex::runtime::ThreadState::Get(); ts && ts->context()) {
+      uint32_t returns[10];
+      returns[0] = uint32_t(ts->context()->lr);
+      const int n = 1 + game::StackReturns(*ts->context(), returns + 1, 9);
+      static std::vector<uint32_t> told;
+      if (std::any_of(returns, returns + n, [](uint32_t a) { return a >= 0x82DC0000 && a < 0x82F00000; }) &&
+          told.size() < 400 && std::find(told.begin(), told.end(), page) == told.end()) {
+        told.push_back(page);
+        std::string chain;
+        for (int i = 0; i < n; i++) chain += fmt::format(" {:08X}", returns[i]);
+        REXLOG_WARN("mk9 rollback: FMOD's code on host thread {} first wrote page {:08X} ({}) in frame {}, stack{}",
+                    tid, page, region ? "simulation heap" : "other", g_current.load(), chain);
       }
     }
   }

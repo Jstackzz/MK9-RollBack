@@ -57,6 +57,9 @@ the MK9 Online server, so whoever runs it can see what went wrong.
   back (to about 53 frames a second, with rollbacks of up to 120 ms) and felt muddy. In 0.5.1 those frames
   draw only the fighters' and the floor's blood and wait for no blank: less than half the cost a frame,
   rollbacks of 40 ms at most on the same test (docs/GAME.md, "What a rollback costs").
+- Until 0.5.1 the game crashed when a rollback went back into a fight's first frames (someone pressing buttons
+  as a fight starts, with some lag): the other player saw it stop answering. And from a rematch on, rollbacks
+  did not put back the key presses and PhysX's events they keep. Fixed in 0.5.1 (docs/GAME.md, "Known gaps").
 
 ## Building from source
 

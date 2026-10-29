@@ -189,6 +189,13 @@ QString netcode() {
 }
 int gamePort() { return get(QStringLiteral("online/game_port"), 7001).toInt(); }
 bool fullscreen() { return get(QStringLiteral("display/fullscreen"), true).toBool(); }
+bool vsync() { return get(QStringLiteral("display/vsync"), true).toBool(); }
+QSize windowSize() {
+    const QStringList wh = get(QStringLiteral("display/window_size")).toString().split(QLatin1Char('x'));
+    const QSize size = wh.size() == 2 ? QSize(wh[0].toInt(), wh[1].toInt()) : QSize();
+    return size.width() >= 320 && size.height() >= 180 ? size : QSize();
+}
+int renderScale() { return qBound(1, get(QStringLiteral("display/render_scale"), 1).toInt(), 3); }
 bool udpLoopback() { return get(QStringLiteral("dev/udp_loopback"), false).toBool(); }
 bool upnp() { return get(QStringLiteral("online/upnp"), true).toBool(); }
 bool matchSound() { return get(QStringLiteral("online/match_sound"), true).toBool(); }

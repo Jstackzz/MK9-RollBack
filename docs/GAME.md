@@ -71,6 +71,27 @@ The SDK draws on Windows' first graphics adapter, and its Optimus/PowerXpress ex
 where the drivers do not look: on a laptop with two the game ran on the slow one in the processor. `mk9.exe` exports
 them itself, and sets `d3d12_adapter` to the one Windows counts as high-performance (unless it is set already).
 
+## Tearing, window and resolution
+
+The SDK's presenter (`ui/d3d12/d3d12_presenter.cpp`) hands every frame to the swap chain at once (sync interval 0):
+the game keeps its own 60 frames a second and never waits for the display. With
+`d3d12_allow_variable_refresh_rate_and_tearing` (its default) the swap chain also allows tearing, so that a G-SYNC or
+FreeSync monitor can follow the frames; any other monitor shows a frame torn where it arrived mid-refresh. The
+launcher's V-sync (on by default) passes `--no-d3d12_allow_variable_refresh_rate_and_tearing`: a flip model swap
+chain that cannot tear, each refresh showing the newest whole frame. Nothing in the SDK logs it; the `--no-` form was
+checked on `async_shader_compilation`, which then left out every "Resolve ... not copied" line (and stalled on its
+shaders). A window's size is `window_width` / `window_height`, in logical pixels: the SDK multiplies them by the
+display's scaling (1920x1080 came out 1920x1080 at 100 %).
+
+`resolution_scale` 2 and 3 draw at 2560x1440 and 3840x2160, correctly (blood and damage too, the resolve fix above
+working the same), at 60 frames a second once a fight runs, but they stall where 1x does not, the first times
+something is drawn: on fresh saves, longest frames of 91 ms and 73 ms at 2x around a fight's start and its first hits,
+212 ms (the fight loading), 96 ms and 82 ms at 3x; 1x stays under 18 ms throughout. Two games at different
+resolutions stay in step: a lagged rollback match (50 ms, 30 of jitter, both attacking) with one at 2x and one at 1x
+had every check equal, and in the fight the same script processes frame by frame (`scriptcmp.py`: 0 of 228 frames
+with events differ); the 2x game's stalls (114 ms, 79 ms) showed in the other's frames too (longest 35 ms), as a
+player who draws at more than 1x makes the opponent wait.
+
 ## Blood and damage textures
 
 MK9 keeps the fight's blood and damage in textures it draws on the GPU: each fighter has several (128 to 512 pixels

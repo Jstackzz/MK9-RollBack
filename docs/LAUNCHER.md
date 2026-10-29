@@ -111,7 +111,17 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
   the default, or Lockstep: a match plays rollback only when both players chose it), game UDP port,
   *Play a sound when a match is found* (on), UPnP, *Hide my IP address from opponents* (off: every match of the
   player's goes through the server, `relay` in `queue_join` / `lobby_ready`, at the cost of ping for players far
-  from it), the game window (fullscreen or a window), the game's paths (table above), Python and local test ports.
+  from it), **display** (below), the game's paths (table above), Python and local test ports.
+
+  Display, all on the game's command line when it starts (the ReXGlue SDK's cvars; a game too old for one sets it
+  aside): the game window (Fullscreen, borderless at the monitor's own resolution, or a Window: `--fullscreen` /
+  `--no-fullscreen`), the window's size (1280x720, the game's own, or a 16:9 size that fits the main monitor:
+  `--window_width` / `--window_height`, divided by the display's scaling, which the SDK multiplies them by), the
+  **resolution** the game draws at (1280x720 as on the Xbox 360, or 2x / 3x: `--resolution_scale`) and **V-sync**
+  (On, the default: `--no-d3d12_allow_variable_refresh_rate_and_tearing`, a swap chain that never tears, every
+  refresh showing the newest frame whole; Off: the SDK's own presenting, each frame at once with tearing allowed,
+  which a G-SYNC or FreeSync monitor follows and any other tears across). The SDK presents with sync interval 0 either
+  way: the game keeps its own 60 frames a second and never waits for the display.
 
 A controller steers the launcher as in MK3D (`GamepadNav`, SDL3): d-pad or stick moves the gold focus, A presses, B
 backs out of dialogs (never MATCH FOUND or the rematch prompt), LB/RB switch pages, START finds a match (in a lobby:

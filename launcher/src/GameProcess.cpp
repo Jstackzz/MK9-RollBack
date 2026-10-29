@@ -5,8 +5,10 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
+#include <QScreen>
 
 #include <windows.h>
 
@@ -114,12 +116,26 @@ bool GameProcess::start(const QString& exe, QString* error, bool netMode) {
     for (auto it = extraEnv_.cbegin(); it != extraEnv_.cend(); ++it) env.insert(it.key(), it.value());
 
     // the game's paths and window as its command line takes them (the ReXGlue SDK's cvars)
+    const bool inWindow = windowed_ || !cfg::fullscreen();
     QStringList gameArgs = {
         QStringLiteral("--game_data_root=") + native(dataRoot),
         QStringLiteral("--user_data_root=") + native(saveDir_),
         QStringLiteral("--log_file=") + native(QDir(sessionDir_).filePath(QStringLiteral("game.log"))),
-        windowed_ || !cfg::fullscreen() ? QStringLiteral("--no-fullscreen") : QStringLiteral("--fullscreen"),
+        inWindow ? QStringLiteral("--no-fullscreen") : QStringLiteral("--fullscreen"),
+        // V-sync: a swap chain that allows no tearing, so each refresh shows the newest frame whole; without it the SDK
+        // shows each frame the moment it is ready, torn across a monitor without G-SYNC or FreeSync
+        cfg::vsync() ? QStringLiteral("--no-d3d12_allow_variable_refresh_rate_and_tearing")
+                     : QStringLiteral("--d3d12_allow_variable_refresh_rate_and_tearing"),
     };
+    // the window's size (a local test's two keep the game's own): the SDK takes it in logical pixels, which it scales by
+    // the display's scaling
+    if (inWindow && !windowed_ && cfg::windowSize().isValid()) {
+        const QScreen* screen = QGuiApplication::primaryScreen();
+        const qreal scale = screen ? screen->devicePixelRatio() : 1.0;
+        gameArgs << QStringLiteral("--window_width=%1").arg(qRound(cfg::windowSize().width() / scale))
+                 << QStringLiteral("--window_height=%1").arg(qRound(cfg::windowSize().height() / scale));
+    }
+    if (cfg::renderScale() > 1) gameArgs << QStringLiteral("--resolution_scale=%1").arg(cfg::renderScale());
     // the shader cache outlives the fresh saves of online games (one per instance: two games must not share it)
     if (netMode) {
         const QString cache = QDir(paths::cacheDir()).filePath(QStringLiteral("%1-online-%2").arg(gameId_).arg(instance_));

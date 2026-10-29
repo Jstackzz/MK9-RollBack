@@ -3,6 +3,7 @@
 
 #include <QJsonValue>
 #include <QSettings>
+#include <QSize>
 #include <QString>
 #include <QVariant>
 
@@ -59,6 +60,11 @@ int autoDelay(int rttMs);
 QString netcode();
 int gamePort();
 bool fullscreen();  // the game's window: fullscreen (the game's own default) or a window
+// V-sync (the default): no frame of the game ever tears, each refresh shows its newest frame whole. Off: each frame shows
+// the moment it is ready, which a G-SYNC or FreeSync monitor follows and any other may tear across
+bool vsync();
+QSize windowSize();  // the game's window when it opens in one, in pixels ({}: the game's own, 1280x720)
+int renderScale();   // what the game draws at: 1280x720 times this (1, the Xbox 360's, to 3)
 int localTestPort(int instance);
 bool udpLoopback();  // development: matches on loopback only (one-PC tests, no firewall prompt)
 bool upnp();         // open the game UDP port on the router (UPnP)

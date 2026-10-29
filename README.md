@@ -34,6 +34,8 @@ the MK9 Online server, so whoever runs it can see what went wrong.
   input delay set from the ping. How it works and how it was tested: [docs/GAME.md](docs/GAME.md#rollback).
 - The game runs at 60 frames a second at most, as on the Xbox 360. On a laptop with two graphics chips it
   uses the faster one.
+- Settings, Display: V-sync (on by default, so the picture never tears; off for a G-SYNC or FreeSync monitor), the
+  game window and its size, and the resolution the game draws at (1280x720 as on the Xbox 360, up to 3840x2160).
 - Two players who cannot reach each other play through the server; a player whose network blocks UDP
   altogether plays through their connection to the server (a little more lag, but the match goes ahead).
 - Tested: One vs One, Two vs Two (two players), Test Your Luck, results, rematches, spectators.

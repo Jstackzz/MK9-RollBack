@@ -11,6 +11,7 @@
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -19,6 +20,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScreen>
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QStorageInfo>
@@ -580,9 +582,50 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     window->addItem(tr("Fullscreen"), true);
     window->addItem(tr("Window"), false);
     window->setCurrentIndex(cfg::fullscreen() ? 0 : 1);
+    // a window's size: the game's own, then the 16:9 sizes that fit the main monitor's work area with a title bar (a
+    // size saved before that no longer fits stays on the list)
+    auto* windowSize = new QComboBox;
+    windowSize->addItem(tr("1280x720 (the game's own)"), QString());
+    const QScreen* screen = QGuiApplication::primaryScreen();
+    const QSize room = screen ? screen->availableGeometry().size() * screen->devicePixelRatio() : QSize();
+    for (const QSize& s : {QSize(1600, 900), QSize(1920, 1080), QSize(2560, 1440), QSize(3200, 1800), QSize(3840, 2160)})
+        if (!room.isValid() || (s.width() <= room.width() && s.height() + 40 <= room.height())) {
+            const QString text = QStringLiteral("%1x%2").arg(s.width()).arg(s.height());
+            windowSize->addItem(text, text);
+        }
+    const QSize savedSize = cfg::windowSize();
+    if (savedSize.isValid()) {
+        const QString text = QStringLiteral("%1x%2").arg(savedSize.width()).arg(savedSize.height());
+        if (windowSize->findData(text) < 0) windowSize->addItem(text, text);
+        windowSize->setCurrentIndex(windowSize->findData(text));
+    }
+    windowSize->setEnabled(!cfg::fullscreen());
+    windowSize->setToolTip(tr("The size of the game's picture in a window. Fullscreen always fills your monitor."));
+    auto* render = new QComboBox;
+    render->addItem(tr("1280x720 (the Xbox 360's)"), 1);
+    render->addItem(tr("2560x1440 (2x)"), 2);
+    render->addItem(tr("3840x2160 (3x)"), 3);
+    render->setCurrentIndex(cfg::renderScale() - 1);
+    render->setToolTip(tr("What the game draws at before it is fitted to your screen: sharper on a large monitor, more "
+                          "work for the graphics card. 1280x720 is the picture as the Xbox 360 drew it.\nHigher, the "
+                          "game can stall for a moment the first times it draws something new (a fight's start, its "
+                          "first hits), which in an online match your opponent feels too."));
+    auto* vsync = new QComboBox;
+    vsync->addItem(tr("On (never tears)"), true);
+    vsync->addItem(tr("Off (G-SYNC or FreeSync monitor)"), false);
+    vsync->setCurrentIndex(cfg::vsync() ? 0 : 1);
+    vsync->setToolTip(tr("On: no frame ever tears; every refresh of your monitor shows the game's newest frame whole.\n"
+                         "Off: each frame shows the moment it is ready. A G-SYNC or FreeSync monitor then follows the "
+                         "game's 60 frames a second exactly (turn G-SYNC or FreeSync on in your graphics driver); any "
+                         "other monitor tears."));
     df->addRow(tr("Game window"), window);
-    auto* displayNote = ui::label(tr("The game takes it when it starts (its --fullscreen / --no-fullscreen). The two "
-                                     "games of a local test always open in windows."), "Muted");
+    df->addRow(tr("Window size"), windowSize);
+    df->addRow(tr("Resolution"), render);
+    df->addRow(tr("V-sync"), vsync);
+    auto* displayNote = ui::label(tr("The game takes these when it starts. Without G-SYNC or FreeSync the picture is "
+                                     "smoothest with your monitor at 60, 120 or 240 Hz: at 144 or 165 Hz the game's 60 "
+                                     "frames a second cannot all show for as long. The two games of a local test open "
+                                     "in windows of the game's own size."), "Muted");
     displayNote->setWordWrap(true);
     df->addRow(QString(), displayNote);
     grid->addWidget(displayBox, 1, 1);
@@ -687,8 +730,16 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     connect(strict, &QCheckBox::toggled, this, [](bool on) { cfg::set(QStringLiteral("online/strict"), on); });
     connect(matchSound, &QCheckBox::toggled, this, [](bool on) { cfg::set(QStringLiteral("online/match_sound"), on); });
     connect(hideIp, &QCheckBox::toggled, this, [](bool on) { cfg::set(QStringLiteral("online/hide_ip"), on); });
-    connect(window, &QComboBox::currentIndexChanged, this,
-            [window] { cfg::set(QStringLiteral("display/fullscreen"), window->currentData()); });
+    connect(window, &QComboBox::currentIndexChanged, this, [window, windowSize] {
+        cfg::set(QStringLiteral("display/fullscreen"), window->currentData());
+        windowSize->setEnabled(!window->currentData().toBool());
+    });
+    connect(windowSize, &QComboBox::currentIndexChanged, this,
+            [windowSize] { cfg::set(QStringLiteral("display/window_size"), windowSize->currentData()); });
+    connect(render, &QComboBox::currentIndexChanged, this,
+            [render] { cfg::set(QStringLiteral("display/render_scale"), render->currentData()); });
+    connect(vsync, &QComboBox::currentIndexChanged, this,
+            [vsync] { cfg::set(QStringLiteral("display/vsync"), vsync->currentData()); });
     connect(python, &QLineEdit::editingFinished, this, [python] { cfg::set(QStringLiteral("tools/python"), python->text().trimmed()); });
     connect(repo, &QLineEdit::editingFinished, this, [repo] {
         cfg::set(QStringLiteral("tools/repo_root"), QDir::fromNativeSeparators(repo->text().trimmed()));

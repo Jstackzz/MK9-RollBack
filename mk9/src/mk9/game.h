@@ -12,6 +12,7 @@
 //   sub_82B2CFB0 the C runtime's rand(): state at +20 of the calling thread's CRT data. Only FMOD
 //               draws from it (sound variations), after seeding it from the clock
 #include <cstdint>
+#include <string>
 #include <vector>
 
 struct PPCContext;
@@ -75,6 +76,9 @@ void SetMainRandState(PPCContext& ctx, uint8_t* base, uint32_t state);
 uint32_t StateHash(PPCContext& ctx, uint8_t* base);
 // the values behind the last StateHash, for the per-frame log (rand_state: the game's generator)
 void LastCheckDetail(uint32_t& timer, uint32_t& rand_state);
+// what the StateHash of `frame` counted, for a desync's log (and so its report): the draws by the 64 KB of code they
+// were made from ("826D=1234"), a few lines; both players' for the same frame show what drew differently
+std::vector<std::string> CheckDraws(uint32_t frame);
 
 // at the top of a frame in sync: true once when every PC must meet again before going on (a fight
 // begins: the phase turned to kPhaseFight)

@@ -200,6 +200,20 @@ Not while a fight loads (the VS screen, phase 1): each PC finishes loading when
 it does and the fight's scripts start then, a frame or two apart from one PC to the next, drawing
 and setting the round timer, until the fight's barrier puts them in step.
 
+What a game sees must not depend on its PC. The GPU's occlusion queries (how much of something got
+drawn) decide what UE3 counts as seen, and some of the game's effects draw from their streams only
+while seen; a graphics card answers them by its own rasterizing, at the player's resolution and on
+its own time. Until 0.5.2 the SDK answered them from the host GPU (`occlusion_query_enable`, on by
+default), and two players' games went out of step in nearly every online match (10-28: 29 desyncs
+against 7 matches played out; 0.5.1: all 12 matches of its first evening lost), while two games on
+one PC, one graphics card, never did. One game answered with Xenia's fixed count and the other by
+the GPU: out of step at frame 1740 of the lagged two-game test, every script process the same frame
+for frame (the effects' draws differed, not the fighters'). The game now sets the fixed count
+(`query_occlusion_fake_sample_count`, 1000) for every query, unless the command line says otherwise.
+A desync's log (and so its report) lists the failed check's draws by the 64 KB of code they were made
+from (`mk9 net: draws at frame f by code: 826D=1234 ...`): the two players' reports side by side
+show what drew differently.
+
 - **Lockstep** (default): a frame runs once every player's input for it is there; input delay 2.
 - **Rollback** (`netcode=rollback`): frames of a fight run ahead on guessed inputs (up to 8) and a
   wrong guess puts the game back to the top of that frame and runs the frames since again with

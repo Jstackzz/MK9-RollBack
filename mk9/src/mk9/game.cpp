@@ -7,8 +7,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <map>
+#include <string>
 #include <unordered_map>
 #include <vector>
+
+#include <fmt/format.h>
 
 #include <rex/hook.h>
 #include <rex/logging.h>
@@ -18,6 +22,7 @@
 #include "mk9/frame.h"
 #include "mk9/input.h"
 #include "mk9/net/netplay.h"
+#include "mk9/net/rollback.h"
 #include "mk9/randtrace.h"
 
 REX_EXTERN(sub_82B29580);  // the C runtime's _getptd
@@ -45,6 +50,8 @@ struct SiteDraw {
   uint64_t site;
 };
 std::deque<SiteDraw> g_site_journal;
+// what the last checks counted, by the 64 KB of code the draws were made from (CheckDraws)
+std::map<uint32_t, std::map<uint16_t, uint32_t>> g_check_draws;
 // the MKScript globals around the timer (types, values, the fighters' names)
 constexpr uint32_t kScriptGlobalsLo = 0x833CE000, kScriptGlobalsHi = 0x833CF000;
 
@@ -217,8 +224,11 @@ void BeforeDraw(PPCContext& ctx) {
   TraceScriptDraw(ctx);
   const uint64_t site = DrawSite(ctx);
   const uint32_t n = g_site_draws[site]++;
-  // kept for as far back as a rollback can go (a fight draws hundreds a frame)
-  const uint32_t now = net::Frame();
+  // kept for as far back as a rollback can go (a fight draws hundreds a frame), under the frame rollback keeps them
+  // with: a frame's end, after its tick, where netplay already counts the next frame, is still that frame's, and a
+  // rollback to the next frame keeps what it drew. Kept under the next frame, a rollback there took those draws off
+  // the counts while it kept what they did, and the game that rolled back counted differently from then on
+  const uint32_t now = rb::Armed() ? rb::CurrentFrame() : net::Frame();
   g_site_journal.push_back({now, site});
   while (g_site_journal.size() > (1u << 22) ||
          (!g_site_journal.empty() && g_site_journal.front().frame + 64 < now))
@@ -247,8 +257,8 @@ void Agree(PPCContext& ctx, uint8_t* base, const mk9::net::Agreement& agreed) {
   g_site_journal.clear();
   SetGameRandState(agreed.seed);
   SetMainRandState(ctx, base, Mix(agreed.seed, 0xC0FFEEu));
-  REXLOG_INFO("mk9 game: agreed seed {:08X} (the game's generator was {:08X}, rand() {:08X})",
-              agreed.seed, before, crt_before);
+  REXLOG_INFO("mk9 game: agreed seed {:08X} (the game's generator was {:08X}, rand() {:08X}; next object id {:08X})",
+              agreed.seed, before, crt_before, ReadU32(0x83394B44));
 }
 
 bool SyncPoint() {
@@ -288,10 +298,14 @@ uint32_t StateHash(PPCContext& ctx, uint8_t* base) {
     std::fflush(sites_log);
   }
   uint32_t sites = 0x811C9DC5u;
+  auto& by_code = g_check_draws[net::Frame()];
+  by_code.clear();
   for (const auto& [site, n] : draws) {
     const uint64_t w[2] = {site, n};
     sites = Fnv(reinterpret_cast<const uint8_t*>(w), sizeof w) ^ (sites * 0x01000193u);
+    by_code[uint16_t(site >> 48)] += n;
   }
+  while (g_check_draws.size() > 16) g_check_draws.erase(g_check_draws.begin());
   // the fight's values only in a fight and at its end: outside one they still hold the last fight's,
   // which differ from game to game (a demo fight the title played, a match watched, none since boot)
   const int32_t phase = Phase();
@@ -304,6 +318,19 @@ uint32_t StateHash(PPCContext& ctx, uint8_t* base) {
 void LastCheckDetail(uint32_t& timer, uint32_t& rand_state) {
   timer = g_last_timer;
   rand_state = g_last_rand;
+}
+
+std::vector<std::string> CheckDraws(uint32_t frame) {
+  std::vector<std::string> lines;
+  const auto it = g_check_draws.find(frame);
+  if (it == g_check_draws.end()) return lines;
+  std::string line;
+  for (const auto& [code, n] : it->second) {
+    line += fmt::format("{}{:04X}={}", line.empty() ? "" : " ", code, n);
+    if (line.size() > 100) lines.push_back(std::move(line)), line.clear();  // a report's line holds 200 characters
+  }
+  if (!line.empty()) lines.push_back(std::move(line));
+  return lines;
 }
 
 }  // namespace mk9::game

@@ -60,6 +60,10 @@ the MK9 Online server, so whoever runs it can see what went wrong.
 - Until 0.5.1 the game crashed when a rollback went back into a fight's first frames (someone pressing buttons
   as a fight starts, with some lag): the other player saw it stop answering. And from a rematch on, rollbacks
   did not put back the key presses and PhysX's events they keep. Fixed in 0.5.1 (docs/GAME.md, "Known gaps").
+- Until 0.5.2 nearly every online match went out of step: each graphics card answered the game's occlusion
+  queries (how much of something got drawn) in its own way, and some of the game's effects follow those
+  answers, so two players' games drew differently and the desync check stopped the match. Since 0.5.2 every PC
+  gets the same answer (docs/GAME.md, "Netplay").
 
 ## Building from source
 

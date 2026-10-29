@@ -135,6 +135,13 @@ void Mk9App::OnPreSetup(rex::RuntimeConfig& config) {
 void Mk9App::OnPostSetup() {
   REXLOG_INFO("mk9: game data {}, saves {}", game_data_root().string(), user_data_root().string());
   mk9::crash::Install();  // again: the runtime's libraries are loaded now, and one may have put its own in
+  // The GPU's occlusion queries (how much of something got drawn) answered with a fixed count, as Xenia does: the
+  // answers decide what UE3 counts as seen, which decides what some of the game's effects do and draw, and two PCs'
+  // graphics cards (and resolutions) answer differently: their games went out of step (docs/GAME.md, "Netplay").
+  // The GPU plugin's option, there once the runtime is set up
+  if (!rex::cvar::HasNonDefaultValue("occlusion_query_enable") &&
+      !rex::cvar::SetFlagByName("occlusion_query_enable", "false"))
+    REXLOG_WARN("mk9: occlusion queries could not be set to a fixed answer");
   mk9::controls::Poll();
   mk9::testinput::Init();
   mk9::net::InitFromEnvironment();

@@ -39,6 +39,7 @@ std::array<std::atomic<uint64_t>, 4> g_polls{};
 std::mutex g_packet_lock;
 std::array<Pad, 4> g_last{};
 std::array<uint32_t, 4> g_packet{};
+std::array<Pad, 4> g_read{};  // each user's last answer
 
 rex::input::InputSystem* System() {
   auto* ks = REX_KERNEL_STATE();
@@ -97,6 +98,11 @@ void SetOverride(Source over) { g_override.store(over, std::memory_order_release
 
 uint64_t Polls(uint32_t user) { return user < 4 ? g_polls[user].load() : 0; }
 
+Pad LastRead(uint32_t user) {
+  std::lock_guard<std::mutex> lock(g_packet_lock);
+  return user < 4 ? g_read[user] : Pad{};
+}
+
 }  // namespace mk9::input
 
 namespace {
@@ -116,6 +122,10 @@ uint32_t Mk9XamInputGetState(rex::u32 user_index, rex::u32 flags,
                 mk9::frame::OnMainThread() ? "main" : "another", mk9::frame::Count());
   }
   const Pad pad = Current(user);
+  {
+    std::lock_guard<std::mutex> lock(g_packet_lock);
+    g_read[user] = pad;
+  }
   if (!pad.connected) return kErrorDeviceNotConnected;
   if (input_state) {
     uint32_t packet;
@@ -204,12 +214,15 @@ struct KeyUser {
 std::array<KeyUser, 4> g_keys;
 std::mutex g_keys_lock;
 
-// what the keys had reported at the top of each frame rollback keeps: a frame run again reads them
-// again (mk9/frame.cpp), and must see the same key events as the first time
+// what the keys had reported at the top of each frame rollback keeps, before the frame reads them: a
+// frame run again reads them again (mk9/frame.cpp), and must see the same key events as the first time
 std::map<uint32_t, std::array<KeyUser, 4>> g_keys_kept;
 
 void KeepKeys(uint32_t frame) {
   std::lock_guard<std::mutex> lock(g_keys_lock);
+  // what is kept from this frame on is a frame being run again or an earlier match's (each match numbers its
+  // frames from 0, and trimming from the front would otherwise throw this frame's away)
+  g_keys_kept.erase(g_keys_kept.lower_bound(frame), g_keys_kept.end());
   g_keys_kept[frame] = g_keys;
   while (g_keys_kept.size() > size_t(mk9::rb::kKeepFrames) + 4) g_keys_kept.erase(g_keys_kept.begin());
 }

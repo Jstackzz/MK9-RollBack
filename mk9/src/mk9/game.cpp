@@ -16,6 +16,7 @@
 #include <rex/system/xmemory.h>
 
 #include "mk9/frame.h"
+#include "mk9/input.h"
 #include "mk9/net/netplay.h"
 #include "mk9/randtrace.h"
 
@@ -183,6 +184,7 @@ uint64_t DrawSite(const PPCContext& ctx) {
 // MK9_TRACE_SCRIPT=<file> (diagnostics): what the main thread's scripts do in a match, one line each:
 //   [r]<netplay frame> draw id <process> ctx <context> ip <code> n <n> up <return addresses>
 //   [r]<netplay frame> new id <id> obj <object> by <caller> thread m|o up <return addresses>
+//   [r]<netplay frame> pads <each player's pad as the game read it before the frame's tick>
 //   rollback to <frame> from <frame>
 // ("r": a rollback runs the frame again). tools/scriptcmp.py takes back what rollbacks took back
 // and lists the frames where two games' scripts did something different
@@ -347,6 +349,26 @@ REX_HOOK_RAW(sub_829DBEF0) {
   std::fprintf(f, "%s%u new id %X obj %08X by %08X thread %c up", mk9::frame::Replaying() ? "r" : "",
                mk9::net::Frame(), mk9::game::ReadU32(obj + 4), obj, caller, mk9::frame::OnMainThread() ? 'm' : 'o');
   for (int i = 0; i < n; i++) std::fprintf(f, " %08X", returns[i]);
+  std::fputc('\n', f);
+  std::fflush(f);
+}
+
+// GuardedMain's loop reads the pads before each tick (sub_829D5230, from 0x823668C0): the "pads" lines of
+// MK9_TRACE_SCRIPT, what XamInputGetState gave the game for each player there, written as net.log writes a
+// frame's inputs (the same as the frame's own line there: the frame plays on its own inputs)
+REX_EXTERN(__imp__sub_829D5230);
+REX_HOOK_RAW(sub_829D5230) {
+  const bool loop = uint32_t(ctx.lr) == 0x823668C4;
+  __imp__sub_829D5230(ctx, base);
+  FILE* f = mk9::game::ScriptTrace();
+  if (!f || !loop || !mk9::net::InSync()) return;
+  std::fprintf(f, "%s%u pads", mk9::frame::Replaying() ? "r" : "", mk9::net::Frame());
+  for (uint32_t user = 0; user < 4; user++) {
+    const mk9::input::Pad p = mk9::input::LastRead(user);
+    if (!p.connected) continue;
+    std::fprintf(f, " %04X:%02X%02X:%02X%02X%02X%02X", p.buttons, p.left_trigger, p.right_trigger, uint8_t(p.lx >> 8),
+                 uint8_t(p.ly >> 8), uint8_t(p.rx >> 8), uint8_t(p.ry >> 8));
+  }
   std::fputc('\n', f);
   std::fflush(f);
 }

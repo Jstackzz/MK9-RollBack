@@ -636,6 +636,8 @@ Wire Guess(const PeerState& p, uint32_t f) {
   return last != p.inputs.end() ? last->second : Wire{};
 }
 
+// frame f's inputs, what the game's pad reads get until the next frame's top: GuardedMain reads the pads
+// after the top of a frame and before its tick (mk9/frame.h), so f plays on them
 void SetFrameInputs(uint32_t f) {
   if (!g_cfg.watch) g_now[g_cfg.slot] = g_mine[f];
   for (PeerState& p : g_peers) {
@@ -671,6 +673,7 @@ bool StartRolling(PPCContext& ctx) {
   engine::Hold();
   engine::ExcludeFromRollback();
   if (!rb::Arm(ctx, g_frame)) return false;
+  rb::OpenFrame(g_frame, ctx);  // the frame Arm keeps first: what goes back with it is kept too (key presses)
   g_rolling = true;
   for (PeerState& p : g_peers) p.confirmed = g_frame;
   REXLOG_INFO("mk9 net: rollback from frame {} of match {}", g_frame, g_match);

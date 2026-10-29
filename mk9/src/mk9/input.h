@@ -36,7 +36,9 @@ void SetSource(Source source);
 // and feeds its presses into netplay instead)
 void SetOverride(Source override_source);
 
-// how often the game polled each user this run (diagnostics)
+// how often the game polled each user this run, and what its last XamInputGetState for a user got
+// (diagnostics)
 uint64_t Polls(uint32_t user);
+Pad LastRead(uint32_t user);
 
 }  // namespace mk9::input

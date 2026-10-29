@@ -29,7 +29,7 @@ build copy `external\rexglue-sdk\out\win-amd64\rexgpu-xenos.dll` into `mk9\out\b
 
 | file | what |
 |---|---|
-| `frame.cpp` | the frame boundary: FEngineLoop::Tick (`sub_823621F8`), top/end hooks, frames run again (with the rest of GuardedMain's loop), the 60 frames/s cap |
+| `frame.cpp` | the frame boundary: the top of GuardedMain's loop (its first call, `sub_82366BF8`), before it reads the pads; top/end hooks around FEngineLoop::Tick (`sub_823621F8`), frames run again (the whole loop), the 60 frames/s cap |
 | `crash.cpp` | crash reports: `crash.txt` and `crash.dmp` in the session folder when the game crashes (see "Crash reports") |
 | `fx.cpp`, `guards.cpp` | the game's own crashes: its pool of effects making room when full, and checks put into its code where it wrote through a null pointer (see "Crashes in the game's own code") |
 | `names.cpp` | the players' names over an online fight's health bars (see "Names over the fight") |
@@ -204,6 +204,15 @@ and setting the round timer, until the fight's barrier puts them in step.
   wrong guess puts the game back to the top of that frame and runs the frames since again with
   the real inputs (see "Rollback" below). Menus, loading and the match's end run in lockstep.
 
+With input delay d, what a player's pad holds at the top of frame f is their input for frame f+d on
+every PC, and frame f+d plays on it. A frame's top is the top of GuardedMain's loop (`frame.cpp`):
+netplay settles the frame's inputs there, and the game reads its pads after that, before the frame's
+tick. Until 2026-10-29 a frame's top was the tick's call, which GuardedMain makes after reading the
+pads, so every frame played on the inputs of the frame before: every match, lockstep and rollback,
+played a frame behind its delay (delay 2 played as 3). With `-TraceScript` each game's trace says
+what the game read before each tick (`pads` lines), and `scriptcmp.py` holds that against the game's
+`net.log`: on every frame where an input changed, the new one, that frame.
+
 Spectators: a player's game writes its barriers, inputs and checks to the launcher's local feed
 (TCP, `feed=127.0.0.1:port`); a spectator's game (`watch=1 feed=...`) reads every player from it
 and plays the match in lockstep without a player of its own. The launcher relays feeds through
@@ -274,7 +283,7 @@ the park).
 . tools\netplay-local.ps1; Start-NetplayLocal -Out <dir> -Mode rollback -Delay 1 -Lag 50 -Jitter 30 -AttackB -Sites
 python -I tools\netcmp.py a\net.log b\net.log                  # frame logs of two games side by side
 python -I tools\randcmp.py a\rand.txt b\rand.txt               # MK9_TRACE_RAND random draw traces
-python -I tools\scriptcmp.py a\script.txt b\script.txt         # -TraceScript: what scripts did, frame by frame
+python -I tools\scriptcmp.py a\script.txt b\script.txt         # -TraceScript: scripts and pads read, frame by frame
 ```
 
 ## The player package (each PC builds its own game)
@@ -328,11 +337,14 @@ restore is only right if the memory it puts back is the simulation's and nothing
 5. **Whole frames.** GuardedMain's loop runs more than `FEngineLoop::Tick` each time round: before
    the tick it counts the frame, reads the pads (`sub_829D5230`; the tick only reads what that put
    in the game's pad state) and the key presses (`sub_829D49F0`) and updates the game's systems
-   (`sub_8239D550`), after it it measures the frame. A frame run again runs all of it
-   (`frame.cpp`, `RestOfLoop`), and what the key presses had reported goes back with the frame
+   (`sub_8239D550`), after it it measures the frame. A frame's top is the loop's top (its first
+   call, the time base read `sub_82366BF8` from `0x82366864`), so what is kept of a frame is from
+   before its pads were read, a frame run again runs all of the loop (`frame.cpp`, `BeforeTick`,
+   the tick, `AfterTick`), and what the key presses had reported goes back with the frame
    (`input.cpp`). Until 2026-10-28 only the tick ran again: a rollback from frame n to r played
    frames r+1..n on the pads read before r, so inputs that came in for them took effect only after
-   n, and the two games of a lagged fight drifted 1-3 frames apart.
+   n, and the two games of a lagged fight drifted 1-3 frames apart. Until 2026-10-29 a frame's top
+   was the tick's call, after the pads were read (see "Netplay": a frame behind the input delay).
 
 The sync test (`MK9_SYNCTEST=4`) goes back 4 frames every 10 frames through a scripted fight: 420
 rollbacks and 1,680 frames run again without a crash, worst rollback about 70 ms (frames run
@@ -348,8 +360,9 @@ number drawn on the same frame in both games).
 Diagnostics: `MK9_RB_TRACE_FOREIGN=1` (who writes which pages first, stacks of foreign writers),
 `MK9_GMALLOC_TRACE=1` (frees traced, double frees explained), `MK9_NET_SITES_LOG` (draws per
 call site at every check; `-Sites` in `netplay-local.ps1`), `MK9_TRACE_SCRIPT` (every script
-process made and every script random draw, with the frame and the rollbacks; `-TraceScript`, and
-`tools\scriptcmp.py` compares two games' frame by frame as their rollbacks left them).
+process made, every script random draw and the pads read before each tick, with the frame and the
+rollbacks; `-TraceScript`, and `tools\scriptcmp.py` compares two games' frame by frame as their
+rollbacks left them).
 
 ## Known gaps
 
@@ -368,6 +381,21 @@ process made and every script random draw, with the frame and the rollbacks; `-T
   The stop in lockstep at the end of loading (3 runs of 15) was the checks comparing the fight's
   first script draws and round timer, which each PC makes when its loading ends: no checks while a fight
   loads now. Since: 4 lagged runs in a row with no DESYNC and 0 check differences, lockstep agreeing.
+- **Every netplay match played a frame behind its input delay** until 2026-10-29 (found and fixed then):
+  GuardedMain reads the pads before it calls the tick, and the tick's call was a frame's top, where netplay
+  sets the frame's inputs, so the tick of frame f played on the inputs of f-1, in lockstep and rollback alike
+  (a match at delay 2 played as 3). Each frame's inputs were sent, awaited and guessed for that frame all
+  along, so nothing waits or rolls back more without the extra frame: the lagged test's menus run at the same
+  40 frames/s as before, and its fights roll back as often (21-32 times a game, up to 8 frames back). A
+  frame's top is now the top of GuardedMain's loop ("Rollback", 5). The lagged rollback test: 3 runs in a row
+  with no DESYNC, 0 of 171 checks different in each fight, the fights' traces (scripts and pads) the same frame
+  for frame in both games, and on every frame of a fight where an input changed (113-115, a quarter of them run
+  again by a rollback) both games read the new input on that frame; the same test on the old frame top read
+  every one a frame late. Lockstep agrees (166 checks, the same traces), and so does a launcher-link match
+  and its rematch with the autopilot steering the menus (the same results). Found on the way: the key presses
+  rollback keeps (`input.cpp`) were all thrown away from a match's rematch on (each match numbers its frames
+  from 0, the last match's kept frames stayed, and every new one was trimmed at once), and the first frame a
+  fight keeps had none; both fixed.
 - Sounds started in frames a rollback takes back keep playing (FMOD is not rolled back).
 - A crash before the first frame, seen once in about 130 test boots (2026-10-28, three games starting at the
   same moment) and in none of 107 more that tried to bring it back (2026-10-29, three or four at once with the same

@@ -35,10 +35,12 @@ uint64_t Switches();
 #pragma comment(lib, "winmm.lib")
 #endif
 
-// FEngineLoop::Tick, called once per frame from GuardedMain's loop (0x823668E8)
+// FEngineLoop::Tick, called once per frame from GuardedMain's loop (0x823668D4)
 REX_EXTERN(__imp__sub_823621F8);
-// what else GuardedMain's loop runs each time round (RestOfLoop)
-REX_EXTERN(sub_82366BF8);  // reads the time base into [r3]
+// reads the time base into [r3]: called from all over, and first thing each time round GuardedMain's
+// loop (from 0x82366864), the top of a frame
+REX_EXTERN(__imp__sub_82366BF8);
+// what else GuardedMain's loop runs each time round (BeforeTick, AfterTick)
 REX_EXTERN(sub_82360F10);
 REX_EXTERN(sub_8270A038);  // appSprintf(buffer, size, format, ...)
 REX_EXTERN(sub_829B0430);
@@ -49,6 +51,8 @@ REX_EXTERN(sub_829D49F0);  // reads key presses (XamInputGetKeystrokeEx)
 
 namespace mk9::frame {
 namespace {
+
+constexpr uint32_t kLoopTop = 0x82366868;  // the return address of the loop's first call
 
 std::atomic<uint64_t> g_frames{0};
 std::atomic<uint32_t> g_main_tid{0};
@@ -165,48 +169,39 @@ bool Replaying() { return g_replaying.load(std::memory_order_relaxed); }
 namespace {
 
 // GuardedMain's loop (sub_823667E8, 0x82366860-0x82366920) runs more than the engine's tick each time
-// round, and a frame run again must run all of it, or it is not the frame that ran first: after the
-// tick it measures the frame and takes a flag another thread sets, and before the next tick it counts
-// the frame, reads the pads and the key presses (the tick only reads what that put in the game's pad
-// state) and updates the game's systems. This is that part, from the tick's return to the next
-// tick's call, with GuardedMain's registers (ctx at the top of a frame holds them: r21-r31 its
-// constants, r30 the time base when the loop came round, r1 its frame) and the return addresses its
-// calls have. Without it a rollback from frame n to r played frames r+1..n on the pads read before
+// round, and a frame run again must run all of it, or it is not the frame that ran first: before the
+// tick it counts the frame, reads the pads and the key presses (the tick only reads what that put in
+// the game's pad state) and updates the game's systems, and after it it measures the frame and takes
+// a flag another thread sets. These are those two parts, with GuardedMain's registers (ctx at the top
+// of a frame holds them: r21-r31 its constants, r1 its frame; r30, the time base when the loop came
+// round, is read again first) and the return addresses its calls have. Until 2026-10-28 a frame run
+// again ran the tick alone: a rollback from frame n to r played frames r+1..n on the pads read before
 // r, and the inputs that came in for them took effect only after n.
-void RestOfLoop(PPCContext& ctx, uint8_t* base) {
-  auto* mem = REX_KERNEL_STATE()->memory();
-  auto read = [&](uint32_t a) { return __builtin_bswap32(*mem->TranslateVirtual<uint32_t*>(a)); };
-  auto write = [&](uint32_t a, uint32_t v) { *mem->TranslateVirtual<uint32_t*>(a) = __builtin_bswap32(v); };
-  // after the tick (0x823668D8): the frame's length in time base ticks
-  ctx.r3.u64 = ctx.r1.u32 + 88;
-  ctx.lr = 0x823668E0;
-  sub_82366BF8(ctx, base);
-  write(ctx.r28.u32 - 10916, read(ctx.r1.u32 + 92) - ctx.r30.u32);
-  // a word another thread sets, taken and cleared at once (lwarx/stwcx. in the guest)
-  const uint32_t taken = uint32_t(InterlockedExchange(mem->TranslateVirtual<volatile LONG*>(ctx.r29.u32), 0));
-  write(ctx.r27.u32 - 10912, __builtin_bswap32(taken));
-  ctx.lr = 0x82366918;
-  sub_82360F10(ctx, base);
-  // the top of the loop (0x82366860): the time base, the frame counted
+
+// from the loop's top (0x82366860) to the tick's call
+void BeforeTick(PPCContext& ctx, uint8_t* base) {
+  using game::ReadU32;
+  // the time base, the frame counted
   ctx.r3.u64 = ctx.r1.u32 + 80;
-  ctx.lr = 0x82366868;
-  sub_82366BF8(ctx, base);
-  ctx.r30.u64 = read(ctx.r1.u32 + 84);
-  const uint32_t counters = read(ctx.r31.u32 + 18644);
-  write(counters + 108, read(counters + 108) + 1);
+  ctx.lr = kLoopTop;
+  __imp__sub_82366BF8(ctx, base);
+  ctx.r30.u64 = ReadU32(ctx.r1.u32 + 84);
+  const uint32_t counters = ReadU32(ctx.r31.u32 + 18644);
+  game::WriteU32(counters + 108, ReadU32(counters + 108) + 1);
   ctx.r3.u64 = 12;
   ctx.r4.u64 = ctx.r26.u64;
   ctx.r5.u64 = ctx.r25.u64;
-  ctx.r6.u64 = read(read(ctx.r31.u32 + 18644) + 108);
+  ctx.r6.u64 = ReadU32(ReadU32(ctx.r31.u32 + 18644) + 108);
   ctx.lr = 0x82366898;
   sub_8270A038(ctx, base);
   ctx.lr = 0x8236689C;
   sub_829B0430(ctx, base);
   if (ctx.r3.u32 == 0) {
-    const uint32_t c = read(ctx.r31.u32 + 18644);
-    write(c + 112, read(c + 112) + 1);
+    const uint32_t c = ReadU32(ctx.r31.u32 + 18644);
+    game::WriteU32(c + 112, ReadU32(c + 112) + 1);
   }
-  if (read(ctx.r21.u32 - 10956) != 0) {
+  // the pads and the key presses the tick plays on
+  if (ReadU32(ctx.r21.u32 - 10956) != 0) {
     ctx.lr = 0x823668C4;
     sub_829D5230(ctx, base);
     ctx.lr = 0x823668C8;
@@ -219,38 +214,66 @@ void RestOfLoop(PPCContext& ctx, uint8_t* base) {
   ctx.r3.u64 = ctx.r24.u64;  // the tick's argument
 }
 
-}  // namespace
-
-void RunAgain(PPCContext& ctx, uint8_t* base) {
-  g_replaying.store(true, std::memory_order_relaxed);
-  __imp__sub_823621F8(ctx, base);
-  g_frames.fetch_add(1, std::memory_order_relaxed);
-  if (g_end) g_end(ctx, base);
-  RestOfLoop(ctx, base);
-  g_replaying.store(false, std::memory_order_relaxed);
+// from the tick's return (0x823668D8) to the loop's end
+void AfterTick(PPCContext& ctx, uint8_t* base) {
+  using game::ReadU32;
+  // the frame's length in time base ticks
+  ctx.r3.u64 = ctx.r1.u32 + 88;
+  ctx.lr = 0x823668E0;
+  __imp__sub_82366BF8(ctx, base);
+  game::WriteU32(ctx.r28.u32 - 10916, ReadU32(ctx.r1.u32 + 92) - ctx.r30.u32);
+  // a word another thread sets, taken and cleared at once (lwarx/stwcx. in the guest)
+  auto* mem = REX_KERNEL_STATE()->memory();
+  const uint32_t taken = uint32_t(InterlockedExchange(mem->TranslateVirtual<volatile LONG*>(ctx.r29.u32), 0));
+  game::WriteU32(ctx.r27.u32 - 10912, __builtin_bswap32(taken));
+  ctx.lr = 0x82366918;
+  sub_82360F10(ctx, base);
 }
 
-}  // namespace mk9::frame
-
-REX_HOOK_RAW(sub_823621F8) {
-  using namespace mk9::frame;
+// the top of a frame, before GuardedMain's loop runs anything of it
+void Top(PPCContext& ctx, uint8_t* base) {
   if (g_main_tid.load(std::memory_order_relaxed) == 0) {
     g_main_tid.store(CurrentTid());
     REXLOG_INFO("mk9: first frame on host thread {}", CurrentTid());
     InitCap();
     // UE3's GMalloc (0x833D9074): its object and vtable, for the allocator hooks (mk9/simheap)
-    const uint32_t gmalloc = mk9::game::ReadU32(0x833D9074);
-    const uint32_t vt = gmalloc ? mk9::game::ReadU32(gmalloc) : 0;
+    const uint32_t gmalloc = game::ReadU32(0x833D9074);
+    const uint32_t vt = gmalloc ? game::ReadU32(gmalloc) : 0;
     std::string entries;
-    for (int i = 0; vt && i < 12; i++) entries += fmt::format(" +{}={:08X}", i * 4, mk9::game::ReadU32(vt + 4 * i));
+    for (int i = 0; vt && i < 12; i++) entries += fmt::format(" +{}={:08X}", i * 4, game::ReadU32(vt + 4 * i));
     REXLOG_INFO("mk9: GMalloc {:08X} vtable {:08X}{}", gmalloc, vt, entries);
   }
-  mk9::crash::OnFrame(g_frames.load(std::memory_order_relaxed) + 1);
+  crash::OnFrame(g_frames.load(std::memory_order_relaxed) + 1);
   // the cap first: netplay then reads the pads and the network as late as it can before the frame
   Cap();
   g_pacing.Top();
-  mk9::gmalloc::OnFrameTop(ctx, base);
+  gmalloc::OnFrameTop(ctx, base);
   if (g_top) g_top(ctx, base);
+}
+
+}  // namespace
+
+void RunAgain(PPCContext& ctx, uint8_t* base) {
+  g_replaying.store(true, std::memory_order_relaxed);
+  BeforeTick(ctx, base);
+  __imp__sub_823621F8(ctx, base);
+  g_frames.fetch_add(1, std::memory_order_relaxed);
+  if (g_end) g_end(ctx, base);
+  AfterTick(ctx, base);
+  g_replaying.store(false, std::memory_order_relaxed);
+}
+
+}  // namespace mk9::frame
+
+// the top of GuardedMain's loop, before it reads the pads: the top of a frame (a frame run again reads
+// the time base itself)
+REX_HOOK_RAW(sub_82366BF8) {
+  if (uint32_t(ctx.lr) == mk9::frame::kLoopTop) mk9::frame::Top(ctx, base);
+  __imp__sub_82366BF8(ctx, base);
+}
+
+REX_HOOK_RAW(sub_823621F8) {
+  using namespace mk9::frame;
   __imp__sub_823621F8(ctx, base);
   const uint64_t n = g_frames.fetch_add(1, std::memory_order_relaxed) + 1;
   if (g_end) g_end(ctx, base);

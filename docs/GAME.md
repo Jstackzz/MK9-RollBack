@@ -17,8 +17,12 @@ extracted ISO) and keeps saves in `--user_data_root` (default `<exe>\user`).
 
 The SDK is ReXGlue v0.10.0 in `external\rexglue-sdk` with this project's changes on top
 (`patches\rexglue-sdk-v0.10.0.patch`: file reads into write-protected guest pages, the critical
-section hook rollback uses, bounded stack walks in two crash reports). On a fresh checkout of the
-SDK: `git -C external\rexglue-sdk apply ..\..\patches\rexglue-sdk-v0.10.0.patch`.
+section hook rollback uses, bounded stack walks in two crash reports, no resolve copying in what draws
+dropped while their pipelines are created left out: see "Blood and damage textures"). On a fresh
+checkout of the SDK: `git -C external\rexglue-sdk apply ..\..\patches\rexglue-sdk-v0.10.0.patch`; the
+patch is `git -C external\rexglue-sdk diff --ignore-submodules`. A change to the SDK's GPU code alone
+does not link `mk9.exe` again, and the GPU plugin is copied beside it only when it does: after such a
+build copy `external\rexglue-sdk\out\win-amd64\rexgpu-xenos.dll` into `mk9\out\build\win-amd64-release`.
 
 ## Source map (`mk9/src/mk9`)
 
@@ -66,6 +70,45 @@ over 20 ms after the one before, and the longest gap.
 The SDK draws on Windows' first graphics adapter, and its Optimus/PowerXpress exports sit in `rexgpu-xenos.dll`,
 where the drivers do not look: on a laptop with two the game ran on the slow one in the processor. `mk9.exe` exports
 them itself, and sets `d3d12_adapter` to the one Windows counts as high-performance (unless it is set already).
+
+## Blood and damage textures
+
+MK9 keeps the fight's blood and damage in textures it draws on the GPU: each fighter has several (128 to 512 pixels
+square), whose colour the fighter's shader lays over its own by their alpha (pixel shader `74D59E4C54FD8912`, texture
+fetch 5), and the floor uses a 2048x256 one (its blood, by all appearances). They are drawn from themselves: frame
+after frame one of them is drawn back into EDRAM (at base 720, where the frame's own image is drawn) by a rectangle
+that samples it, and resolved over itself; when a fighter is hit all of theirs are, with the fighter's mesh painting
+the new damage over the old in texture space before the resolve.
+
+The SDK compiles shaders and creates pipelines in the background (`async_shader_compilation`, on by default, as in
+Xenia Canary) and drops a draw whose pipeline is not ready yet: on the screen that is an object missing for a frame or
+two. At a fight's first hit the damage passes needed pipelines nothing had used before, so all of a pass's draws were
+dropped, and its resolve copied what EDRAM held instead: the last frame's finished image (the arena, the HUD's green
+health bars and their lettering), at the texture's pitch, in bands. Each later redraw drew that back into the
+texture, so the fighter wore it for the rest of the fight: striped, see-through, in the arena's colours (a trace
+caught the floor's texture copied the same way a moment later). It hits whichever pass meets a pipeline still
+being created: Sub-Zero's at the scripted fight's first hit, Scorpion's in a run on the ROV render path.
+
+Since 2026-10-29 (SDK patch, `D3D12CommandProcessor::IssueCopy`) a resolve copies nothing into guest memory when
+every draw since the resolve before it was dropped, or when a dropped one sampled the memory the copy would write
+(clears still happen). The texture keeps its last contents, without the damage of the hit whose pass was dropped,
+and the log says `Resolve to 0x... not copied: n of the m draws before it were dropped while their pipelines were
+being created`. Draws are still dropped while pipelines are created, so nothing stalls; what they left out no longer
+reaches memory the game keeps. `--async_shader_compilation=false` also avoids it, with a stall instead each time a
+pipeline is new (until the pipeline cache in the saves has them all).
+
+Tested 2026-10-29 with the scripted fight (`tools\synctest.ps1` with `-Depth 0`, a fresh save each run): every run
+before the fix showed the stripes; with it, three runs in three arenas showed none at frames 6200, 6400 and 7000,
+and neither did a run on the ROV render path (`--render_target_path_d3d12=rov`).
+Each run held back seven or eight copies (two at boot, two or three as the fight loads, three at the first hit) and
+none later. The fight's frame rate lines stayed as before: 60.0 frames/s and none over 20 ms from frame 5400 to 7800.
+The two-game rollback test with lag (`-Mode rollback -Lag 50 -Jitter 30 -AttackB -TraceScript`) agreed on every
+check, and its fight's scripts were identical frame for frame.
+
+Found with a GPU trace of the scripted fight (every draw's render targets and textures, every resolve, and which
+resolve wrote each texture); the tracer is not part of the patch. The warnings about texture fetch constants of an
+"invalid" type that fights log (two a frame, 1024x1024 DXT1 textures) start with the fight's loading, well before
+the first hit, and are not part of this.
 
 ## Crash reports
 
@@ -274,10 +317,9 @@ process made and every script random draw, with the frame and the rollbacks; `-T
 - Four-player TWO VS TWO (slots 2-3) is in the netplay core but untested.
 - The autopilot steers menus by fixed steps from a fresh save's cursor; the roster grid is not
   mapped yet, so the launcher cannot pick a named fighter (players pick in the game).
-- GPU emulation draws a striped texture on fighters after hits (also in Xenia). From the first hits of a fight one
-  fighter (not always the one hit: on the ROV path it was the other) is drawn in bands of the arena's own colours, so
-  it looks see-through, as if its shading read the scene around it (the arena's reflection, say) the wrong way.
-  Tested 2026-10-29 on the scripted fight, each with the same result: `render_target_path_d3d12=rov`,
-  `readback_resolve=full`, `native_2x_msaa=false`, `gpu_allow_invalid_fetch_constants=true`,
-  `texture_cache_memory_limit_render_to_texture=256` and this port's heaps off (`MK9_SIMHEAP=0`). The next step is a
-  GPU capture of the broken fighter's draw (its shaders and fetch constants).
+- **A fighter striped and see-through from a fight's first hits** in every build before 2026-10-29, and in Xenia
+  Canary (found and fixed 2026-10-29, see "Blood and damage textures"): draws dropped while their pipelines were
+  being created let a resolve copy the last frame's image into a blood and damage texture the game draws from
+  itself. None of the settings tried first changed it (`render_target_path_d3d12=rov`, `readback_resolve=full`,
+  `native_2x_msaa=false`, `gpu_allow_invalid_fetch_constants=true`,
+  `texture_cache_memory_limit_render_to_texture=256`, `MK9_SIMHEAP=0`): none of them stops draws being dropped.

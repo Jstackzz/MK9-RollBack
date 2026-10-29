@@ -42,8 +42,9 @@ the MK9 Online server, so whoever runs it can see what went wrong.
 - Most crash reports sent from 0.4.0 were the game running out of its 64 effects (sparks, blood, fire) in
   busy scenes; since 0.5.0 the oldest effect makes room instead. Players named Cyrax's air grab, Noob
   Saibot's teleport slam and the Church among the crashes: send the report if one still crashes.
-- The Xbox 360 GPU emulation draws a striped texture on fighters after hits: from the first hits one
-  fighter can look see-through, in bands of the arena's colours (the same happens in the Xenia emulator).
+- Until 0.5.0 a fighter could turn striped and see-through from a fight's first hits (in the Xenia
+  emulator too): the GPU emulation copied the last frame into the fighter's blood and damage texture while
+  the shaders for it were still being made. Fixed in 0.5.0 (docs/GAME.md, "Blood and damage textures").
 
 ## Building from source
 

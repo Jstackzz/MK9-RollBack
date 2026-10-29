@@ -64,6 +64,21 @@ index 540f698..2445560 100644
  X_STATUS xeRtlInitializeCriticalSectionAndSpinCount(X_RTL_CRITICAL_SECTION* cs, uint32_t cs_ptr,
                                                      uint32_t spin_count);
  
+diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
+index a7ab6b3..c120291 100644
+--- a/include/rex/ui/imgui_dialog.h
++++ b/include/rex/ui/imgui_dialog.h
+@@ -39,6 +39,10 @@ class ImGuiDialog {
+ 
+   void Draw();
+ 
++  // Whether the UI repaints continuously while this dialog is open (for input and animation). A dialog
++  // that changes only with the guest output needs none: every guest frame repaints the UI anyway.
++  virtual bool RepaintsContinuously() const { return true; }
++
+  protected:
+   ImGuiDialog(ImGuiDrawer* imgui_drawer);
+ 
 diff --git a/src/core/filesystem_win.cpp b/src/core/filesystem_win.cpp
 index c5a2c5d..854cb82 100644
 --- a/src/core/filesystem_win.cpp
@@ -372,4 +387,31 @@ index 76cc877..f2e347f 100644
 +    }
      return false;
    }
+ 
+diff --git a/src/ui/imgui_drawer.cpp b/src/ui/imgui_drawer.cpp
+index f270f3c..5661df9 100644
+--- a/src/ui/imgui_drawer.cpp
++++ b/src/ui/imgui_drawer.cpp
+@@ -436,12 +436,16 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+   // it now if needed.
+   DetachIfLastDialogRemoved();
+ 
+-  if (!dialogs_.empty()) {
+-    // Repaint (and handle input) continuously if still active. In detached mode
+-    // there is no presenter; the app drives repaint via its own present loop.
+-    if (presenter_) {
+-      presenter_->RequestUIPaintFromUIThread();
+-    }
++  // Repaint (and handle input) continuously if a dialog that wants it is still
++  // active. In detached mode there is no presenter; the app drives repaint via
++  // its own present loop. Without one wanting it, the guest output's frames
++  // repaint the UI: the presenter is not kept painting as fast as it can.
++  bool continuous = false;
++  for (const ImGuiDialog* dialog : dialogs_) {
++    continuous = continuous || dialog->RepaintsContinuously();
++  }
++  if (continuous && presenter_) {
++    presenter_->RequestUIPaintFromUIThread();
+   }
+ }
  

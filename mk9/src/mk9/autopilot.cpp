@@ -9,6 +9,12 @@
 //   CONTINUE?:  REMATCH, SELECT A NEW FIGHTER, QUIT TO THE MAIN MENU (the loser's controller
 //               steers it, as at an arcade's continue)
 // and checks it got where it went before handing the controllers to the players.
+//
+// At the hold point the game would not stay by itself: 60 s after the last press MK9 goes back to its title,
+// and about 30 s later plays its attract mode's demo fight, while the launcher still took it as ready (a lobby
+// match then started from the title or the demo's fight, against a game at its main menu). A tap of the left
+// trigger every 20 s, which the main menu does nothing with, keeps it there; a game that leaves the main menu
+// all the same is taken back, and the link says booting meanwhile.
 
 #include "mk9/autopilot.h"
 
@@ -27,6 +33,8 @@ namespace mk9::autopilot {
 namespace {
 
 enum class Phase { Off, Boot, Title, ToMenu, Hold, Wait, Steer, Follow, Pick, Players, Continue, Leave, Lost };
+
+constexpr uint64_t kHoldTapEvery = 1200, kHoldTapFrames = 6;  // at the hold point: the left trigger, 6 frames in 20 s
 
 struct Step {
   uint16_t buttons;
@@ -247,6 +255,14 @@ void OnFrame(uint64_t frame) {
       }
       return;
     case Phase::Hold:
+      if (phase != game::kPhaseMenus) {
+        REXLOG_WARN("mk9 autopilot: the game left its hold point (phase {}, screen {:X}) at frame {}: back to the main menu",
+                    phase, ui, frame);
+        Enter(Phase::Boot);
+        return;
+      }
+      if ((frame - g_since) % kHoldTapEvery >= kHoldTapEvery - kHoldTapFrames) g_pad.left_trigger = 0xFF;
+      return;
     case Phase::Leave:
       return;
     case Phase::Wait:
@@ -328,8 +344,11 @@ bool LocalPad(input::Pad& out) {
       out = g_pad;
       return true;
     case Phase::Boot:
-    case Phase::ToMenu:
     case Phase::Hold:
+      // the launcher's presses alone: START out of an attract demo's fight, the hold point's trigger taps
+      out = g_pad;
+      return g_launcher;
+    case Phase::ToMenu:
     case Phase::Wait:
     case Phase::Follow:
     case Phase::Continue:

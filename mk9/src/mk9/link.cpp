@@ -12,14 +12,16 @@
 //            a spectator: every player's inputs come from the feed, the game plays the match
 //            the players meet at the hold point (netplay's first barrier), then the autopilot of
 //            slot 0 takes both games through the menus to the mode's select screen, where each
-//            player picks with their own controller (or the autopilot picks a given fighter)
+//            player picks with their own controller (or the autopilot picks a given fighter); a
+//            start that comes before the game is at its hold point waits for it there
 //   park     back to the hold point (from the CONTINUE? menu: QUIT TO THE MAIN MENU)
 //   rematch  from the CONTINUE? menu: REMATCH (the same fighters); with select=1 (or p1=- p2=-)
 //            SELECT A NEW FIGHTER (both pick again). New seed and id when given
 //   quit     exit
 //
-// status.txt: booting, ready, in_match match=<id>, result winner=N p1_rounds=.. p2_rounds=..
-// match=<id>, desync frame=N match=<id>, disconnected match=<id>, error <text>.
+// status.txt: booting (also on the way back to a hold point the game left), ready, in_match match=<id>,
+// result winner=N p1_rounds=.. p2_rounds=.. match=<id>, desync frame=N match=<id>, disconnected match=<id>,
+// error <text>.
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -99,6 +101,11 @@ struct Command {
   std::map<std::string, std::string> keys;
 };
 
+// a start that came while the game was away from its hold point (still booting, or on its way back after
+// leaving it): taken once it is there, as the other players' games wait for it at their meeting
+Command g_waiting_start;
+bool g_start_waits = false;
+
 Command Parse(const std::string& line) {
   Command c;
   std::istringstream in(line);
@@ -117,9 +124,12 @@ std::string Key(const Command& c, const char* k, const char* def = "") {
 
 void Start(const Command& c) {
   if (!autopilot::AtHoldPoint()) {
-    WriteStatus("error not at the hold point");
+    if (!g_start_waits) REXLOG_INFO("mk9 link: the start waits until the game is at its hold point");
+    g_waiting_start = c;
+    g_start_waits = true;
     return;
   }
+  g_start_waits = false;
   autopilot::Plan plan;
   plan.mode = autopilot::ModeFromName(Key(c, "mode", "versus"));
   if (plan.mode == autopilot::Mode::Unknown) {
@@ -191,6 +201,7 @@ void Start(const Command& c) {
 }
 
 void Park() {
+  g_start_waits = false;
   net::Disable();
   autopilot::Park();
   g_in_match = false;
@@ -251,6 +262,7 @@ void OnFrame(uint64_t frame) {
       }
     }
   }
+  if (g_start_waits && autopilot::AtHoldPoint()) Start(g_waiting_start);
   // the state for the launcher (an error line stays up until the next command)
   if (g_error_shown) return;
   if (!g_in_match) {

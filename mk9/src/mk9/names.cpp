@@ -15,6 +15,7 @@
 #include "mk9/names.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -61,6 +62,8 @@ float F32(uint32_t address) {
 class Overlay final : public rex::ui::ImGuiDialog {
  public:
   explicit Overlay(rex::ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer) {}
+  // it changes only with the game's frames, each of which repaints it
+  bool RepaintsContinuously() const override { return false; }
 
  protected:
   void OnDraw(ImGuiIO& io) override {
@@ -105,10 +108,29 @@ class Overlay final : public rex::ui::ImGuiDialog {
                           IM_COL32(0, 0, 0, alpha * 230 / 255), text);
       draw->AddText(font, size, ImVec2(x, y), IM_COL32(245, 245, 245, alpha), text);
     }
+    if (!drawn_) {  // once each time the overlay opens: the names are on the screen (a test reads it)
+      drawn_ = true;
+      REXLOG_INFO("mk9 names: drawn over the fight");
+    }
   }
+
+ private:
+  bool drawn_ = false;
 };
 
-std::unique_ptr<Overlay> g_overlay;
+// The overlay is open only while names are up: an open ImGui dialog makes the presenter paint every frame on the
+// UI thread instead of straight from the guest output thread (rex ui/presenter.cpp
+// GetDesiredPaintModeFromUIThread), which outside a fight with names costs for nothing.
+rex::ui::ImGuiDrawer* g_drawer = nullptr;                    // UI thread
+std::function<void(std::function<void()>)> g_in_ui_thread;  // the app's, set once before any frame
+std::unique_ptr<Overlay> g_overlay;                          // UI thread
+std::atomic<bool> g_open{false};                             // the main thread's: the overlay wanted open
+
+// UI thread: the overlay as the main thread last wanted it
+void Follow() {
+  if (g_open && !g_overlay && g_drawer) g_overlay = std::make_unique<Overlay>(g_drawer);
+  else if (!g_open && g_overlay) g_overlay.reset();
+}
 
 }  // namespace
 
@@ -150,6 +172,8 @@ void OnFrame(uint64_t) {
   }
   g_shade = float(g_shown) / kFadeInFrames;
   g_offset = up ? offset : 0;
+  const bool open = g_shown > 0 && !(g_match[0].empty() && g_match[1].empty() && g_test[0].empty() && g_test[1].empty());
+  if (open != g_open.exchange(open) && g_in_ui_thread) g_in_ui_thread(Follow);
 }
 
 void ConfigureFonts(ImFontAtlas* atlas) {
@@ -167,8 +191,9 @@ void ConfigureFonts(ImFontAtlas* atlas) {
   }
 }
 
-void CreateOverlay(rex::ui::ImGuiDrawer* drawer) {
-  if (drawer && !g_overlay) g_overlay = std::make_unique<Overlay>(drawer);
+void UseDrawer(rex::ui::ImGuiDrawer* drawer, std::function<void(std::function<void()>)> in_ui_thread) {
+  g_drawer = drawer;
+  g_in_ui_thread = std::move(in_ui_thread);
 }
 
 }  // namespace mk9::names

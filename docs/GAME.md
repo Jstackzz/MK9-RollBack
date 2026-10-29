@@ -18,7 +18,8 @@ extracted ISO) and keeps saves in `--user_data_root` (default `<exe>\user`).
 The SDK is ReXGlue v0.10.0 in `external\rexglue-sdk` with this project's changes on top
 (`patches\rexglue-sdk-v0.10.0.patch`: file reads into write-protected guest pages, the critical
 section hook rollback uses, bounded stack walks in two crash reports, no resolve copying in what draws
-dropped while their pipelines are created left out: see "Blood and damage textures"). On a fresh
+dropped while their pipelines are created left out: see "Blood and damage textures"; ImGui dialogs that
+ask for no continuous repaint: see "Names over the fight"). On a fresh
 checkout of the SDK: `git -C external\rexglue-sdk apply ..\..\patches\rexglue-sdk-v0.10.0.patch`; the
 patch is `git -C external\rexglue-sdk diff --ignore-submodules`. A change to the SDK's GPU code alone
 does not link `mk9.exe` again, and the GPU plugin is copied beside it only when it does: after such a
@@ -180,7 +181,10 @@ variant, Test Your Luck's slots; in fights every MK script process has a stream 
 script drawing more often, an arena's ambience reacting to a sound ending, say, leaves the
 fighters' numbers alone). Every 30 frames both sides compare a state hash: the round timer, the
 round, the rounds won and the draws made at every call site so far (a fight that goes differently
-draws differently). Not while a fight loads (the VS screen, phase 1): each PC finishes loading when
+draws differently). The fight's values count only in a fight and at its end (phases 8 and 11): until
+the next fight sets them they keep the last one's, which a game booted since never saw (a lobby match
+on 0.5.0 desynced at frame 0 between a fresh game and one that had played the title's demo fight).
+Not while a fight loads (the VS screen, phase 1): each PC finishes loading when
 it does and the fight's scripts start then, a frame or two apart from one PC to the next, drawing
 and setting the round timer, until the fight's barrier puts them in step.
 
@@ -211,6 +215,18 @@ their own controller; after the match it reports `result winner=N p1_rounds=.. p
 At the CONTINUE? menu (steered by the loser's controller, as on the console) `rematch` plays the
 same fighters again, `rematch select=1` picks again, `park` quits to the main menu.
 
+The hold point does not hold by itself: 60 s after the last press MK9 leaves its main menu for the
+title, and about 30 s later plays its attract mode's demo fight. Until 0.5.0 the autopilot stood by and
+the link went on saying `ready` (players' logs, 2026-10-29: the main menu at frame 1815, the title at
+5326, the demo loading at 7281 and fighting at 7547); a lobby match started then began from the
+demo's fight (DESYNC at frame 0) or from the title (the menus steered from another screen than the
+other game's, which desynced at frame 510), and every later match of that lobby failed. Now the
+autopilot taps the left trigger for 6 frames every 20 s at the hold point (the main menu does nothing
+with it; the right stick, the left stick and the right trigger held it there as well, none of them
+moving the cursor), a game that leaves the main menu all the same goes back to it (`Boot`, whose START
+out of a demo fight now reaches the game: it never did) and says `booting` meanwhile, and a `start`
+that comes while the game is not at its hold point waits for it instead of failing.
+
 ## Names over the fight
 
 In an online match, and one watched, each player's account name stands just above their health
@@ -224,9 +240,22 @@ fight is over (the phase leaves 8: the finisher). The frame's place in the windo
 presenter's, 16:9 as large as fits. `MK9_TEST_NAMES=Kitana|Sindel` shows names in any fight, for
 screenshots (the game's own snapshots leave the overlay out; `tools\shot.ps1` takes the window), and
 `Start-LinkLocal -Names "Kitana|Sindel"` puts them on the start lines as the launcher does; the log says
-`mk9 names: ... over the fight` at the start and `mk9 names: up over the fight` once they show. Tested
-2026-10-29: a 4K window, the names after the bars' slide-in and not during it, and an online rollback
-match driven through the link (both games showed them in round 1, `none` again after the park).
+`mk9 names: ... over the fight` at the start, `mk9 names: up over the fight` once they show and
+`mk9 names: drawn over the fight` once the overlay drew them.
+
+The overlay is open only while names are up. An open ImGui dialog puts the SDK's presenter on the UI
+thread's paints (`Presenter::GetDesiredPaintModeFromUIThread`: no presenting straight from the guest
+output thread) and, in Xenia's drawer, asked for the next paint at the end of each one, so 0.5.0, whose
+overlay was open from the start, presented as fast as the GPU could all the time (the game's 60 frames a
+second, but "uncapped" to any frame counter) and gave the low-latency path up even in the menus. Now the
+main thread opens and closes the overlay on the UI thread (`CallInUIThreadDeferred`) as the names come
+and go, and it asks for no continuous repaint (`ImGuiDialog::RepaintsContinuously`, an SDK addition:
+every guest frame repaints the UI while a drawer is attached). At the main menu, in a 1280x720 window,
+the game took 2.24 of the processor's cores before and 1.76 after (the 3D engine 7 % both ways).
+
+Tested 2026-10-29 (0.5.0): a 4K window, the names after the bars' slide-in and not during it, and an
+online rollback match driven through the link (both games showed them in round 1, `none` again after
+the park).
 
 ## Testing on one PC
 

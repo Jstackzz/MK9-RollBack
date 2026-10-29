@@ -290,7 +290,12 @@ uint32_t StateHash(PPCContext& ctx, uint8_t* base) {
     const uint64_t w[2] = {site, n};
     sites = Fnv(reinterpret_cast<const uint8_t*>(w), sizeof w) ^ (sites * 0x01000193u);
   }
-  uint32_t v[5] = {g_last_timer, uint32_t(Round()), uint32_t(RoundsWon(0)), uint32_t(RoundsWon(1)), sites};
+  // the fight's values only in a fight and at its end: outside one they still hold the last fight's,
+  // which differ from game to game (a demo fight the title played, a match watched, none since boot)
+  const int32_t phase = Phase();
+  const bool fight = phase == kPhaseFight || phase == kPhaseOver;
+  uint32_t v[5] = {fight ? g_last_timer : 0u, fight ? uint32_t(Round()) : 0u, fight ? uint32_t(RoundsWon(0)) : 0u,
+                   fight ? uint32_t(RoundsWon(1)) : 0u, sites};
   return Fnv(reinterpret_cast<const uint8_t*>(v), sizeof v);
 }
 

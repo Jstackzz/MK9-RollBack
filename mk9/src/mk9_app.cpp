@@ -158,4 +158,6 @@ void Mk9App::OnShutdown() {}
 
 // the players' names over an online fight (mk9/names.h)
 void Mk9App::OnConfigureFonts(ImFontAtlas* atlas) { mk9::names::ConfigureFonts(atlas); }
-void Mk9App::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) { mk9::names::CreateOverlay(drawer); }
+void Mk9App::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
+  mk9::names::UseDrawer(drawer, [this](std::function<void()> task) { app_context().CallInUIThreadDeferred(std::move(task)); });
+}

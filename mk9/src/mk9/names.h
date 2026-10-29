@@ -5,6 +5,7 @@
 // carries the names (p1_name, p2_name: docs/PROTOCOL.md), which the link hands over for an online or a
 // watched match. MK9_TEST_NAMES=Kitana|Sindel shows names in any fight (screenshots of an offline one).
 #include <cstdint>
+#include <functional>
 #include <string>
 
 struct ImFontAtlas;
@@ -20,8 +21,9 @@ void SetPlayers(const std::string& p1, const std::string& p2);
 // at the end of each frame, on the main thread: where the bars are, read from the game
 void OnFrame(uint64_t frame);
 
-// Mk9App: the font (before the renderer builds the atlas), and the overlay that draws the names
+// Mk9App: the font (before the renderer builds the atlas), and the drawer the overlay opens in while names are
+// up, with a way to run a task on the UI thread (the overlay's)
 void ConfigureFonts(ImFontAtlas* atlas);
-void CreateOverlay(rex::ui::ImGuiDrawer* drawer);
+void UseDrawer(rex::ui::ImGuiDrawer* drawer, std::function<void(std::function<void()>)> in_ui_thread);
 
 }  // namespace mk9::names

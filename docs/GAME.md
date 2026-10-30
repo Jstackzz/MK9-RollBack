@@ -210,9 +210,10 @@ one PC, one graphics card, never did. One game answered with Xenia's fixed count
 the GPU: out of step at frame 1740 of the lagged two-game test, every script process the same frame
 for frame (the effects' draws differed, not the fighters'). The game now sets the fixed count
 (`query_occlusion_fake_sample_count`, 1000) for every query, unless the command line says otherwise.
-A desync's log (and so its report) lists the failed check's draws by the 64 KB of code they were made
-from (`mk9 net: draws at frame f by code: 826D=1234 ...`): the two players' reports side by side
-show what drew differently.
+A desync's log (and so its report) lists the failed check's draws by call site, grouped by return address
+(`mk9 net: draws at frame f by site: 82A23504: 824790DC=40 8247063C=8 ...`, 4 lines at most; a script's
+draws are at `8247061C ^ (process id << 4)`): the two players' reports side by side show what drew
+differently.
 
 - **Lockstep** (default): a frame runs once every player's input for it is there; input delay 2.
 - **Rollback** (`netcode=rollback`): frames of a fight run ahead on guessed inputs (up to 8) and a
@@ -479,6 +480,20 @@ rollbacks left them).
   frame (0 of 6,283 and 0 of 5,427 frames differ), the rematch's PhysX events kept and put back too (`SaveEvents`,
   "Rollback" 1). On the way: a frame run again called the tick with the return address of the call before it
   (`0x823668D0`, not GuardedMain's `0x823668D8`; `frame.cpp`), which only the scripts' traces saw.
+- **Matches stopped as out of step when they were not** until 0.5.3 (found in the server's desync reports and
+  fixed 2026-10-29): 13 lobby matches were lost to desyncs on 0.5.2's first evening, 12 of them between the same
+  two players. Four of the eight reports that listed their draws had the same draws on both sides, and in one
+  (`c5e6fb59f4df`) the game's first run of frame 1920 had sent the other player's very check: a rollback to 1920
+  after that check had gone out ran the frame again and sent a second one, with the same draws, round timer and
+  generator. A rollback takes back the draws of the frames it puts back (`game::RolledBack`), and a call site whose
+  draws were all taken back stayed in the counts at 0; the check hashes every site with its count, so that game
+  had one site more than a game that never drew there. Since 0.5.3 such a site goes. Scripted tests never showed
+  it: their attacks come again a frame later and draw at the same sites before the next check. A desync's report
+  now lists the draws by call site ("Netplay"); until then by the 64 KB of code, and for checks below about frame
+  500 not at all (each match numbers its frames from 0, and the 16 checks kept for it were the menus' later ones).
+  Not explained yet: `a5e3862d9529` went out of step at the first check, frame 30, before either game had rolled
+  back and with no input from either player. The lagged two-game test stays in step with one game's audio queued
+  64 frames ahead (`audio_maxqframes`), with its memexport readback off, or drawing at 3x3 resolution.
 - A crash before the first frame, seen once in about 130 test boots (2026-10-28, three games starting at the
   same moment) and in none of 107 more that tried to bring it back (2026-10-29, three or four at once with the same
   settings). `main()` (`sub_823669D8`) stored through r31 = 0 right after engine pre-init (`sub_82576640`)

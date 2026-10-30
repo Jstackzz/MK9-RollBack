@@ -64,6 +64,9 @@ the MK9 Online server, so whoever runs it can see what went wrong.
   queries (how much of something got drawn) in its own way, and some of the game's effects follow those
   answers, so two players' games drew differently and the desync check stopped the match. Since 0.5.2 every PC
   gets the same answer (docs/GAME.md, "Netplay").
+- Until 0.5.3 a rollback could stop a match as out of step when both games were alike: once it took back the
+  first random numbers a part of the game had drawn, its game kept counting that part (at 0) and the other
+  player's did not, so their checks differed. Fixed in 0.5.3 (docs/GAME.md, "Known gaps").
 
 ## Building from source
 

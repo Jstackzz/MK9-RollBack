@@ -76,8 +76,9 @@ void SetMainRandState(PPCContext& ctx, uint8_t* base, uint32_t state);
 uint32_t StateHash(PPCContext& ctx, uint8_t* base);
 // the values behind the last StateHash, for the per-frame log (rand_state: the game's generator)
 void LastCheckDetail(uint32_t& timer, uint32_t& rand_state);
-// what the StateHash of `frame` counted, for a desync's log (and so its report): the draws by the 64 KB of code they
-// were made from ("826D=1234"), a few lines; both players' for the same frame show what drew differently
+// what the StateHash of `frame` counted, for a desync's log (and so its report): the draws at each call site, by
+// return address ("82A23504: 824790DC=40 8247063C=8"), 4 lines at most; both players' for the same frame show what
+// drew differently
 std::vector<std::string> CheckDraws(uint32_t frame);
 
 // at the top of a frame in sync: true once when every PC must meet again before going on (a fight

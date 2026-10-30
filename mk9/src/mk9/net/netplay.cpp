@@ -625,7 +625,7 @@ void CompareChecks() {
         // what this check counted, for the desync report: the other player's shows what drew differently
         if (g_status != Status::Desynced)
           for (const std::string& line : game::CheckDraws(it->first))
-            REXLOG_INFO("mk9 net: draws at frame {} by code: {}", it->first, line);
+            REXLOG_INFO("mk9 net: draws at frame {} by site: {}", it->first, line);
         // tests may play on to see how far apart the games get
         static const bool keep_going = std::getenv("MK9_NET_DESYNC_CONTINUE") != nullptr;
         if (!keep_going) g_status = Status::Desynced;

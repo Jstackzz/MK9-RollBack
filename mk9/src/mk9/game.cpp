@@ -50,8 +50,8 @@ struct SiteDraw {
   uint64_t site;
 };
 std::deque<SiteDraw> g_site_journal;
-// what the last checks counted, by the 64 KB of code the draws were made from (CheckDraws)
-std::map<uint32_t, std::map<uint16_t, uint32_t>> g_check_draws;
+// what the last checks counted, the draws at each call site (CheckDraws)
+std::map<uint32_t, std::vector<std::pair<uint64_t, uint32_t>>> g_check_draws;
 // the MKScript globals around the timer (types, values, the fighters' names)
 constexpr uint32_t kScriptGlobalsLo = 0x833CE000, kScriptGlobalsHi = 0x833CF000;
 
@@ -243,9 +243,11 @@ void RolledBack(uint32_t frame) {
     std::fprintf(f, "rollback to %u from %u\n", frame, net::Frame());
     std::fflush(f);
   }
+  // a site whose first draws are all taken back goes too: kept at 0 it was one more site in this game's checks than in
+  // a game that never drew there, the same draws hashing differently (0.5.2's desyncs with the same draws on both sides)
   while (!g_site_journal.empty() && g_site_journal.back().frame >= frame) {
     auto it = g_site_draws.find(g_site_journal.back().site);
-    if (it != g_site_draws.end() && it->second) it->second--;
+    if (it != g_site_draws.end() && it->second && --it->second == 0) g_site_draws.erase(it);
     g_site_journal.pop_back();
   }
 }
@@ -255,6 +257,8 @@ void Agree(PPCContext& ctx, uint8_t* base, const mk9::net::Agreement& agreed) {
   g_agreed_seed = agreed.seed;
   g_site_draws.clear();
   g_site_journal.clear();
+  // each match numbers its frames from 0: the menus' checks, at higher frames, kept a fight's first ones out
+  g_check_draws.clear();
   SetGameRandState(agreed.seed);
   SetMainRandState(ctx, base, Mix(agreed.seed, 0xC0FFEEu));
   REXLOG_INFO("mk9 game: agreed seed {:08X} (the game's generator was {:08X}, rand() {:08X}; next object id {:08X})",
@@ -298,13 +302,11 @@ uint32_t StateHash(PPCContext& ctx, uint8_t* base) {
     std::fflush(sites_log);
   }
   uint32_t sites = 0x811C9DC5u;
-  auto& by_code = g_check_draws[net::Frame()];
-  by_code.clear();
   for (const auto& [site, n] : draws) {
     const uint64_t w[2] = {site, n};
     sites = Fnv(reinterpret_cast<const uint8_t*>(w), sizeof w) ^ (sites * 0x01000193u);
-    by_code[uint16_t(site >> 48)] += n;
   }
+  g_check_draws[net::Frame()] = draws;
   while (g_check_draws.size() > 16) g_check_draws.erase(g_check_draws.begin());
   // the fight's values only in a fight and at its end: outside one they still hold the last fight's,
   // which differ from game to game (a demo fight the title played, a match watched, none since boot)
@@ -324,10 +326,27 @@ std::vector<std::string> CheckDraws(uint32_t frame) {
   std::vector<std::string> lines;
   const auto it = g_check_draws.find(frame);
   if (it == g_check_draws.end()) return lines;
+  // a report's line holds 200 characters, about 90 of them the log line's own start; and of the game's log a report
+  // has the last 12 lines, which a desync's own lines after these fill once these are more than 4. By return address:
+  // "82A23504: 824790DC=40 8247063C=8" (a script's draws: 8247061C ^ its process id << 4)
   std::string line;
-  for (const auto& [code, n] : it->second) {
-    line += fmt::format("{}{:04X}={}", line.empty() ? "" : " ", code, n);
-    if (line.size() > 100) lines.push_back(std::move(line)), line.clear();  // a report's line holds 200 characters
+  uint32_t last_lr = 0;
+  for (const auto& [site, n] : it->second) {
+    const uint32_t lr = uint32_t(site >> 32);
+    const std::string draw = fmt::format("{:08X}={}", uint32_t(site), n);
+    const size_t more = (line.empty() ? 0 : 1) + (line.empty() || lr != last_lr ? 10 : 0) + draw.size();
+    if (!line.empty() && line.size() + more > 105) {
+      if (lines.size() == 3) {
+        line += " ...";
+        break;
+      }
+      lines.push_back(std::move(line));
+      line.clear();
+    }
+    if (!line.empty()) line += ' ';
+    if (line.empty() || lr != last_lr) line += fmt::format("{:08X}: ", lr);
+    line += draw;
+    last_lr = lr;
   }
   if (!line.empty()) lines.push_back(std::move(line));
   return lines;

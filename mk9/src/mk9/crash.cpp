@@ -341,8 +341,8 @@ void GamePart(Out& out) {
         net::StatusName(st), net::Frame(), s.ping_ms, s.rollbacks, s.max_rollback, s.waits, s.ignored);
   }
   if (frames > 0)  // the image is loaded and runs: its globals are there
-    out("game: phase %d, screen 0x%X, round %d, timer %d, rounds won %d-%d\n", game::Phase(), game::UiScreen(),
-        game::Round(), game::RoundTimer(), game::RoundsWon(0), game::RoundsWon(1));
+    out("game: phase %d, screen 0x%X, round %d, timer %d, last round won by %d\n", game::Phase(), game::UiScreen(),
+        game::Round(), game::RoundTimer(), game::RoundWinner());
 }
 
 void Modules(Out& out) {

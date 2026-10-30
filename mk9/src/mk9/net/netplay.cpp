@@ -128,6 +128,12 @@ struct PeerState {
   uint32_t seed = 0;
   std::vector<uint32_t> words;
   int delay = -1;  // the input delay their READY asked for
+  // a READY of the next match that came while this match's barrier still waited (a spectator's feed brings a match
+  // under way all at once, the next match's MEET with this one's): theirs once this barrier is over
+  uint16_t next_match = 0;
+  uint32_t next_seed = 0;
+  std::vector<uint32_t> next_words;
+  int next_delay = -1;
   uint32_t old_ack = 0, old_now = 0;  // they are still in the match before ours: what they need of us
   std::map<uint32_t, uint32_t> checks;
   bool left = false;
@@ -296,13 +302,24 @@ void HandlePacket(const uint8_t* b, int n) {
     // the barrier of this match, or the next one when they got there first (they then need nothing more
     // of this match from us, and we play their part of it as neutral input until we get there too)
     if (match != g_match && match != uint16_t(g_match + 1)) return;
-    if (match == p->ready_match) return;
+    if (match == p->ready_match || match == p->next_match) return;
+    std::vector<uint32_t> words;
+    for (int i = 0; i < b[12] && 13 + i * 4 + 4 <= n; i++) words.push_back(u32(13 + i * 4));
+    const int after = 13 + b[12] * 4;
+    const int delay = after < n ? b[after] : -1;
+    if (g_status == Status::Barrier && match != g_match) {
+      // the next match's while this barrier waits: the barrier needs this match's READY (its seed, its words), so
+      // the next one's waits for its end (taken now, it left a spectator handed a match under way at this barrier)
+      p->next_match = match;
+      p->next_seed = u32(8);
+      p->next_words = std::move(words);
+      p->next_delay = delay;
+      return;
+    }
     p->ready_match = match;
     p->seed = u32(8);
-    p->words.clear();
-    for (int i = 0; i < b[12] && 13 + i * 4 + 4 <= n; i++) p->words.push_back(u32(13 + i * 4));
-    const int after = 13 + b[12] * 4;
-    p->delay = after < n ? b[after] : -1;
+    p->words = std::move(words);
+    p->delay = delay;
   } else if (type == kInput && n >= 25) {
     if (match == uint16_t(g_match - 1)) {
       // they are still in the match we left for the next barrier: our part of it is neutral from here on
@@ -1144,7 +1161,22 @@ bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agree
   }
   for (PeerState& p : g_peers)
     for (int f = 0; f < Delay(); f++) p.inputs[uint32_t(f)] = Wire{};
-  for (PeerState& p : g_peers) p.contiguous = uint32_t(Delay());
+  for (PeerState& p : g_peers) {
+    p.contiguous = uint32_t(Delay());
+    while (p.inputs.count(p.contiguous)) p.contiguous++;  // inputs that came during the barrier (a spectator's feed)
+  }
+  // the next match's READYs that came while this barrier waited: they are past this match (WaitForInputs plays the
+  // rest of it as neutral input), and the next barrier has them
+  for (PeerState& p : g_peers) {
+    if (p.next_match == uint16_t(g_match + 1)) {
+      p.ready_match = p.next_match;
+      p.seed = p.next_seed;
+      p.words = std::move(p.next_words);
+      p.delay = p.next_delay;
+    }
+    p.next_match = 0;
+    p.next_words.clear();
+  }
   g_status = Status::InSync;
   input::SetSource(&FrameInput);
   REXLOG_INFO("mk9 net: match {} in sync, seed {:08X}, input delay {}", g_match, agreed.seed, Delay());

@@ -53,6 +53,11 @@ input::Pad g_pad;     // what the autopilot presses now
 uint64_t g_frame = 0;
 bool g_over_reported = false;  // MatchOver said so for this match
 bool g_fought = false;         // a fight ran since the last start or rematch (its result can come)
+// the rounds each player won in this match, counted from each round's winner as the round number goes on to the
+// next (the game's own count stays 0 in a lobby match, game.h); the round number the fight showed last, and up to
+// which round number the rounds are counted
+int g_rounds[2] = {};
+int g_round_last = 0, g_round_counted = 0;
 int g_loser = 1;               // the last match's loser (0 player 1, 1 player 2): the CONTINUE? menu's
 int g_steer_slot = 0;          // the slot whose autopilot steers online
 uint32_t g_pad_user = 0;       // offline, the user index the autopilot presses for
@@ -62,6 +67,14 @@ int32_t g_steer_to = game::kPhaseSelect;
 void Enter(Phase p) {
   g_phase = p;
   g_since = g_frame;
+}
+
+// a match is to come: no result for it yet
+void NewMatch() {
+  g_over_reported = false;
+  g_fought = false;
+  g_rounds[0] = g_rounds[1] = 0;
+  g_round_last = g_round_counted = 0;
 }
 
 void Push(uint16_t buttons, int hold = 8, int after = 30) { g_steps.push_back({buttons, hold, after}); }
@@ -88,8 +101,7 @@ bool Steering() { return !g_online || g_plan.slot == g_steer_slot; }
 void AtSelect(uint64_t frame) {
   const bool pick = g_plan.slot >= 0 && g_plan.slot < 4 && !g_plan.picks[g_plan.slot].empty();
   Enter(pick ? Phase::Pick : Phase::Players);
-  g_over_reported = false;
-  g_fought = false;
+  NewMatch();
   REXLOG_INFO("mk9 autopilot: at the select screen at frame {}; {}", frame,
               pick ? "picking " + g_plan.picks[g_plan.slot]
                    : std::string(g_plan.slot < 0 ? "watching" : "the player picks"));
@@ -152,8 +164,7 @@ bool AtHoldPoint() { return g_phase == Phase::Hold; }
 void Begin(const Plan& plan, bool online) {
   g_plan = plan;
   g_online = online;
-  g_over_reported = false;
-  g_fought = false;
+  NewMatch();
   if (plan.mode == Mode::Practice) {
     // practice is the game's own: the player gets the controller at the main menu
     Enter(Phase::Players);
@@ -171,15 +182,13 @@ void Begin(const Plan& plan, bool online) {
 
 void Rematch(const Plan& plan) {
   g_plan = plan;
-  g_over_reported = false;
-  g_fought = false;
+  NewMatch();
   ContinueSteps(0, Phase::Players, game::kPhaseLoading);  // REMATCH: the same fighters, the fight loads
 }
 
 void SelectAgain(const Plan& plan) {
   g_plan = plan;
-  g_over_reported = false;
-  g_fought = false;
+  NewMatch();
   ContinueSteps(1, Phase::Players, game::kPhaseSelect);  // SELECT A NEW FIGHTER
 }
 
@@ -199,9 +208,12 @@ bool MatchOver(int& winner, int& p1, int& p2) {
   if (g_over_reported || !g_fought || game::Phase() != game::kPhaseOver || game::UiScreen() != game::kUiContinue)
     return false;
   g_over_reported = true;
-  p1 = game::RoundsWon(0);
-  p2 = game::RoundsWon(1);
-  winner = p1 > p2 ? 1 : 2;
+  // the last round's winner won the match: that round counts too
+  const int last = game::RoundWinner();
+  if (last == 1 || last == 2) g_rounds[last - 1]++;
+  p1 = g_rounds[0];
+  p2 = g_rounds[1];
+  winner = last == 1 || last == 2 ? last : p1 > p2 ? 1 : 2;
   g_loser = winner == 1 ? 1 : 0;
   REXLOG_INFO("mk9 autopilot: the match is over, player {} won {}-{}", winner, p1, p2);
   return true;
@@ -213,13 +225,34 @@ void OnFrame(uint64_t frame) {
   const uint32_t ui = game::UiScreen();
   static int32_t last_phase = -2;
   static uint32_t last_ui = 0xFFFFFFFF;
+  const bool fight_began = phase == game::kPhaseFight && last_phase != game::kPhaseFight;
   if (phase != last_phase || ui != last_ui) {
     REXLOG_INFO("mk9 autopilot: phase {} screen {:X} at frame {}{}", phase, ui, frame,
                 game::TitleUp() ? " (title)" : "");
     last_phase = phase;
     last_ui = ui;
   }
-  if (phase == game::kPhaseFight) g_fought = true;
+  if (phase == game::kPhaseFight) {
+    g_fought = true;
+    // a fight's rounds count from its start (a spectator's game goes from one match's CONTINUE? menu to the
+    // rematch's fight as the players steer it, with no word from the launcher)
+    if (fight_began) {
+      g_rounds[0] = g_rounds[1] = 0;
+      g_round_last = g_round_counted = 0;
+    }
+    // a round is over once the round number goes on to the next (its winner was set seconds before), each once (a
+    // rollback may show a round's end, take it back and show it again; a rematch's first frames may still show the
+    // last match's number); the match's last round counts at the CONTINUE? menu (MatchOver)
+    const int round = game::Round();
+    if (g_round_last && round == g_round_last + 1 && round > g_round_counted) {
+      g_round_counted = round;
+      const int won = game::RoundWinner();
+      if (won == 1 || won == 2) g_rounds[won - 1]++;
+      REXLOG_INFO("mk9 autopilot: round {} won by player {} at frame {} ({}-{})", g_round_last, won, frame,
+                  g_rounds[0], g_rounds[1]);
+    }
+    g_round_last = round;
+  }
   g_pad = input::Pad{};
   g_pad.connected = true;
   switch (g_phase) {

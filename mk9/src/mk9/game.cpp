@@ -111,6 +111,7 @@ int32_t RoundTimer() { return int32_t(ReadU32(kRoundTimer)); }
 int32_t Phase() { return int32_t(ReadU32(0x833C6C58)); }
 uint32_t UiScreen() { return ReadU32(0x833AEA80); }
 bool TitleUp() { return ReadU32(0x833C77B8) == 1; }
+int RoundWinner() { return int(ReadU32(0x833C6C74)); }
 int RoundsWon(int player) { return int(ReadU32(0x833C7A38 + 4 * uint32_t(player & 1))); }
 int Round() { return int(ReadU32(0x833CED28)); }
 

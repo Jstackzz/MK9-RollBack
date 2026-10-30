@@ -9,7 +9,8 @@
 // AddSimulationThread). Pages other threads write first (sound, loaders, the GPU's callbacks) are
 // "foreign": never logged or restored, so those threads are not pulled back in time under their
 // feet; bytes other threads write on pages the simulation uses are "volatile": a restore leaves
-// them as they are, and a page with volatile bytes is logged whoever writes it first. The simulation
+// them as they are, and a page with volatile bytes given is logged whoever writes it first (one
+// with only locks on it outside the executable's data is not, see AddLock). The simulation
 // heap (SetSimulationRegion) is the simulation's whoever writes it. Tracked: the committed writable
 // pages of the virtual heaps (0x00010000-0x6FFFFFFF) and the executable's data
 // (0x80000000-0x8FFFFFFF). The main thread's registers at each frame's top are kept too.
@@ -58,6 +59,10 @@ std::vector<uint32_t> LastFramePageList();
 // from one Arm to the next (and set before any page is protected), so they can be given early
 void AddVolatile(uint32_t va, uint32_t size);
 void RemoveVolatile(uint32_t va, uint32_t size);
+// a lock (a critical section) another thread may hold: a restore leaves its bytes as they are, as
+// it does volatile ones, but only in the executable's data does it make its page logged whoever
+// writes it first; a page elsewhere another thread writes first is that thread's (foreign)
+void AddLock(uint32_t va, uint32_t size);
 // where other threads wrote the simulation region since the last call (a page's first write each)
 struct OtherWrite {
   uint32_t va, host_tid;

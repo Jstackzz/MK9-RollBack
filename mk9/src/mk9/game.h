@@ -46,10 +46,14 @@ uint32_t UiScreen();
 constexpr uint32_t kUiContinue = 0x62;
 // the title screen is up (0x833C77B8, 1 only there)
 bool TitleUp();
-// rounds won in the current fight by player 1 (0) or 2 (1) (0x833C7A38, 0x833C7A3C; final once the
-// CONTINUE? menu is up), and the round being fought (0x833CED28, from 1)
-int RoundsWon(int player);
+// the last round's winner, 1 or 2 (0x833C6C74, in the game's state from 0x833C6C54): set as a round ends, seconds
+// before the round number goes up, and kept until the next round's end, into the next fight; and the round being
+// fought (0x833CED28, from 1)
+int RoundWinner();
 int Round();
+// the rounds player 1 (0) or 2 (1) won as the game counts them in a match played on one PC (0x833C7A38, 0x833C7A3C,
+// final once the CONTINUE? menu is up): in a lobby match they stay 0 (autopilot.cpp counts them from RoundWinner)
+int RoundsWon(int player);
 
 // what the barrier tells the other players: this build's release stamp first, then the match's
 // settings this game would use

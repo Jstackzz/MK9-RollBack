@@ -50,7 +50,8 @@ build copy `external\rexglue-sdk\out\win-amd64\rexgpu-xenos.dll` into `mk9\out\b
 | `0x833C6C58` | phase: 2 boot/title, 3 menus, 7 select screens, 1 VS screen while the fight loads, 8 fight (intros and every round), 11 match over (finisher, victory, CONTINUE?) |
 | `0x833AEA80` | front-end screen: 0x18C title, 0x190 main menu (1 PLAYER), 0x194 (2 PLAYERS), 0x198 VERSUS MODE submenu, 0x250-0x284 select screens, 0x4C VS screen, 0x62 CONTINUE? |
 | `0x833C77B8` | 1 while the title screen is up |
-| `0x833C7A38`, `0x833C7A3C` | rounds won by player 1 / 2 (final once CONTINUE? is up) |
+| `0x833C6C74` | the last round's winner, 1 or 2: set as a round ends, seconds before the round number goes up, and kept until the next round's end (into the next fight) |
+| `0x833C7A38`, `0x833C7A3C` | rounds won by player 1 / 2 as the game counts them in a match played on one PC (final once CONTINUE? is up); 0 all through a lobby match |
 | `0x833CED28`, `0x833CED24` | round number, round timer |
 | `0x834161D8` | the game's random generator (UE3 LCG; `sub_826D91C0` int, `sub_826D91E8` float, `sub_826D3088` seed) |
 | `0x833CED48` | the fight's HUD (an object of 2168 bytes, 0 outside fights): +4 its top bar's offset down the frame, a float, -146 out of sight, 0 in place |
@@ -233,7 +234,11 @@ what the game read before each tick (`pads` lines), and `scriptcmp.py` holds tha
 Spectators: a player's game writes its barriers, inputs and checks to the launcher's local feed
 (TCP, `feed=127.0.0.1:port`); a spectator's game (`watch=1 feed=...`) reads every player from it
 and plays the match in lockstep without a player of its own. The launcher relays feeds through
-the server (FeedLink).
+the server (FeedLink). One that watches a match under way gets its feed from the start, all at
+once: the next match's barrier comes with this one's, and its READY is held until this barrier is
+over, and inputs that came during a barrier count. Until 0.5.3 neither: the next match's READY took
+the place of this one's (the spectator waited at the first barrier until it gave up after 60 s,
+"Known gaps"), and after a barrier it waited for inputs it already had.
 
 A game hears only its match: a UDP packet counts when it comes from the address set up for the
 slot it names (the other game, the server's relay or the launcher's tunnel), others are dropped
@@ -302,6 +307,8 @@ the park).
 python -I tools\netcmp.py a\net.log b\net.log                  # frame logs of two games side by side
 python -I tools\randcmp.py a\rand.txt b\rand.txt               # MK9_TRACE_RAND random draw traces
 python -I tools\scriptcmp.py a\script.txt b\script.txt         # -TraceScript: scripts and pads read, frame by frame
+python -I tools\feedreplay.py --seed <start line's seed> <session>\net-<match>.log   # a real match played again:
+                                     # a linked game given the spectator's start line with feed=127.0.0.1:7302
 ```
 
 ## The player package (each PC builds its own game)
@@ -350,9 +357,13 @@ restore is only right if the memory it puts back is the simulation's and nothing
    another thread writes (FMOD's file handles, a loader's buffer) is that thread's from then on.
 3. **What a restore leaves alone** (volatile bytes): the rendering command ring and its control
    block, the D3D device, every critical section outside the simulation heap (a lock's state never
-   goes back), the GPU callback's frame-time globals, the engine heap's own state and FMOD's table
-   of the memory it uses (`0x834B7F78`, below). Pages other threads write first are "foreign" (never
-   put back), but a page holding volatile bytes is logged whoever writes it.
+   goes back), the GPU callback's frame-time globals, the engine heap's own state, FMOD's table
+   of the memory it uses (`0x834B7F78`, below) and XAudio2's globals (`0x833C3AC0`, `0x834C19A4`).
+   Pages other threads write first are "foreign" (never put back), but a page holding volatile
+   bytes is logged whoever writes it, and so is a page of the executable's data with a lock on it
+   (it holds the simulation's globals too). A page elsewhere with only locks on it is its writer's
+   like any other: logged for its locks, XAudio2's engine object went back under its mixing thread
+   ("Known gaps").
 4. **The host.** `ReadFile` into a write-protected guest page fails in the kernel instead of
    faulting: the SDK's file read takes such pages first (`patches/`).
 5. **Whole frames.** GuardedMain's loop runs more than `FEngineLoop::Tick` each time round: before
@@ -417,7 +428,11 @@ rollbacks every 10 s of the fight's busiest stretch):
   of the screen with the skip, 1.1-1.5 % with every frame drawn): the GPU's textures do not go
   back, so the blood of a hit a rollback took back stays painted.
 
-Diagnostics: `MK9_RB_TRACE_FOREIGN=1` (who writes which pages first, stacks of foreign writers),
+Diagnostics: `MK9_RB_TRACE_FOREIGN=1` (who writes which pages first, stacks of foreign writers,
+each page a simulation thread writes after another thread wrote it first), `MK9_RB_TRACE_SHARED=1`
+(each page another thread writes first that is logged anyway for the volatile bytes on it, with that
+thread's stack: what a restore puts back under it), `MK9_RB_TRACE_FMOD=1` (pages FMOD's code writes
+on a simulation thread),
 `MK9_GMALLOC_TRACE=1` (frees traced, double frees explained), `MK9_NET_SITES_LOG` (draws per
 call site at every check; `-Sites` in `netplay-local.ps1`), `MK9_TRACE_SCRIPT` (every script
 process made, every script random draw and the pads read before each tick, with the frame and the
@@ -494,6 +509,46 @@ rollbacks left them).
   Not explained yet: `a5e3862d9529` went out of step at the first check, frame 30, before either game had rolled
   back and with no input from either player. The lagged two-game test stays in step with one game's audio queued
   64 frames ahead (`audio_maxqframes`), with its memexport readback off, or drawing at 3x3 resolution.
+- **Rollback crashed the game in XAudio2's mixing thread** in 0.5.1 and 0.5.2 (found in players' crash reports
+  and fixed 2026-10-29): `C0000005` at `sub_832C93D0+0x1f9` reading guest address 0, on the thread XAudio2 mixes
+  on (`sub_832C92D0`), a minute or two into lagged online matches (four reports, three in a row from one player
+  at 65 ms). Each pass the mixer takes the pointer to its statistics out of its engine object (`+656` of the object
+  at `0x40083D40`, exchanged with 0), reads them and puts the pointer back. That object holds critical sections,
+  and every critical section outside the simulation heap made its page logged whoever wrote it first: a frame
+  whose first write of the page was the mixer putting its pointer back kept the page with the 0 in it, and a
+  rollback past that frame put all of the page but the locks back under the mixer, which then read through the
+  0. A sync test with `MK9_RB_TRACE_SHARED=1` listed eight of XAudio2's heap pages logged that way, written first
+  by its mixing thread or by FMOD's output thread through XAudio2, and two pages of its globals in the
+  executable's data. Since 0.5.3 a lock makes its page logged only in the executable's data (`rb::AddLock`,
+  `LockForcesPage`): a page elsewhere with only locks on it is foreign when another thread writes it first,
+  like any other. XAudio2's globals are volatile (`engine.cpp`, `kOtherThreadsGlobals`: its lock and its seven
+  objects from `0x833C3B20`, its allocator's state at `0x834C19B0` and the rest of its block up to `0x834C2424`;
+  only XAudio2's code addresses them). The same sync test then logged none of XAudio2's heap pages for its
+  threads (14 pages logged for other threads' writes, from 24: the D3D device, the GPU callback's and the
+  engine heap's globals, the executable's pages with locks on them), no simulation thread wrote a page another
+  thread had written first (`MK9_RB_TRACE_FOREIGN=1`), and it went back 300 times without a crash; the
+  lagged two-game test's fight stayed in step (0 checks and 0 of 4,963 frames different, 32-36 rollbacks
+  every 10 s).
+- **Every lobby match's result was player 2 winning 0-0** until 0.5.3 (found in the server's results on 2026-10-29 and
+  fixed then): the game's count of the rounds each player won (`0x833C7A38`, `0x833C7A3C`) counts in a match played on
+  one PC and in the tests' launcher-link matches (both reported `player 1 won 2-0`), but stayed 0 in every lobby
+  match (crash reports in round 2 read 0-0), and the autopilot took the higher count as the winner, player 2 at a
+  tie. So both games reported the same wrong result, the server took it as agreed, and the win went to player 2.
+  Found by playing a real match again from a spectator's net log (`tools\feedreplay.py`; curzeta and Sethblazed01,
+  Liu Kang winning both rounds) with dumps of the executable's data every 90 frames, beside a one-PC match each player won 2-0:
+  `0x833C6C74` holds each round's winner in all three. The autopilot now counts the rounds from it as the round
+  number goes on and counts the last round at CONTINUE? (`autopilot.cpp`); the replayed match reports `player 1
+  won 2-0`.
+- **Watching a match under way never started** until 0.5.3 (found 2026-10-29 in a player's own log and fixed then):
+  the spectator's game stood at `meeting for match 1` until the player closed it (or gave up after 60 s). Its feed
+  starts at the match's start, and a match under way has its next barrier in it too (the fight's, match 2): the
+  next match's READY took the place of this one's in the barrier (`ready_match`), so the first barrier never had
+  everyone. With that held until the barrier is over (`next_match`, `netplay.cpp`), a second fault showed: after
+  a barrier a spectator counted only the first `delay` frames as held and waited for the rest to come, while the
+  feed had brought them all already, and lost the players 10 s later ("stopped answering at frame 2"). Both fixed;
+  tested by playing a real lobby match (curzeta and Sethblazed01, 2026-10-29) from a spectator's net log through
+  a stand-in feed sent all at once (`tools\feedreplay.py`): menus, fight and CONTINUE? on the same frames as
+  the spectator that watched it live (within one frame), all 260 checks equal.
 - A crash before the first frame, seen once in about 130 test boots (2026-10-28, three games starting at the
   same moment) and in none of 107 more that tried to bring it back (2026-10-29, three or four at once with the same
   settings). `main()` (`sub_823669D8`) stored through r31 = 0 right after engine pre-init (`sub_82576640`)

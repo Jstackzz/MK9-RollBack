@@ -64,6 +64,13 @@ the MK9 Online server, so whoever runs it can see what went wrong.
   queries (how much of something got drawn) in its own way, and some of the game's effects follow those
   answers, so two players' games drew differently and the desync check stopped the match. Since 0.5.2 every PC
   gets the same answer (docs/GAME.md, "Netplay").
+- Until 0.5.3 a lagged online match could crash a minute or two in, in the game's sound mixer (an access
+  violation in XAudio2's code): a rollback put part of the mixer's memory back under it while it ran. Fixed in
+  0.5.3 (docs/GAME.md, "Known gaps").
+- Until 0.5.3 watching a match already under way never started: the spectator's game waited at the match's
+  start until it gave up. Fixed in 0.5.3.
+- Until 0.5.3 every lobby match's result came out as player 2 winning 0-0, whoever won: the game's own count of
+  the rounds won stays 0 in online matches. Since 0.5.3 the game counts the rounds from each round's winner.
 - Until 0.5.3 a rollback could stop a match as out of step when both games were alike: once it took back the
   first random numbers a part of the game had drawn, its game kept counting that part (at 0) and the other
   player's did not, so their checks differed. Fixed in 0.5.3 (docs/GAME.md, "Known gaps").

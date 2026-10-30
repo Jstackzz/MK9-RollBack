@@ -62,6 +62,12 @@ const bool g_trace_fmod = [] {
   const char* v = std::getenv("MK9_RB_TRACE_FMOD");
   return v && *v == '1';
 }();
+// MK9_RB_TRACE_SHARED=1 (diagnostics): pages other threads write first that are logged anyway for the volatile bytes
+// given on them, with the writer's guest stack, once a page: what a restore puts back under that thread
+const bool g_trace_shared = [] {
+  const char* v = std::getenv("MK9_RB_TRACE_SHARED");
+  return v && *v == '1';
+}();
 std::vector<uint32_t> g_foreign_list;  // to protect again at each CloseFrame
 uint64_t g_foreign_hits = 0;
 
@@ -93,7 +99,8 @@ const bool g_no_ahead = [] {
 struct Mask {
   uint64_t bits[kPage / 64] = {};
 };
-std::vector<uint8_t> g_shared(0x100000, 0);
+std::vector<uint8_t> g_shared(0x100000, 0);  // pages with volatile bytes: a restore leaves those as they are
+std::vector<uint8_t> g_forced(0x100000, 0);  // pages logged whoever writes them first
 std::unordered_map<uint32_t, Mask> g_masks;
 
 struct FrameState {
@@ -134,6 +141,14 @@ std::vector<Span> g_untracked;
 Span g_sim_region{0, 0};
 std::vector<OtherWrite> g_other_writes;  // other threads' first writes of simulation region pages
 std::map<uint32_t, uint32_t> g_volatile;  // the volatile ranges given: start -> size
+std::map<uint32_t, uint32_t> g_locks;     // the locks given: start -> size
+
+// A lock in the executable's data shares its page with globals the simulation writes: its page is logged whoever writes
+// it first (a page another thread took the lock on first would be foreign, the simulation's globals on it never put
+// back). One elsewhere is in an object of its own, and its page is the writing thread's like any other: XAudio2's
+// engine object holds three, and logged for them its page was put back under XAudio2's mixing thread, whose pointer
+// to its statistics went back to null (the crash in sub_832C93D0 of 0.5.1 and 0.5.2)
+bool LockForcesPage(uint32_t va) { return va >= 0x80000000u && va < 0x90000000u; }
 
 std::vector<void (*)(uint32_t)>& RestoreListeners() {
   static std::vector<void (*)(uint32_t)> fns;
@@ -187,8 +202,8 @@ void UntrackLocked(const Span& s) {
   }
 }
 
-// g_lock held
-void MarkVolatile(uint32_t va, uint32_t size) {
+// g_lock held; forced: their pages are logged whoever writes them first
+void MarkVolatile(uint32_t va, uint32_t size, bool forced) {
   for (uint64_t at = va; at < uint64_t(va) + size;) {
     uint32_t page = uint32_t(at) & ~(kPage - 1), off = uint32_t(at) - page;
     uint32_t n = uint32_t(std::min<uint64_t>(uint64_t(va) + size - at, kPage - off));
@@ -197,6 +212,7 @@ void MarkVolatile(uint32_t va, uint32_t size) {
     Mask& m = g_masks[page];
     for (uint32_t b = off; b < off + n; b++) m.bits[b >> 6] |= 1ull << (b & 63);
     g_shared[page >> 12] = 1;
+    if (forced) g_forced[page >> 12] = 1;
   }
 }
 
@@ -250,7 +266,25 @@ void Take(uint32_t page, uint32_t va) {
       }
     }
   }
-  if (sim || region || g_shared[page >> 12]) {
+  if (g_trace_shared && !sim && !region && g_forced[page >> 12]) {
+    // another thread's first write of a page that is logged anyway for the volatile bytes on it: what a restore puts
+    // back under that thread
+    static std::vector<uint32_t> told;
+    if (told.size() < 400 && std::find(told.begin(), told.end(), page) == told.end()) {
+      told.push_back(page);
+      if (auto* ts = rex::runtime::ThreadState::Get(); ts && ts->context()) {
+        uint32_t returns[10];
+        returns[0] = uint32_t(ts->context()->lr);
+        const int n = 1 + game::StackReturns(*ts->context(), returns + 1, 9);
+        std::string chain;
+        for (int i = 0; i < n; i++) chain += fmt::format(" {:08X}", returns[i]);
+        REXLOG_WARN("mk9 rollback: host thread {} first wrote page {:08X} (volatile bytes: kept) at {:08X} in frame {}, "
+                    "stack{}",
+                    tid, page, va, g_current.load(), chain);
+      }
+    }
+  }
+  if (sim || region || g_forced[page >> 12]) {
     std::vector<uint32_t>& pages = g_frames.empty() || g_frames.back().closed ? g_pending_pages : g_frames.back().pages;
     std::vector<uint8_t>& data = g_frames.empty() || g_frames.back().closed ? g_pending_data : g_frames.back().data;
     const auto take = [&](uint32_t p) {
@@ -340,16 +374,21 @@ LONG CALLBACK OnFault(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
   // another thread writing a page the main thread uses: those bytes are that thread's from now on
-  if (!SimThread(GetCurrentThreadId()) && st != kForeign && st == kDirty) MarkVolatile(va & ~7u, 8);
+  if (!SimThread(GetCurrentThreadId()) && st != kForeign && st == kDirty) MarkVolatile(va & ~7u, 8, true);
   if (st == kClean) {
     Take(page, va);
   } else {
     if (g_trace_foreign && st == kForeign && SimThread(GetCurrentThreadId())) {
-      if (g_foreign_hits++ < 60) {
+      // once a page; one with locks on it would be logged if its locks made it so (LockForcesPage)
+      static std::vector<uint32_t> told;
+      g_foreign_hits++;
+      if (told.size() < 200 && std::find(told.begin(), told.end(), page) == told.end()) {
+        told.push_back(page);
         uint32_t lr = 0;
         if (auto* ts = rex::runtime::ThreadState::Get(); ts && ts->context()) lr = uint32_t(ts->context()->lr);
-        REXLOG_WARN("mk9 rollback: {} wrote {:08X} on a page another thread wrote first (guest lr {:08X})",
-                    GetCurrentThreadId() == g_main_tid ? "the main thread" : "a simulation thread", va, lr);
+        REXLOG_WARN("mk9 rollback: {} wrote {:08X} on a page another thread wrote first{} (guest lr {:08X})",
+                    GetCurrentThreadId() == g_main_tid ? "the main thread" : "a simulation thread", va,
+                    g_shared[page >> 12] && !g_forced[page >> 12] ? ", with locks on it" : "", lr);
       }
     }
     Protect(page, false);
@@ -406,6 +445,7 @@ bool Arm(PPCContext& ctx, uint32_t frame) {
   std::lock_guard<std::mutex> lock(g_lock);
   std::fill(g_page.begin(), g_page.end(), kUntracked);
   std::fill(g_shared.begin(), g_shared.end(), uint8_t(0));
+  std::fill(g_forced.begin(), g_forced.end(), uint8_t(0));
   g_masks.clear();
   // the first frame measures which blocks to take whole
   for (const uint32_t b : g_dense_list) g_dense[b] = 0;
@@ -452,7 +492,8 @@ bool Arm(PPCContext& ctx, uint32_t frame) {
   for (const Span& s : g_untracked) UntrackLocked(s);
   // the volatile bytes before any page is protected: no other thread's first write can make a
   // page with them foreign
-  for (const auto& [va, size] : g_volatile) MarkVolatile(va, size);
+  for (const auto& [va, size] : g_volatile) MarkVolatile(va, size, true);
+  for (const auto& [va, size] : g_locks) MarkVolatile(va, size, LockForcesPage(va));
   {
     uint32_t run = 0, count = 0;
     for (uint64_t p = 0; p < 0x100000000ull; p += kPage) {
@@ -691,7 +732,14 @@ void AddVolatile(uint32_t va, uint32_t size) {
   std::lock_guard<std::mutex> lock(g_lock);
   auto& n = g_volatile[va];
   n = std::max(n, size);
-  if (g_armed) MarkVolatile(va, size);
+  if (g_armed) MarkVolatile(va, size, true);
+}
+
+void AddLock(uint32_t va, uint32_t size) {
+  std::lock_guard<std::mutex> lock(g_lock);
+  auto& n = g_locks[va];
+  n = std::max(n, size);
+  if (g_armed) MarkVolatile(va, size, LockForcesPage(va));
 }
 
 void SetSimulationRegion(uint32_t va, uint32_t size) {

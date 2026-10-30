@@ -109,6 +109,12 @@ constexpr std::pair<uint32_t, uint32_t> kOtherThreadsGlobals[] = {
     // which a restore over FMOD's allocations would leave as it was. They happen in a fight's first frames, where no
     // rollback goes since (mk9/net/netplay.cpp, kQuietFrames); MK9_RB_TRACE_FMOD lists such writes
     {0x834B7F78, 0x8008},
+    // XAudio2's own globals, which its mixing thread (sub_832C92D0) writes on pages that hold other globals: its lock
+    // and its seven objects of 0x430 bytes (from 0x833C3B60, built by sub_83367DE0 and the six after it), and its
+    // allocator's bookkeeping with its lock (0x834C19B0, sub_832AEB58), its voices' table and the engine's globals.
+    // Only XAudio2's code (0x832AB000-0x832ED000) addresses these
+    {0x833C3AC0, 0x2060},
+    {0x834C19A4, 0xA80},
 };
 std::atomic<uint32_t> g_d3d_device{0};
 std::atomic<uint32_t> g_render_tid{0};
@@ -160,16 +166,17 @@ class Threads {
   std::mutex lock_;
   std::vector<Entry> all_;
 };
-// Every critical section in guest memory outside the simulation heap is volatile: a lock's state
-// must never go back (at a frame's top the simulation's threads hold none, other threads may hold
-// any). Those in the simulation heap go with their objects (mk9/gmalloc.cpp). Seen ones are cached.
+// Every critical section in guest memory outside the simulation heap is a lock rollback leaves as it
+// is: a lock's state must never go back (at a frame's top the simulation's threads hold none, other
+// threads may hold any). Those in the simulation heap go with their objects (mk9/gmalloc.cpp). Seen
+// ones are cached.
 void OnCriticalSection(uint32_t cs) {
   static std::atomic<uint32_t> seen[1 << 15];
   std::atomic<uint32_t>& slot = seen[(cs >> 2) & ((1 << 15) - 1)];
   if (slot.load(std::memory_order_relaxed) == cs) return;
   slot.store(cs, std::memory_order_relaxed);
   if (mk9::simheap::Sim().Owns(cs)) return;
-  mk9::rb::AddVolatile(cs, 28);
+  mk9::rb::AddLock(cs, 28);
 }
 
 // PhysX's events and how they stood at the top of each kept frame

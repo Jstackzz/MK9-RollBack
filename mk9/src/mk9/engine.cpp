@@ -27,11 +27,19 @@
 // Event::wait / Event::reset see (sub_83101A58 / sub_83101A50, the handle at +4).
 //
 // UE3's thread pool (GThreadPool, FQueuedThreadPoolWin: AddQueuedWork sub_82779818) runs work the
-// simulation hands it (a PhysX scene's step queued from a render command, PhysX tasks from jobs) on
-// threads of its own (FQueuedThreadWin::Run, sub_8255EF30): they are simulation threads too. An idle
-// one waits on its DoWorkEvent (auto reset: a thread that took a signal is no longer idle), so the
-// hold waits for every one of them in that wait with its event not set: then none has work queued
-// and none can get any while the simulation is held.
+// simulation hands it (a PhysX scene's step queued from a render command, PhysX tasks from jobs, a
+// skinned mesh's bone matrices, sub_82917F38) on threads of its own (FQueuedThreadWin::Run,
+// sub_8255EF30): they are simulation threads too. An idle one waits on its DoWorkEvent (auto reset),
+// and the hold waits for every one of them in that wait with its event not set and no work given:
+// DoWork gives a thread its work (+16) before it signals it, and a thread that has taken its signal
+// still counts as waiting until it runs on. Until 2026-11-03 the hold looked at the signals only, and
+// could end while such a thread ran its work through the frame's close and the restore (the sync test
+// saw pool threads woken during a hold 2 to 5 times in 340 rollbacks). Work given once the hold is
+// complete (a restore giving back a frame top's, below) waits for the hold to end and is the next
+// frame's; the threads stay running until then, as the rendering thread may wait for their work in a
+// command (sub_827EF9F8) while the hold waits for it. Which threads had work given at each kept frame's
+// top is kept with it, and a restore to that top signals them again (as PhysX's events); a thread that
+// wakes to find no work had it taken back by a restore while it stood there, and waits for the next.
 //
 // MK9_ONETHREAD=1: no rendering thread, as with the engine's own -ONETHREAD (FEngineLoop::PreInit
 // checks it at 0x823660C4 and otherwise starts it with sub_82741218 once the hardware has more
@@ -94,9 +102,9 @@ constexpr uint32_t kD3DDeviceSize = 0x6000;
 // Guest memory other threads keep writing that shares pages with the simulation's globals, left as
 // it is by every restore (whatever rollback logs of those pages):
 constexpr std::pair<uint32_t, uint32_t> kOtherThreadsGlobals[] = {
-    // UE3's frame time on the GPU, which it measures in a callback on the GPU's interrupt thread
-    // (sub_826B5750), on pages that hold the rendering thread's state too
-    {0x833F3520, 1},  // "a GPU frame is being timed"
+    // UE3's frame time on the GPU, which it measures in callbacks on the GPU's interrupt thread (sub_826B5710
+    // starts it, sub_826B5750 ends it), on pages that hold the rendering thread's state too
+    {0x833F351C, 5},  // when the GPU frame started, and "a GPU frame is being timed"
     {0x833DD564, 4},  // its cycles
     {0x833DD568, 8},  // its milliseconds (a double)
     // the engine heap's own state: GMalloc (the MemoryManager, built in place by sub_829AED30 up to
@@ -234,6 +242,16 @@ const bool g_events_hooked = [] {
   return true;
 }();
 
+// Work a pool thread was given once a frame's top was held stands until the hold ends and is that frame's to run (see
+// the header): a restore to that frame's top gives the thread its signal back
+void SavePool(uint32_t frame);
+void RestorePool(uint32_t frame);
+const bool g_pool_hooked = [] {
+  mk9::rb::OnOpen(&SavePool);
+  mk9::rb::OnRestore(&RestorePool);
+  return true;
+}();
+
 const bool g_cs_hooked = [] {
   rex::kernel::xboxkrnl::SetCriticalSectionHook(&OnCriticalSection);
   return true;
@@ -242,13 +260,21 @@ const bool g_cs_hooked = [] {
 Threads g_workers;  // the job manager's
 Threads g_physics;  // PhysX's
 Threads g_pool;     // the thread pool's
+// the pool's threads: Run's thread object (+12 time to die, +16 the work DoWork gave it) and its DoWorkEvent's
+// handle; and which of them had work given at the top of each kept frame (a bit each), which a restore to that frame
+// gives them again
+struct PoolThread {
+  uint32_t object, event;
+};
 std::mutex g_pool_lock;
-std::vector<uint32_t> g_pool_events;  // their DoWorkEvents' handles
+std::vector<PoolThread> g_pool_threads;
+std::map<uint32_t, uint32_t> g_pool_given;  // frame -> bits
 std::atomic<int> g_pool_waiting{0};
 thread_local bool t_pool = false;
 constexpr uint32_t kPoolIdleWait = 0x8255EF68;  // return address of the DoWorkEvent wait in Run
 // the hold: set by the main thread; the others say when they are in their waits (see Park)
 std::atomic<bool> g_hold{false};
+std::atomic<bool> g_held{false};  // and every thread found in its wait: the hold is complete (pool threads, see the header)
 std::atomic<bool> g_render_waiting{false};
 std::atomic<int> g_workers_waiting{0};
 std::atomic<int> g_physics_waiting{0};
@@ -270,6 +296,28 @@ void Park(Leave leave, Back back) {
   }
 }
 
+void SavePool(uint32_t frame) {
+  std::lock_guard lock(g_pool_lock);
+  uint32_t given = 0;
+  for (size_t i = 0; i < g_pool_threads.size() && i < 32; i++)
+    if (mk9::game::ReadU32(g_pool_threads[i].object + 16)) given |= 1u << i;
+  // from this frame on: a frame being run again or an earlier match's (as SaveEvents)
+  g_pool_given.erase(g_pool_given.lower_bound(frame), g_pool_given.end());
+  g_pool_given[frame] = given;
+  while (g_pool_given.size() > size_t(mk9::rb::kKeepFrames) + 4) g_pool_given.erase(g_pool_given.begin());
+}
+
+void RestorePool(uint32_t frame) {
+  std::lock_guard lock(g_pool_lock);
+  auto it = g_pool_given.find(frame);
+  if (it == g_pool_given.end()) return;
+  // one that has other work by now runs what the restore gave it and finds its signal again after: nothing to do,
+  // it waits on
+  for (size_t i = 0; i < g_pool_threads.size() && i < 32; i++)
+    if (it->second & (1u << i))
+      if (auto ev = EventOf(g_pool_threads[i].event)) ev->Set(0, false);
+  g_pool_given.erase(std::next(it), g_pool_given.end());
+}
 
 }  // namespace
 
@@ -356,11 +404,13 @@ bool IsSimulationThread(uint32_t host_tid) {
   return g_workers.Has(host_tid) || g_physics.Has(host_tid) || g_pool.Has(host_tid);
 }
 
-// a pool thread's DoWorkEvent is set: it has work it has not taken yet
+// a pool thread's DoWorkEvent is set, or it has work given it has not finished: one that took its signal
+// still counts as waiting until it runs on
 static bool PoolWorkPending() {
   std::lock_guard lock(g_pool_lock);
-  for (uint32_t h : g_pool_events) {
-    auto ev = EventOf(h);
+  for (const PoolThread& t : g_pool_threads) {
+    if (game::ReadU32(t.object + 16)) return true;
+    auto ev = EventOf(t.event);
     if (!ev) continue;
     uint32_t set = 0;
     ev->Query(nullptr, &set);
@@ -381,8 +431,10 @@ bool Hold(int timeout_ms) {
   for (int spins = 0;; spins++) {
     const bool render = !g_render_alive.load() || g_render_waiting.load();
     if (render && size_t(g_workers_waiting.load()) >= workers && size_t(g_physics_waiting.load()) >= physics &&
-        size_t(g_pool_waiting.load()) >= pool && !PoolWorkPending())
+        size_t(g_pool_waiting.load()) >= pool && !PoolWorkPending()) {
+      g_held = true;
       break;
+    }
     if (std::chrono::steady_clock::now() > until) {
       static int warned = 0;
       if (warned++ < 20) {
@@ -411,6 +463,7 @@ bool Hold(int timeout_ms) {
 void Release() {
   if (!g_holding) return;
   g_holding = false;
+  g_held = false;
   g_hold = false;
 }
 
@@ -440,7 +493,7 @@ REX_HOOK_RAW(sub_8255EF30) {
   const uint32_t event = mk9::game::ReadU32(mk9::game::ReadU32(ctx.r3.u32));
   {
     std::lock_guard lock(g_pool_lock);
-    g_pool_events.push_back(event);
+    g_pool_threads.push_back({ctx.r3.u32, event});
   }
   REXLOG_INFO("mk9 engine: a thread pool thread runs on host thread {} (its event {:08X})", tid, event);
   __imp__sub_8255EF30(ctx, base);
@@ -448,9 +501,19 @@ REX_HOOK_RAW(sub_8255EF30) {
 
 REX_HOOK_RAW(sub_8237C7B8) {
   if (!t_pool || uint32_t(ctx.lr) != kPoolIdleWait) return __imp__sub_8237C7B8(ctx, base);
-  g_pool_waiting.fetch_add(1);
-  __imp__sub_8237C7B8(ctx, base);
-  g_pool_waiting.fetch_sub(1);
+  // Run's thread object (its r30): +12 time to die, +16 the work DoWork gave it
+  const uint32_t thread = ctx.r30.u32;
+  const uint64_t event = ctx.r3.u64, timeout = ctx.r4.u64;
+  for (;;) {
+    g_pool_waiting.fetch_add(1);
+    __imp__sub_8237C7B8(ctx, base);
+    // signalled once the hold was complete: stay, counted as waiting, until it ends
+    while (g_held.load()) std::this_thread::yield();
+    g_pool_waiting.fetch_sub(1);
+    if (mk9::game::ReadU32(thread + 16) || mk9::game::ReadU32(thread + 12)) return;
+    ctx.r3.u64 = event;
+    ctx.r4.u64 = timeout;
+  }
 }
 
 REX_HOOK_RAW(sub_83101A50) {

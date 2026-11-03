@@ -134,6 +134,12 @@ void Mk9App::OnPreSetup(rex::RuntimeConfig& config) {
 
 void Mk9App::OnPostSetup() {
   REXLOG_INFO("mk9: game data {}, saves {}", game_data_root().string(), user_data_root().string());
+  // no mouse pointer over the game, which takes no mouse input (as MK3D Online's games): over a window's title bar
+  // and outside the window it shows as usual. The window is there already (SetupPresentation), on this thread
+  if (window())
+    window()->SetCursorVisibility(rex::ui::Window::CursorVisibility::kHidden);
+  else
+    REXLOG_WARN("mk9: no window yet to hide the mouse pointer over");
   mk9::crash::Install();  // again: the runtime's libraries are loaded now, and one may have put its own in
   // The GPU's occlusion queries (how much of something got drawn) answered with a fixed count, as Xenia does: the
   // answers decide what UE3 counts as seen, which decides what some of the game's effects do and draw, and two PCs'

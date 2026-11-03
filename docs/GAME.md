@@ -547,6 +547,32 @@ rollbacks left them).
   the select screen, one PC with 26 draws more at `82383B38` than the other: the menus' draws go with what each
   PC has loaded, and only fights are checked now ("Netplay"). The lagged two-game test then had no check in the
   menus and every one of the fight's equal, the fight's scripts the same frame for frame.
+- **Not explained yet: fights where one PC's scripts did a little more** (0.5.4, 2026-11-03: five of the six lobby
+  matches two players started that evening, 47 ms apart through the relay, none finished; the sixth was the id
+  offset above). With the same next object id at the fight's barrier: a script process (`100009E8`) drew once in one
+  game and never in the other by frame 1080; one (`100007EE`) drew 6 times against 8 by frame 900, with 1 and 2
+  rollbacks of one frame between them; the site `82A25B7C/829FA8C0` drew 10 times against 11 by round 2; and a
+  process made during round 2 had an id 4 higher in the game that had rolled back 79 times than in the one that had
+  rolled back 31 times. Twelve script processes and three natives drew in those fights; the two-game test's
+  scripted fight (walking and jabbing) has one process drawing, in every pairing and arena tried (Scorpion and
+  Sub-Zero, Ermac and Freddy Krueger; The Living Forest, The Pit and its Bottom and Day, Rooftop at dawn), and none
+  of those runs went out of step. The same test with both players mashing (specials' motions, strings, throws,
+  enhanced moves, X-rays; 40-84 rollbacks every 10 s) drifted, with every check equal: with ids and addresses left
+  out, the two fights' scripts did the same on every frame but five, where one game made a pair of objects
+  (`sub_82AB2A64` through `sub_829EDC20`, from the list `sub_829F0BE8` goes through: entries flagged `0x02000000` at
+  +56 with a float above 0 at +0) that the other made a frame later or not at all. At frame 1306 both games' final
+  runs had the same inputs: the one that ran it once made the pair, the one that ran it again after a wrong guess
+  did not, and every id after was 2 apart. A rollback leaves something that decides that spawn as the frames it
+  put back left it (a second seed did not drift; netplay with 30 % of guesses wrong on purpose drifted the same way
+  with Reptile and Sub-Zero, the pairs 2 frames apart). Two leads: FMOD's own thread writes game memory through
+  the game's sound callbacks (`sub_82602D00` / `sub_82604168` into `sub_82728A38`), at moments of each PC's real
+  time, and since the rule that bytes another thread writes on the main thread's pages are that thread's (no
+  restore puts them back) that made bytes of the game state's page (`0x833C6000`) and of a simulation heap object
+  volatile for good; and a sync test that runs the frames it takes back with other inputs first had a game-flow
+  script (process made by `1000033F`) sleep 28 ticks where the straight run slept 1. The fighters' main scripts
+  (made by `sub_823B3EB8`) draw in bursts of 2 a frame: the reports' differences of 2 and 10 are one and five such
+  frames. That sync test also crashed once (Reptile and Sub-Zero): the rendering thread freed a simulation heap
+  block that was free already ("freed twice") and then ran a render command through a freed one.
 - **Rollback crashed the game in XAudio2's mixing thread** in 0.5.1 and 0.5.2 (found in players' crash reports
   and fixed 2026-10-29): `C0000005` at `sub_832C93D0+0x1f9` reading guest address 0, on the thread XAudio2 mixes
   on (`sub_832C92D0`), a minute or two into lagged online matches (four reports, three in a row from one player

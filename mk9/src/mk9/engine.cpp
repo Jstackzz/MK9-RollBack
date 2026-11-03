@@ -305,6 +305,8 @@ std::string TakeRenderWaitSamples(int top) {
   return out;
 }
 
+const PPCContext* RenderContext() { return g_render_ctx.load(); }
+
 bool WaitRenderIdle(int timeout_ms) {
   const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   auto sampled = std::chrono::steady_clock::now();

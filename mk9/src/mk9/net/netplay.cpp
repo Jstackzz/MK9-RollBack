@@ -597,8 +597,14 @@ void LogFrame(bool again) {
   std::fputc('\n', g_log);
 }
 
+std::atomic<bool> g_waiting{false};  // WaitForInputs is waiting (Waiting)
+
 // every other player's inputs up to frame f are here (false: someone is gone)
 bool WaitForInputs(uint32_t f) {
+  struct Waits {
+    Waits() { g_waiting = true; }
+    ~Waits() { g_waiting = false; }
+  } waits;
   auto started = Clock::now();
   bool waited = false;
   for (;;) {
@@ -1061,6 +1067,7 @@ void RequestMeet(uint32_t seed) {
 
 Status GetStatus() { return g_status.load(); }
 bool InSync() { return g_status == Status::InSync; }
+bool Waiting() { return g_waiting.load(); }
 uint32_t Frame() { return g_frame; }
 
 bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agreed) {

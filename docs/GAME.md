@@ -157,6 +157,17 @@ into guest memory, so `crash.dmp` also takes the crashed guest thread's stack (f
 and 1 KB around every guest address in its registers; `crash.txt` says where guest memory sits (`guest memory at
 host ...`: guest address a is host address that plus a).
 
+A game that stands still says where too (since 0.5.5, as MK3D Online's game link watches its frames): a thread of
+`crash.cpp`'s, started with the first frame, looks every 250 ms, and when no frame started for 10 s while netplay is in
+sync and not waiting for the others' inputs (`net::Waiting`; a barrier is not in sync), it writes `hang.txt` beside
+where `crash.txt` would go: where the main thread's host code is (its registers taken while it is suspended a moment,
+its stack walked once it runs again) and its guest registers and call stack, the rendering thread's
+(`engine::RenderContext`), the frames run and the game's and netplay's state; the log says `mk9 watch: no frame for
+10 s at frame f: the game stands still (hang.txt), its main thread at ...`, once, until frames go on again (`mk9 watch:
+frames again after n s`, and it becomes `hang-over.txt`). A look a second or more after the last one (a debugger, the
+PC asleep) starts the count again. The launcher reports a game closed with `hang.txt` there. 0.5.3's three matches
+whose game was closed minutes in (exit code 0) said nothing of why. `MK9_CRASH_TEST=<frame>:hang` stands still 15 s.
+
 ## Crashes in the game's own code
 
 Three of the first five player reports (0.4.0, 2026-10-28) were one crash: `sub_82A30C20`, the script command that

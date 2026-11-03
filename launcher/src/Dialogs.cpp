@@ -430,7 +430,7 @@ void UpdateDialog::setFailed(const QString& text) {
 
 // --- CreateLobbyDialog -----------------------------------------------------------------------------
 
-CrashDialog::CrashDialog(const QString& reportDir, const QString& summary, bool canSend, QWidget* parent)
+CrashDialog::CrashDialog(const QString& reportDir, const QString& summary, bool canSend, bool noted, QWidget* parent)
     : QDialog(parent), reportDir_(reportDir) {
     setWindowTitle(tr("MK9 Online crashed"));
     setModal(false);
@@ -445,12 +445,16 @@ CrashDialog::CrashDialog(const QString& reportDir, const QString& summary, bool 
     what->setWordWrap(true);
     what->setAlignment(Qt::AlignCenter);
     v->addWidget(what);
-    auto* info = ui::label(tr("A crash report was saved in %1. Sending it to the MK9 Online server lets the people who "
+    const QString already = noted ? tr(" Where it happened went to the MK9 Online server already, in a few lines: the "
+                                       "crash's code and place in the game, what the game was doing, its graphics card "
+                                       "and its last errors.")
+                                  : QString();
+    auto* info = ui::label(tr("A crash report was saved in %1.%2 Sending it to the MK9 Online server lets the people who "
                               "run it see what went wrong: what the game and the launcher were doing, where the game "
                               "crashed, the end of their logs, and this PC's Windows version, processor, memory and "
                               "graphics card. Your files are not in it, and your Windows user name is taken out of the "
                               "paths in it.")
-                               .arg(QDir::toNativeSeparators(reportDir)),
+                               .arg(QDir::toNativeSeparators(reportDir), already),
                            "Muted");
     info->setWordWrap(true);
     info->setTextInteractionFlags(Qt::TextSelectableByMouse);

@@ -4,7 +4,9 @@
 // launcher's log: report.txt (what the game wrote about its crash, mk9/src/mk9/crash.h, the end of its log and of the
 // launcher's, what the launcher was doing, this PC's Windows, processor, memory and graphics card), the game's
 // minidump (crash.dmp) and its whole log. The newest 20 are kept. The player is shown it and may send report.txt to
-// the MK9 Online server (crash_report, docs/PROTOCOL.md), with their user folder's path taken out first.
+// the MK9 Online server (crash_report, docs/PROTOCOL.md), with their user folder's path taken out first. A game closed
+// while it stood still in a match (it wrote hang.txt) gets one too. What the game said of where it crashed or stood
+// still goes to the server by itself (note.json, crash_note: a few lines, as MK3D Online's launchers send).
 
 #include <QObject>
 #include <QString>
@@ -28,6 +30,9 @@ public:
     static QByteArray forSending(const QString& reportDir);
     // sends it (crash_report messages, zlib and base64 in parts); false when the server is not connected
     static bool send(ServerClient* server, const QString& reportDir);
+    // sends the report's note (crash_note: how the game ended, where, the game's and netplay's state, its graphics card,
+    // its last errors) once; false when not signed in or already sent
+    static bool sendNote(ServerClient* server, const QString& reportDir);
     // the exit code in words ("an access violation"), empty when it is not one of the known ones
     static QString exitText(int exitCode);
 

@@ -170,8 +170,11 @@ bool GameProcess::start(const QString& exe, QString* error, bool netMode) {
         poll_.stop();
         applog::write(QStringLiteral("game %1/%2: exited with code %3%4")
                           .arg(gameId_).arg(instance_).arg(code).arg(st == QProcess::CrashExit ? " (crash)" : ""));
-        // ended by itself with an error (not asked to quit, not killed): a crash report
-        if (!quitting_ && code != 0 && !standIn_) CrashReports::instance().gameEnded(gameId_, sessionDir_, code, ran_.elapsed());
+        // ended by itself with an error (not asked to quit, not killed), or closed while it stood still in a match (its
+        // hang.txt, mk9/src/mk9/crash.h): a crash report
+        const bool stoodStill = code == 0 && QFileInfo::exists(QDir(sessionDir_).filePath(QStringLiteral("hang.txt")));
+        if (!quitting_ && (code != 0 || stoodStill) && !standIn_)
+            CrashReports::instance().gameEnded(gameId_, sessionDir_, code, ran_.elapsed());
         const QString last = quitting_ ? QStringLiteral("exited") : QStringLiteral("error exited");
         exitCode_ = code;
         status_ = last;

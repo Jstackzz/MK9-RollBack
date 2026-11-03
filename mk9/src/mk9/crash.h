@@ -14,8 +14,14 @@
 // its guest function (sub_82xxxxxx); the crashed thread's guest registers and guest call stack
 // come with it when it is a guest thread.
 //
-// MK9_CRASH_TEST=<frame>[:abort|:overflow|:throw] crashes the game on purpose at the top of that
-// frame (tests): an access violation, abort(), a stack overflow or a C++ exception nothing catches.
+// A match whose game stands still (no frame for 10 s in sync, not waiting for the others' inputs) gets
+// hang.txt in the same folder: where the main thread's host code and guest code are, and the
+// rendering thread's, the game's and netplay's state; the log says so ("mk9 watch:"). Once frames
+// go on again it is renamed hang-over.txt. The launcher reports a game closed with hang.txt there.
+//
+// MK9_CRASH_TEST=<frame>[:abort|:overflow|:throw|:hang] crashes the game on purpose at the top of that
+// frame (tests): an access violation, abort(), a stack overflow or a C++ exception nothing catches;
+// :hang stands still there for 15 s instead.
 
 #include <cstdint>
 
@@ -30,7 +36,7 @@ void Install();
 enum class Note { Status, Match, Count };
 void SetNote(Note which, const char* text);
 
-// the top of every frame (tests: MK9_CRASH_TEST)
+// the top of every frame (the watch; tests: MK9_CRASH_TEST)
 void OnFrame(uint64_t frame);
 
 }  // namespace mk9::crash

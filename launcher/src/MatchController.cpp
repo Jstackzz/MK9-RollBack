@@ -72,8 +72,8 @@ constexpr int kWatchFeedCheckMs = 10000;  // a spectator's game connects to its 
 
 // How a game that ended during a match ended, for the server's log (result "exit", printable, 40 characters at most):
 // "crash C0000005" (an exception: the game wrote crash.txt in its session, mk9/src/mk9/crash.h, and ended with its
-// code), "abort", "closed" (it ended cleanly: its window was closed, Alt+F4), else "exit code N" (ended from outside:
-// Task Manager, a kill)
+// code), "abort", "closed" (it ended cleanly: its window was closed, Alt+F4), "closed standing still" (closed while it
+// stood still: its hang.txt), else "exit code N" (ended from outside: Task Manager, a kill)
 QString exitReason(const GameProcess* g) {
     const quint32 code = quint32(g->exitCode());
     const bool crashFile = QFileInfo::exists(QDir(g->sessionDir()).filePath(QStringLiteral("crash.txt")));
@@ -81,6 +81,8 @@ QString exitReason(const GameProcess* g) {
         return QStringLiteral("crash %1").arg(QString::number(code, 16).toUpper());
     if (code == 3) return QStringLiteral("abort");
     if (crashFile) return QStringLiteral("crash, exit code %1").arg(qint64(qint32(code)));
+    if (code == 0 && QFileInfo::exists(QDir(g->sessionDir()).filePath(QStringLiteral("hang.txt"))))
+        return QStringLiteral("closed standing still");
     if (code == 0) return QStringLiteral("closed");
     return QStringLiteral("exit code %1").arg(qint64(qint32(code)));
 }

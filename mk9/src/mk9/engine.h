@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <string>
 
+struct PPCContext;
+
 namespace mk9::engine {
 
 // The rendering thread has run every command the main thread queued (the ring is empty). Waits
@@ -29,5 +31,8 @@ void Release();
 // return address and its two callers, most seen first, with the share of samples ("" when none)
 void SampleRenderWaits(bool on);
 std::string TakeRenderWaitSamples(int top);
+
+// the rendering thread's guest registers while it runs (diagnostics: crash.cpp's watch), else null
+const PPCContext* RenderContext();
 
 }  // namespace mk9::engine

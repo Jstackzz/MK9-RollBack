@@ -190,3 +190,34 @@ async def test_a_desync_report_is_logged_with_the_player(server, connect, caplog
     with pytest.raises(ServerError) as exc:
         await guest.request({"type": "desync_report", "game": "mk9", "match": "m", "frame": 1, "lines": []})
     assert exc.value.code == "not_logged_in"
+
+
+async def test_a_crash_note_is_logged_with_the_player(server, connect, caplog):
+    """A launcher whose game crashed or stood still says where by itself, in a few lines; the server logs each with the
+    player (nothing kept), refuses what is not plain text lines, and stops listening after a session's share."""
+    c = await connect("Raiden")
+    lines = ["exception C0000005 access violation at mk9.exe+0x54fec9c sub_82875618+0x18c",
+             "guest call stack (return addresses, innermost first): 828FCE64 828FF974 82870B44 82382F7C"]
+    with caplog.at_level("INFO", logger="mk9.server"):
+        ack = await c.request({"type": "crash_note", "game": "mk9", "match": "9938fd494f22", "lines": lines})
+        await c.request({"type": "crash_note", "game": "mk9", "lines": lines[:1]})
+    assert ack["type"] == "crash_note_ack"
+    said = [r.getMessage() for r in caplog.records]
+    assert any("CRASH_NOTE Raiden mk9" in m and "match 9938fd494f22: 2 lines" in m for m in said)
+    assert any(m.startswith("CRASH_NOTE Raiden mk9") and m.endswith("): 1 lines") for m in said)
+    assert any(m == "CRASH_NOTE Raiden | " + lines[1] for m in said)
+    for bad in ({"lines": ["bad\x07line"]}, {"lines": "not a list"}, {"lines": ["x" * 201]},
+                {"lines": ["line"] * 17}, {"game": "nope", "lines": []}, {"match": "m\n", "lines": []}):
+        with pytest.raises(ServerError) as exc:
+            await c.request({"type": "crash_note", "game": "mk9", **bad})
+        assert exc.value.code == "bad_request"
+    caplog.clear()
+    with caplog.at_level("INFO", logger="mk9.server"):
+        for _ in range(10):  # the session's share, all but the first two already sent
+            c.send({"type": "crash_note", "game": "mk9", "lines": []})
+        await c.request({"type": "online"})
+    assert sum("CRASH_NOTE Raiden mk9" in r.getMessage() for r in caplog.records) == 8
+    guest = await connect()
+    with pytest.raises(ServerError) as exc:
+        await guest.request({"type": "crash_note", "game": "mk9", "lines": []})
+    assert exc.value.code == "not_logged_in"

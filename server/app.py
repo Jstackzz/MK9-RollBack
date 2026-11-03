@@ -39,6 +39,7 @@ NEEDS_LOGIN = {
     "logout", "queue_join", "queue_leave", "match_accept", "match_decline", "ping_report", "match_state",
     "result", "lobby_create", "lobby_list", "lobby_join", "lobby_leave", "lobby_chat", "lobby_character",
     "lobby_ready", "lobby_start", "admin_notice", "series_ready", "lobby_role", "feed", "tunnel", "desync_report",
+    "crash_note",
 }
 # a tunnel (docs/PROTOCOL.md): a tun message carries at most this many datagrams, each at most this much base64
 TUNNEL_BATCH = 64
@@ -51,6 +52,9 @@ CRASH_MAX_BYTES = 2 << 20
 # a desync report (docs/PROTOCOL.md): the reports a session sends at most, and its lines from the game's log
 DESYNC_REPORTS_PER_SESSION = 10
 DESYNC_LINES = 40  # 200 characters each at most
+# a crash note (docs/PROTOCOL.md): where a game crashed or stood still, sent by itself; a session's at most, its lines
+CRASH_NOTES_PER_SESSION = 10
+CRASH_NOTE_LINES = 16  # 200 characters each at most
 PLAIN_TEXT = re.compile(r"[\x20-\x7E]*")  # printable ASCII only: it goes into the log as is
 # the spectator feed's packets (mk9/src/mk9/net/netplay.cpp): u32 magic "MK9N", u8 type, u8 slot (the sender's), u16
 # match; types 6 MEET (its READY at a barrier), 7 OWN (its own inputs), 8 CHECK, 9 END
@@ -162,6 +166,7 @@ class Session:
         self.tunnel_out: list[str] = []  # datagrams for it (base64), sent together at the end of the loop's pass
         self.crash_parts: dict[str, list[str | None]] = {}  # crash reports coming in, by id
         self.desync_reports = 0
+        self.crash_notes = 0
         self.queue: QueueEntry | None = None
         self.lobby: Lobby | None = None
         self.match: Match | None = None
@@ -580,6 +585,7 @@ class Server:
             "tun": self.on_tun,
             "crash_report": self.on_crash_report,
             "desync_report": self.on_desync_report,
+            "crash_note": self.on_crash_note,
         }
 
     # --- lifecycle --------------------------------------------------------------------------------
@@ -2679,6 +2685,27 @@ class Server:
         for line in lines:
             log.info("DESYNC_REPORT %s | %s", s.name, line)
         self._reply(s, msg, {"type": "desync_ack"})
+
+    def on_crash_note(self, s: Session, msg: dict[str, Any]) -> None:
+        """A launcher's game crashed or stood still: where, in a few lines its launcher sends by itself (what the game
+        wrote of it, without the player's paths or addresses; the whole report goes only when the player sends it,
+        crash_report). Logged with the player, nothing kept (docs/PROTOCOL.md)."""
+        game = P.get_str(msg, "game", max_len=8)
+        if game not in P.GAMES:
+            raise P.ProtocolError("bad_request", "Unknown game.")
+        match = P.get_str(msg, "match", max_len=16, default="")
+        lines = msg.get("lines")
+        if (not isinstance(lines, list) or len(lines) > CRASH_NOTE_LINES or not PLAIN_TEXT.fullmatch(match)
+                or not all(isinstance(line, str) and len(line) <= 200 and PLAIN_TEXT.fullmatch(line) for line in lines)):
+            raise P.ProtocolError("bad_request", "Crash notes are plain text lines.")
+        s.crash_notes += 1
+        if s.crash_notes > CRASH_NOTES_PER_SESSION:
+            return
+        log.info("CRASH_NOTE %s %s (launcher %s)%s: %d lines", s.name, game, s.client_version or "?",
+                 f" match {match}" if match else "", len(lines))
+        for line in lines:
+            log.info("CRASH_NOTE %s | %s", s.name, line)
+        self._reply(s, msg, {"type": "crash_note_ack"})
 
     # --- leaderboard ------------------------------------------------------------------------------
 

@@ -62,6 +62,8 @@ void Configure(const Settings& st);
 void Disable();
 Status GetStatus();
 bool InSync();
+// the main thread waits in a match for the others' inputs (any thread may ask: crash.cpp's watch)
+bool Waiting();
 const char* StatusName(Status s);
 
 // the frame numbers of the match in sync: the frame running now (0 at the barrier)

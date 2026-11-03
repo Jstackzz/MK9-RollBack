@@ -251,6 +251,26 @@ Windows and processor, the game's `mk9 net:` / `mk9 link:` lines from the match'
 `x.x.x.x`, the user folder as `*`), the match's last frames from `net-<match>.log` and a summary of the extracted
 game's files (count, bytes, a hash of their names and sizes).
 
+## Crash notes (server 0.3.2)
+
+A launcher whose game crashed, or stood still in a match and was closed, says where by itself (as MK3D Online's
+launchers do), whether or not its player sends the whole report (`crash_report`):
+
+```json
+C: {"type": "crash_note", "game": "mk9", "match": "9938fd494f22",
+    "lines": ["exit code C0000005 (an access violation), after 75 s",
+              "exception C0000005 access violation at mk9.exe+0x54fec9c sub_82875618+0x18c", "..."]}
+S: {"type": "crash_note_ack"}
+```
+
+`match` is the match the game was in, if any. At most 16 `lines`, each printable ASCII and at most 200 characters
+(`bad_request` otherwise), 10 notes a session; signed in only. Nothing is kept: the server logs `CRASH_NOTE <name>
+<game> (launcher <version>)[ match <id>]: <k> lines`, then each line. The launcher sends how the game ended, the lines
+of the game's own report (crash.txt, or hang.txt for a game that stood still) that say what and where (the exception
+and its address, the thread, the first host frames, the guest `lr` and call stack, the game's and netplay's state, the
+match), the graphics card the game's log names and its last errors, with the desync reports' filter (addresses as
+`x.x.x.x`, the user folder as `*`); LAUNCHER.md, "Crash reports".
+
 ## Other
 
 - `match_go` and the series' state are unchanged otherwise; `match_result` statuses are MK3D's.

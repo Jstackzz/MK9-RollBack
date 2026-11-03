@@ -177,20 +177,32 @@ A game that ends during a match reports `left` with how (`crash C0000005`, `abor
 
 ## Crash reports
 
-A game the launcher started that ends by itself with an exit code other than 0 (not asked to quit, not killed) gets
-a report in `crashes\<yyyyMMdd-hhmmss>-mk9\` beside the launcher's log (`CrashReports`; the newest 20 are kept):
+A game the launcher started that ends by itself with an exit code other than 0 (not asked to quit, not killed), or
+that was closed while it stood still in a match (it wrote `hang.txt`: no frame for 10 s in sync while not waiting for
+the other players, mk9/src/mk9/crash.h), gets a report in `crashes\<yyyyMMdd-hhmmss>-mk9\` beside the launcher's log
+(`CrashReports`; the newest 20 are kept):
 
 - `report.txt`: the time, the launcher's and the game's versions, the exit code in words, this PC (Windows,
   processor, memory, the graphics card the game's log names), the launcher's last match messages, the game's own
   report (`crash.txt`, mk9/src/mk9/crash.h: the exception and where, as `sub_82xxxxxx` for recompiled code, both call
-  stacks, the guest registers, the game's state and modules), then the last 200 lines of the game's log and 60 of the
+  stacks, the guest registers, the game's state and modules; or `hang.txt`: where the main thread's host and guest
+  code stood, the rendering thread's, the game's state), then the last 200 lines of the game's log and 60 of the
   launcher's;
-- `crash.dmp`, the game's minidump, moved from its session, and `game.log`, its whole log.
+- `crash.dmp`, the game's minidump, moved from its session, and `game.log`, its whole log;
+- `note.json`: the few lines that go to the server by itself (below).
 
-The launcher then shows THE GAME CRASHED: SEND REPORT (`crash_report`, PROTOCOL.md; only `report.txt`, with the
-user folder's path in it replaced by `%USERPROFILE%`; `sent.txt` in the folder records it), OPEN FOLDER, CLOSE. The
-server keeps what it gets in `crashes\` beside its database (`/var/lib/mk9/crashes` on the official one). The
-stand-in game (`.py`) gets no reports.
+When signed in, the launcher sends the note at once, whatever the player does next (`crash_note`, PROTOCOL.md, as
+MK3D Online's launchers send theirs; `noted.txt` in the folder records it): how the game ended, the lines of the
+game's own report that say what and where (the exception and its address, the thread, the first 8 host frames, the
+guest registers' `lr` and call stack, the game's and netplay's state, the match), the graphics card and the last 3
+errors of the game's log, through the desync reports' filter (addresses as `x.x.x.x`, the user folder as `*`, 200
+printable characters a line). The server only logs it. A match's result says such a game ended `closed standing
+still` (`exit`), where one closed by its player says `closed`.
+
+The launcher then shows THE GAME CRASHED (saying when the note went): SEND REPORT (`crash_report`, PROTOCOL.md; only
+`report.txt`, with the user folder's path in it replaced by `%USERPROFILE%`; `sent.txt` in the folder records it),
+OPEN FOLDER, CLOSE. The server keeps what it gets in `crashes\` beside its database (`/var/lib/mk9/crashes` on the
+official one). The stand-in game (`.py`) gets no reports.
 
 ## The game contract
 

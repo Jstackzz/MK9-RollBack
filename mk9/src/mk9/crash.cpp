@@ -33,6 +33,7 @@
 #include <rex/system/thread_state.h>
 #include <rex/system/xmemory.h>
 
+#include "mk9/engine.h"
 #include "mk9/frame.h"
 #include "mk9/game.h"
 #include "mk9/net/netplay.h"
@@ -71,6 +72,13 @@ uint64_t g_test_frame = 0;
 char g_test_kind[16] = "";
 volatile int* volatile g_nowhere = nullptr;  // MK9_CRASH_TEST writes through it
 char g_notes[int(Note::Count)][192];
+
+// the watch (Watch): the frames the main thread started, and the main thread as its first frame found it
+std::atomic<uint64_t> g_frames_seen{0};
+DWORD g_main_tid = 0;
+HANDLE g_main_thread = nullptr;
+ULONG_PTR g_main_stack_lo = 0, g_main_stack_hi = 0;
+const PPCContext* g_main_guest = nullptr;
 
 // the recompiled functions by host address (PPCFuncMappings is by guest address)
 struct HostFunc {
@@ -439,6 +447,94 @@ DWORD WINAPI Writer(void*) {
   return 0;
 }
 
+// A match whose game stands still (as MK3D Online's game link watches its frames): no frame for kStillMs in a match in
+// sync while netplay does not wait for the others' inputs (its waits end by themselves). hang.txt in the session folder
+// then says where the main thread and the rendering thread are, once until frames go on again (it is then renamed
+// hang-over.txt), and the launcher reports a game closed with hang.txt there as one that stood still (0.5.3: three
+// matches ended with a game closed minutes in, and nothing said why)
+constexpr ULONGLONG kStillMs = 10000;
+
+void SessionPath(const wchar_t* name, wchar_t* out) {
+  if (std::swprintf(out, MAX_PATH, L"%ls\\%ls", g_dir, name) < 0) out[0] = 0;
+}
+
+void WriteHang(ULONGLONG still_ms) {
+  CreateDirectoryW(g_dir, nullptr);
+  HANDLE f = CreateIn(L"hang.txt");
+  if (f == INVALID_HANDLE_VALUE) return;
+  Out out(f);
+  const time_t now = std::time(nullptr);
+  char when[64] = "";
+  tm local{};
+  if (localtime_s(&local, &now) == 0) std::strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", &local);
+  out("MK9 Online game hang\n");
+  out("game %s, no frame for %llu s at %s, %lld s after it started\n", MK9_VERSION, still_ms / 1000, when,
+      static_cast<long long>(now - g_started));
+  // where its host code is: the registers of a moment, the walk once it runs again (a walk while it is suspended
+  // could wait on a lock it holds)
+  CONTEXT c{};
+  c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+  bool got = false;
+  if (g_main_thread && SuspendThread(g_main_thread) != DWORD(-1)) {
+    got = GetThreadContext(g_main_thread, &c) != 0;
+    ResumeThread(g_main_thread);
+  }
+  char where[MAX_PATH + 96] = "";
+  if (got) Where(uintptr_t(c.Rip), where, sizeof where);
+  out("main thread %lu%s%s\n", g_main_tid, got ? " at " : "", where);
+  if (got) HostStack(out, c, g_main_stack_lo, g_main_stack_hi);
+  GuestPart(out, g_main_guest);
+  const PPCContext* render = engine::RenderContext();
+  out("rendering thread%s\n", render ? ":" : ": not running");
+  if (render) GuestPart(out, render);
+  GamePart(out);
+  FlushFileBuffers(f);
+  CloseHandle(f);
+  REXLOG_WARN("mk9 watch: no frame for {} s at frame {}: the game stands still (hang.txt), its main thread at {}",
+              still_ms / 1000, g_frames_seen.load(), got ? where : "?");
+}
+
+DWORD WINAPI Watch(void*) {
+  uint64_t frame = 0;
+  ULONGLONG since = GetTickCount64(), last = since;
+  bool written = false;
+  for (;;) {
+    Sleep(250);
+    const ULONGLONG now = GetTickCount64();
+    const uint64_t f = g_frames_seen.load(std::memory_order_relaxed);
+    // a gap between two looks: the whole process stood still (a debugger, the PC asleep), not its main thread
+    const bool gap = now - last > 1000;
+    last = now;
+    if (f != frame && written) {
+      written = false;
+      wchar_t from[MAX_PATH], to[MAX_PATH];
+      SessionPath(L"hang.txt", from);
+      SessionPath(L"hang-over.txt", to);
+      MoveFileExW(from, to, MOVEFILE_REPLACE_EXISTING);
+      REXLOG_WARN("mk9 watch: frames again after {} s, at frame {}", (now - since) / 1000, f);
+    }
+    if (f != frame || gap || net::GetStatus() != net::Status::InSync || net::Waiting()) {
+      frame = f;
+      since = now;
+      continue;
+    }
+    if (written || now - since < kStillMs) continue;
+    written = true;
+    WriteHang(now - since);
+  }
+}
+
+// the main thread's first frame: who it is, for the watch, which starts then
+void StartWatch() {
+  g_main_tid = GetCurrentThreadId();
+  g_main_thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE,
+                             g_main_tid);
+  GetCurrentThreadStackLimits(&g_main_stack_lo, &g_main_stack_hi);
+  const auto* ts = rex::runtime::ThreadState::Get();
+  g_main_guest = ts ? ts->context() : nullptr;
+  if (HANDLE t = CreateThread(nullptr, 256 * 1024, Watch, nullptr, 0, nullptr)) CloseHandle(t);
+}
+
 // the crashed thread: hands its crash over and waits for the report, then the process ends (with as little
 // stack as it can: after a stack overflow there is little left)
 [[noreturn]] [[gnu::noinline]] void Crashed(EXCEPTION_POINTERS* ep, const char* kind, DWORD exit_code) {
@@ -573,7 +669,14 @@ namespace {
 }  // namespace
 
 void OnFrame(uint64_t frame) {
+  g_frames_seen.store(frame, std::memory_order_relaxed);
+  if (!g_main_tid) StartWatch();
   if (!g_test_frame || frame != g_test_frame) return;
+  if (std::strcmp(g_test_kind, "hang") == 0) {
+    REXLOG_ERROR("mk9: standing still on purpose for 15 s at frame {} (MK9_CRASH_TEST)", frame);
+    Sleep(15000);
+    return;
+  }
   REXLOG_ERROR("mk9: crashing on purpose at frame {} (MK9_CRASH_TEST, {})", frame,
                g_test_kind[0] ? g_test_kind : "access violation");
   if (std::strcmp(g_test_kind, "abort") == 0) std::abort();

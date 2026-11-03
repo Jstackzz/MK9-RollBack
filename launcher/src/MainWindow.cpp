@@ -834,8 +834,10 @@ void MainWindow::installUpdateWhenFree() {
 }
 
 void MainWindow::showCrashReport(const QString& reportDir, const QString& summary) {
+    // where it happened goes by itself (the whole report on the player's word)
+    const bool noted = CrashReports::sendNote(server_, reportDir);
     if (crashDialog_) crashDialog_->close();  // a newer crash: its report instead
-    auto* dialog = new CrashDialog(reportDir, summary, server_->isOnline(), this);
+    auto* dialog = new CrashDialog(reportDir, summary, server_->isOnline(), noted, this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     connect(dialog, &CrashDialog::sendRequested, this, [this, dialog] {
         if (CrashReports::send(server_, dialog->reportDir()))

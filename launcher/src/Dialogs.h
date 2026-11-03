@@ -107,11 +107,11 @@ private:
 };
 
 // A game crashed: what happened and where its report is (CrashReports), SEND REPORT (to the MK9 Online server),
-// OPEN FOLDER and CLOSE
+// OPEN FOLDER and CLOSE; `noted`: where it crashed went to the server already (CrashReports::sendNote)
 class CrashDialog : public QDialog {
     Q_OBJECT
 public:
-    CrashDialog(const QString& reportDir, const QString& summary, bool canSend, QWidget* parent = nullptr);
+    CrashDialog(const QString& reportDir, const QString& summary, bool canSend, bool noted, QWidget* parent = nullptr);
     QString reportDir() const { return reportDir_; }
     void setSent(bool ok, const QString& text);  // how sending went; a report that did not go may be sent again
 

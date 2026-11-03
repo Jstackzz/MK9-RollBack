@@ -4,6 +4,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QRandomGenerator>
 #include <QRegularExpression>
@@ -22,6 +24,7 @@ constexpr int kGameLogLines = 200;     // the end of the game's log in report.tx
 constexpr int kLauncherLogLines = 60;  // and of the launcher's
 constexpr int kActivity = 8;           // what the launcher was doing: its last texts
 constexpr int kPart = 9000;            // base64 characters per crash_report message (the server reads lines of 16 KB)
+constexpr int kNoteLines = 16;         // a crash_note's lines, at most (the server's limit)
 
 QString native(const QString& p) { return QDir::toNativeSeparators(p); }
 
@@ -111,11 +114,15 @@ void CrashReports::gameEnded(const QString& gameId, const QString& sessionDir, i
     const QDir dir(root.filePath(name));
     const QDir session(sessionDir);
 
-    // what the game wrote about its crash (nothing when it went without running any code of its own); its dump moves
-    // here, its log is copied (the session folder goes once 30 newer ones are there)
+    // what the game wrote about its crash (nothing when it went without running any code of its own), or about a match
+    // where it stood still until it was closed (hang.txt); its dump moves here, its log is copied (the session folder
+    // goes once 30 newer ones are there)
     QString gameReport;
     QFile crashTxt(session.filePath(QStringLiteral("crash.txt")));
+    QFile hangTxt(session.filePath(QStringLiteral("hang.txt")));
+    const bool stoodStill = exitCode == 0 && hangTxt.exists();
     if (crashTxt.open(QIODevice::ReadOnly)) gameReport = QString::fromUtf8(crashTxt.readAll()).trimmed();
+    else if (stoodStill && hangTxt.open(QIODevice::ReadOnly)) gameReport = QString::fromUtf8(hangTxt.readAll()).trimmed();
     const QString dump = session.filePath(QStringLiteral("crash.dmp"));
     if (QFileInfo::exists(dump) && !QFile::rename(dump, dir.filePath(QStringLiteral("crash.dmp"))))
         QFile::copy(dump, dir.filePath(QStringLiteral("crash.dmp")));
@@ -124,11 +131,16 @@ void CrashReports::gameEnded(const QString& gameId, const QString& sessionDir, i
 
     QString what;
     for (const QString& line : gameReport.split(QLatin1Char('\n')))
-        if (line.startsWith(QLatin1String("exception ")) || line.startsWith(QLatin1String("what: ")))
+        if (line.startsWith(QLatin1String("exception ")) || line.startsWith(QLatin1String("what: ")) ||
+            (stoodStill && line.startsWith(QLatin1String("main thread "))))
             what = line.trimmed();  // the exception line comes after the "what" line, and says more
     const QString codeWords = exitText(exitCode);
-    const QString summary = codeWords.isEmpty() ? tr("The game ended with the error code %1.").arg(hex(exitCode))
-                                                : tr("The game crashed with %1 (%2).").arg(codeWords, hex(exitCode));
+    const QString summary = stoodStill ? tr("The game stood still in a match (no new frame for 10 s or more) and was "
+                                            "closed.")
+                            : codeWords.isEmpty() ? tr("The game ended with the error code %1.").arg(hex(exitCode))
+                                                  : tr("The game crashed with %1 (%2).").arg(codeWords, hex(exitCode));
+    const QStringList graphics =
+        grepHead(gameLog, QRegularExpression(QStringLiteral("adapter|GPU:|Vulkan device")), 3);
 
     QStringList r;
     r << QStringLiteral("MK9 Online crash report");
@@ -140,11 +152,11 @@ void CrashReports::gameEnded(const QString& gameId, const QString& sessionDir, i
              .arg(ranMs / 1000);
     if (!what.isEmpty()) r << QStringLiteral("crash: %1").arg(what);
     r << thisPc();
-    for (const QString& line : grepHead(gameLog, QRegularExpression(QStringLiteral("adapter|GPU:|Vulkan device")), 3))
-        r << QStringLiteral("graphics: %1").arg(line.section(QLatin1Char(']'), -1).trimmed());
+    for (const QString& line : graphics) r << QStringLiteral("graphics: %1").arg(line.section(QLatin1Char(']'), -1).trimmed());
     r << QString() << QStringLiteral("=== what the launcher was doing (its last messages)");
     r << (activity_.isEmpty() ? QStringLiteral("(nothing yet)") : activity_.join(QLatin1Char('\n')));
-    r << QString() << QStringLiteral("=== the game's own report (crash.txt)");
+    r << QString() << (stoodStill ? QStringLiteral("=== the game's own report (hang.txt)")
+                                  : QStringLiteral("=== the game's own report (crash.txt)"));
     r << (gameReport.isEmpty() ? QStringLiteral("(none: the game ended without writing one)") : gameReport);
     r << QString() << QStringLiteral("=== the end of the game's log (game.log)");
     r << tail(gameLog, kGameLogLines);
@@ -153,8 +165,87 @@ void CrashReports::gameEnded(const QString& gameId, const QString& sessionDir, i
     QFile out(dir.filePath(QStringLiteral("report.txt")));
     if (out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) out.write(r.join(QLatin1Char('\n')).toUtf8() + '\n');
     out.close();
+
+    // the note the server gets by itself (sendNote): how the game ended, then the lines of its own report that say what
+    // and where, with the stacks' lines joined, its graphics card and the last errors of its log
+    QStringList note{stoodStill ? QStringLiteral("closed while it stood still in a match, after %1 s").arg(ranMs / 1000)
+                                : QStringLiteral("exit code %1%2, after %3 s")
+                                      .arg(hex(exitCode), codeWords.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(codeWords))
+                                      .arg(ranMs / 1000)};
+    static const QRegularExpression keep(QStringLiteral(
+        "^(game \\d|what: |exception |  (reading|writing|executing) address|thread |main thread |rendering thread|"
+        "guest registers: |frames run: |launcher link status: |match: |netplay: |game: )"));
+    static const QRegularExpression frameLine(QStringLiteral("^\\s*\\d+ (\\S.*)$"));
+    const QStringList own = gameReport.split(QLatin1Char('\n'));
+    for (int i = 0; i < own.size(); i++) {
+        if (own[i].contains(keep)) {
+            note << own[i].trimmed();
+        } else if (own[i].startsWith(QLatin1String("host call stack:"))) {  // "  3 mk9.exe+0x1a2b sub_82..+0x24" each
+            QStringList frames;
+            for (int j = i + 1; j < own.size() && frames.size() < 8; j++) {
+                const QRegularExpressionMatch m = frameLine.match(own[j]);
+                if (!m.hasMatch()) break;
+                frames << m.captured(1);
+            }
+            if (!frames.isEmpty()) note << QStringLiteral("host: ") + frames.mid(0, 4).join(QStringLiteral(" < "));
+            if (frames.size() > 4) note << QStringLiteral("host: ... < ") + frames.mid(4).join(QStringLiteral(" < "));
+        } else if (own[i].startsWith(QLatin1String("guest call stack"))) {  // return addresses, 8 a line
+            QStringList returns;
+            for (int j = i + 1; j < own.size() && own[j].startsWith(QLatin1Char(' ')); j++) returns << own[j].trimmed();
+            if (!returns.isEmpty()) note << QStringLiteral("guest: ") + returns.join(QLatin1Char(' '));
+        }
+    }
+    for (const QString& line : graphics) note << QStringLiteral("graphics: %1").arg(line.section(QLatin1Char(']'), -1).trimmed());
+    QStringList errors;
+    for (const QString& line : tail(gameLog, kGameLogLines))
+        if (line.contains(QLatin1String("] [error]")) || line.contains(QLatin1String("] [critical]")))
+            errors << line.section(QLatin1Char(']'), 2).trimmed();  // without its time
+    note << errors.mid(qMax(0, int(errors.size()) - 3));
+    static const QRegularExpression matchId(QStringLiteral("match[= ]([0-9a-f]{6,16})\\b"));
+    const QRegularExpressionMatch inMatch = matchId.match(gameReport);
+    QFile noteFile(dir.filePath(QStringLiteral("note.json")));
+    if (noteFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        noteFile.write(QJsonDocument(QJsonObject{{QStringLiteral("game"), gameId},
+                                                 {QStringLiteral("match"), inMatch.hasMatch() ? inMatch.captured(1) : QString()},
+                                                 {QStringLiteral("lines"), QJsonArray::fromStringList(note)}})
+                           .toJson());
+    noteFile.close();
     applog::write(QStringLiteral("crash report: %1 (%2)").arg(native(dir.absolutePath()), what.isEmpty() ? summary : what));
     emit written(dir.absolutePath(), summary);
+}
+
+bool CrashReports::sendNote(ServerClient* server, const QString& reportDir) {
+    if (!server || !server->isLoggedIn()) return false;
+    const QDir dir(reportDir);
+    if (dir.exists(QStringLiteral("noted.txt"))) return false;
+    QFile f(dir.filePath(QStringLiteral("note.json")));
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    const QJsonObject note = QJsonDocument::fromJson(f.readAll()).object();
+    // as a desync report's lines: printable, no address of anyone, no user folder, 200 characters at most
+    static const QRegularExpression ip(QStringLiteral("\\b\\d{1,3}(\\.\\d{1,3}){3}\\b"));
+    static const QRegularExpression home(QStringLiteral("([A-Za-z]:[\\\\/]Users[\\\\/])[^\\\\/]+"),
+                                         QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression unprintable(QStringLiteral("[^\\x20-\\x7E]"));
+    QJsonArray lines;
+    for (const QJsonValue& v : note.value(QStringLiteral("lines")).toArray()) {
+        if (lines.size() >= kNoteLines) break;
+        QString l = v.toString().trimmed();
+        l.replace(unprintable, QStringLiteral("?"));
+        l.replace(ip, QStringLiteral("x.x.x.x"));
+        l.replace(home, QStringLiteral("\\1*"));
+        lines << l.left(200);
+    }
+    const QString game = note.value(QStringLiteral("game")).toString();
+    if (game.isEmpty() || lines.isEmpty()) return false;
+    server->send({{QStringLiteral("type"), QStringLiteral("crash_note")},
+                  {QStringLiteral("game"), game},
+                  {QStringLiteral("match"), note.value(QStringLiteral("match")).toString().left(16)},
+                  {QStringLiteral("lines"), lines}});
+    QFile mark(dir.filePath(QStringLiteral("noted.txt")));
+    if (mark.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+        mark.write(QStringLiteral("noted to %1 on %2\n").arg(server->address(), QDateTime::currentDateTime().toString(Qt::ISODate)).toUtf8());
+    applog::write(QStringLiteral("crash report: where it happened went to the server (%1 lines)").arg(lines.size()));
+    return true;
 }
 
 QByteArray CrashReports::forSending(const QString& reportDir) {

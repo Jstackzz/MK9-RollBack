@@ -26,7 +26,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import auth
+from . import auth, elo
 from . import protocol as P
 from . import upnp
 from .db import Database, NameTaken
@@ -96,7 +96,7 @@ class ServerConfig:
     login_fail_window: float = 300.0
     chat_interval: float = 0.5
     default_rounds: int = 3
-    set_wins: int = 2             # a ranked set goes to the first to win this many matches
+    set_wins: int = 3             # a ranked set goes to the first to win this many matches (2 before server 0.3.1)
     # casual: both choose a rematch within this, or the series ends; it starts with the result, and the launcher asks
     # once the game has played the match's end (the finisher, a fatality, the winner's pose: up to 30 s)
     rematch_timeout: float = 60.0
@@ -860,6 +860,7 @@ class Server:
             # a hidden address's match slower than this through the relay tries directly (0: never; the launcher's
             # Settings say what hiding costs)
             "direct_above_ms": self.cfg.direct_above_ms,
+            "ranks": elo.ladder(),  # the ranked titles by Elo (server 0.3.1, MK3D Online's)
         }
         if update:
             welcome["update"] = update
@@ -1288,12 +1289,13 @@ class Server:
         queued = {
             "type": "queued", "game": game, "mode": mode, "ranked": ranked, "region": region,
             "max_ping": max_ping, "strict": strict, "since": now, "in_queue": waiting, "elo": rating,
+            "title": elo.title(rating),
         }
         if max_ping > 0 and not strict:
             queued["ping_widen"] = self.cfg.mm.widen_rule()  # how the server raises it while nobody is found
         self._reply(s, msg, queued)
-        log.info("queue %s %s (elo %d, %s, ping<=%s%s)", s.name, entry.queue_name, rating, region,
-                 max_ping or "any", ", strict" if strict else "")
+        log.info("queue %s %s (elo %d %s, %s, ping<=%s%s)", s.name, entry.queue_name, rating, elo.title(rating),
+                 region, max_ping or "any", ", strict" if strict else "")
         self._mark_online()
         self._run_matchmaking(now)
 
@@ -1382,7 +1384,9 @@ class Server:
 
     @staticmethod
     def _opponent(m: Match, o: MatchPlayer) -> dict[str, Any]:
-        return {"name": o.name, "elo": o.elo if m.ranked else None, "region": o.region, "character": o.character}
+        rating = o.elo if m.ranked else None
+        return {"name": o.name, "elo": rating, "title": elo.title(rating) if rating is not None else None,
+                "region": o.region, "character": o.character}
 
     # --- match flow -------------------------------------------------------------------------------
 
@@ -1903,6 +1907,9 @@ class Server:
             "you": p.wins, "them": o.wins, "you_ready": p.ready, "them_ready": o.ready,
             "you_choice": p.choice, "them_choice": o.choice, "same_fighters": series.last_picks is not None,
             "seconds_left": max(0, round(series.deadline - now)) if series.state == "between" else None,
+            # MK3D Online's fields (0.1.21): who keeps their fighter for a set's next match (never in MK9: its
+            # results carry no fighters, and SELECT A NEW FIGHTER lets both pick), the opponent's rating and title
+            "keeps": None, "opponent_elo": o.elo, "opponent_title": elo.title(o.elo) if o.elo is not None else None,
         }
 
     def _send_series(self, series: Series, extra: dict[str, Any] | None = None) -> None:
@@ -2139,13 +2146,17 @@ class Server:
                 loser = series.other(winner)
                 changes = self.db.record_ranked_set(winner.account_id, loser.account_id, series.game, series.mode, now)
                 extra["elo"] = {p.name: {"before": changes[p.account_id][0], "after": changes[p.account_id][1],
-                                         "delta": changes[p.account_id][1] - changes[p.account_id][0]}
+                                         "delta": changes[p.account_id][1] - changes[p.account_id][0],
+                                         "title_before": elo.title(changes[p.account_id][0]),
+                                         "title_after": elo.title(changes[p.account_id][1])}
                                 for p in series.players}
             p1, p2 = sorted(series.players, key=lambda p: p.side)
             self.db.log_set(series.id, series.game, series.mode, p1.account_id, p2.account_id, series.created, now,
                             outcome, winner.account_id if winner else None, p1.wins, p2.wins, changes)
-            log.info("SET %s over: %s, %s %d-%d %s%s", series.id, outcome, p1.name, p1.wins, p2.wins, p2.name,
-                     f", {winner.name} wins it" if winner else ", no rating change")
+            ratings = "".join(f", {p.name} {changes[p.account_id][0]} -> {changes[p.account_id][1]} "
+                              f"{elo.title(changes[p.account_id][1])}" for p in (p1, p2)) if changes else ""
+            log.info("SET %s over: %s, %s %d-%d %s%s%s", series.id, outcome, p1.name, p1.wins, p2.wins, p2.name,
+                     f", {winner.name} wins it" if winner else ", no rating change", ratings)
         else:
             log.info("series %s over: %s after %d matches%s", series.id, outcome, series.played,
                      f" ({left.name} left)" if left else "")

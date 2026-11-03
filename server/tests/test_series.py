@@ -53,27 +53,35 @@ async def ranked_stats(conn, name):
     return prof["stats"]["mk9"]["versus"]["ranked"]
 
 
-async def test_ranked_set_ends_at_two_wins_with_one_elo_change(server, connect, udp_peers):
+async def test_ranked_set_ends_at_three_wins_with_one_elo_change(server, connect, udp_peers):
     sides, gos = await first_match(server, connect, udp_peers, ["Shujinko", "Onaga"], ranked=True)
     (c1, _), (c2, _) = sides[1], sides[2]
     p1, p2 = gos[1]["p1_name"], gos[1]["p2_name"]
     s1, s2 = await play(c1, c2, gos[1]["match"], 1)
-    assert s1["state"] == "between" and s1["ranked"] and s1["need"] == 2 and s1["opponent"] == p2
+    assert s1["state"] == "between" and s1["ranked"] and s1["need"] == 3 and s1["opponent"] == p2
     assert (s1["you"], s1["them"], s2["you"], s2["them"]) == (1, 0, 0, 1)
+    assert s1["opponent_elo"] == 1500 and s1["opponent_title"] == "Kombatant" and s1["keeps"] is None
     # the match counts at once, the rating waits for the set
-    assert await ranked_stats(c1, p1) == {"elo": 1500, "wins": 1, "losses": 0}
+    assert await ranked_stats(c1, p1) == {"elo": 1500, "title": "Kombatant", "wins": 1, "losses": 0}
 
     gos2 = await next_match(server, sides, s1["series"])
     assert gos2[1]["match"] != gos[1]["match"] and gos2[1]["p1_name"] == p1  # same sides
-    over1, over2 = await play(c1, c2, gos2[1]["match"], 1)
+    s1, _ = await play(c1, c2, gos2[1]["match"], 2)  # 1-1: first to three goes on
+    assert s1["state"] == "between" and (s1["you"], s1["them"]) == (1, 1)
+    for _ in range(2):
+        gos3 = await next_match(server, sides, s1["series"])
+        s1, s2 = await play(c1, c2, gos3[1]["match"], 1)
+    over1, over2 = s1, s2
     assert over1["state"] == "over" and over1["outcome"] == "won" and over1["winner"] == p1
-    assert (over1["you"], over1["them"]) == (2, 0)
-    assert over1["elo"][p1] == {"before": 1500, "after": 1516, "delta": 16}
-    assert over2["elo"][p2] == {"before": 1500, "after": 1484, "delta": -16}
-    assert await ranked_stats(c1, p1) == {"elo": 1516, "wins": 2, "losses": 0}
-    assert await ranked_stats(c1, p2) == {"elo": 1484, "wins": 0, "losses": 2}
+    assert (over1["you"], over1["them"]) == (3, 1)
+    assert over1["elo"][p1] == {"before": 1500, "after": 1516, "delta": 16, "title_before": "Kombatant",
+                                "title_after": "Kombatant"}
+    assert over2["elo"][p2] == {"before": 1500, "after": 1484, "delta": -16, "title_before": "Kombatant",
+                                "title_after": "Kombatant"}
+    assert await ranked_stats(c1, p1) == {"elo": 1516, "title": "Kombatant", "wins": 3, "losses": 1}
+    assert await ranked_stats(c1, p2) == {"elo": 1484, "title": "Kombatant", "wins": 1, "losses": 3}
     row = server.db.set_row(over1["series"])
-    assert row["outcome"] == "won" and (row["p1_wins"], row["p2_wins"]) == (2, 0)
+    assert row["outcome"] == "won" and (row["p1_wins"], row["p2_wins"]) == (3, 1)
     assert (row["p1_elo_after"], row["p2_elo_after"]) == (1516, 1484)
     assert not server.series and not server.series_of
 
@@ -88,8 +96,8 @@ async def test_one_match_won_and_gone_loses_the_set(server, connect, udp_peers):
     over = await c2.expect("series", state="over")
     assert over["outcome"] == "forfeit" and over["left"] == p1 and over["winner"] == p2
     assert over["elo"][p1]["delta"] == -16 and over["elo"][p2]["delta"] == 16
-    assert await ranked_stats(c2, p1) == {"elo": 1484, "wins": 1, "losses": 0}
-    assert await ranked_stats(c2, p2) == {"elo": 1516, "wins": 0, "losses": 1}
+    assert await ranked_stats(c2, p1) == {"elo": 1484, "title": "Kombatant", "wins": 1, "losses": 0}
+    assert await ranked_stats(c2, p2) == {"elo": 1516, "title": "Kombatant", "wins": 0, "losses": 1}
 
 
 async def test_searching_again_in_a_set_loses_it(server, connect, udp_peers):

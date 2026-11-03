@@ -291,14 +291,17 @@ async def test_ranked_set_goes_on_from_the_continue_menu(server, connect, udp_pe
     (a, b), _, gos = await queue_pair(server, connect, udp_peers, ["Reptile", "Ermac"], ranked=True)
     await agree((a, b), gos[0]["match"])
     sa = await a.expect("series", state="between")
-    assert sa["ranked"] and sa["need"] == 2
-    for conn in (a, b):
-        await conn.request({"type": "series_ready", "series": sa["series"], "ready": True, "continue": True})
-    go2 = [await conn.expect("match_go") for conn in (a, b)]
-    assert [g["rematch"] for g in go2] == ["select", "select"] and go2[0]["ranked"] is True
-    await agree((a, b), go2[0]["match"])  # P1 wins the set 2-0
-    over = await a.expect("series", state="over")
-    assert over["outcome"] == "won" and over["elo"]
+    assert sa["ranked"] and sa["need"] == 3
+    for played in (1, 2):
+        for conn in (a, b):
+            await conn.request({"type": "series_ready", "series": sa["series"], "ready": True, "continue": True})
+        go = [await conn.expect("match_go") for conn in (a, b)]
+        assert [g["rematch"] for g in go] == ["select", "select"] and go[0]["ranked"] is True
+        await agree((a, b), go[0]["match"])
+        if played == 1:
+            sa = await a.expect("series", state="between", played=2)
+    over = await a.expect("series", state="over")  # P1 wins the set 3-0, every match from the CONTINUE? menu
+    assert over["outcome"] == "won" and over["elo"] and (over["you"], over["them"]) == (3, 0)
 
 
 def test_auto_delay_covers_the_one_way_latency():

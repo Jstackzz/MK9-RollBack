@@ -186,9 +186,9 @@ class Database:
             "SELECT game, mode, kind, elo, wins, losses FROM stats WHERE account_id = ? ORDER BY game, mode, kind",
             (account_id,),
         ):
-            entry: dict[str, int] = {"wins": row["wins"], "losses": row["losses"]}
+            entry: dict[str, Any] = {"wins": row["wins"], "losses": row["losses"]}
             if row["kind"] == "ranked":
-                entry = {"elo": row["elo"], **entry}
+                entry = {"elo": row["elo"], "title": elo.title(row["elo"]), **entry}
             out.setdefault(row["game"], {}).setdefault(row["mode"], {})[row["kind"]] = entry
         return out
 
@@ -279,7 +279,7 @@ class Database:
                 (game, mode, limit, offset),
             )
         ):
-            rows.append({"rank": offset + i + 1, "name": row["name"], "elo": row["elo"],
+            rows.append({"rank": offset + i + 1, "name": row["name"], "elo": row["elo"], "title": elo.title(row["elo"]),
                          "wins": row["wins"], "losses": row["losses"]})
         return rows, int(total)
 
@@ -298,7 +298,8 @@ class Database:
             " (s.elo = ? AND s.wins = ? AND a.name < ? COLLATE NOCASE))",
             (game, mode, row["elo"], row["elo"], row["wins"], row["elo"], row["wins"], row["name"]),
         ).fetchone()[0]
-        return {"rank": int(better) + 1, "elo": row["elo"], "wins": row["wins"], "losses": row["losses"]}
+        return {"rank": int(better) + 1, "elo": row["elo"], "title": elo.title(row["elo"]), "wins": row["wins"],
+                "losses": row["losses"]}
 
     # --- match log ------------------------------------------------------------------------------
 

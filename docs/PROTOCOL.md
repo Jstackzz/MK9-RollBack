@@ -196,6 +196,19 @@ launcher after 0.4.0 works with a 0.2.0 server, which ignores them and sends non
   `searching` in a queue, `matches` in a match or a series (between two matches too), `lobbies` in a lobby
   (spectators too), `playing` any of those; `searchers` the 40 longest waiting, the longest first.
 
+## Ranked sets to three, rank titles (server 0.3.1)
+
+A ranked set goes to the first to win 3 matches (`need` 3; 2 before server 0.3.1), as MK3D Online's since its 0.1.21.
+Every ranked rating comes with its title (`server/elo.py`, `RANKS`: MK3D Online's ladder, so a title means the same in
+both): Ed Boon below 1300, Apprentice from 1300, Kombatant from 1450 (everyone starts at 1500), Warrior 1550, Gladiator
+1600, Master 1650, Grand Master 1700, Demigod 1750, God 1800, Elder God 1850, Elder God Supreme 1900, Elder God of
+Destruction 2000. `welcome` carries the ladder, `ranks` (`[{"title": "Ed Boon", "from": null}, {"title": "Apprentice",
+"from": 1300}, ...]`, lowest first); `queued` the searcher's `title`; a ranked match's `opponent` (in `match_found`
+once revealed, `match_peer`) theirs; profile stats' ranked entries, leaderboard rows and `me` theirs; `series`
+`opponent_elo` and `opponent_title`; a set's end each player's `elo.<name>.title_before` and `title_after`. `series`
+also carries MK3D's `keeps`, always `null` here: MK9 has no kept fighter (its results carry no fighters, and SELECT A
+NEW FIGHTER lets both pick).
+
 ## Kasual rematches without end
 
 A Kasual match that a game closed during (status `abandoned`) or whose games lost each other no longer ends the

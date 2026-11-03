@@ -50,6 +50,8 @@ public:
     }
     QString phaseText() const { return phaseText_; }
     QueueRequest lastRequest() const { return request_; }
+    // the server's reply to the last search (queued): the rating it searches with in ranked, `elo` and its `title`
+    QJsonObject lastQueued() const { return queued_; }
     QJsonObject currentFound() const { return found_; }
     int searchSeconds() const;
     // the max ping the server raised this search's to, waiting for a match (0: not raised): the rule it gave with
@@ -166,6 +168,9 @@ private:
     void freezeSolo();
     void thawSolo();
     void maybeBackToSolo();  // standby: a match found not accepted, single player again
+    // a set or series over: the same search again once this launcher is idle (cfg::searchAgain), single player while it
+    // waits as any search
+    void maybeSearchAfterSeries();
     void closeGame(const QString& why);  // the match's game, once nothing wants it
     void closeSolo(const QString& why);  // single player: a match on its way, the search it waited in cancelled
     void maybeCloseIdleGame();           // the match's game once nothing wants it (wantsGame)
@@ -199,7 +204,9 @@ private:
     Phase phase_ = Phase::Idle;
     QString phaseText_;
     QueueRequest request_;
+    QJsonObject queued_;  // the server's reply to the last search
     QJsonObject found_, go_, pendingResult_, series_;
+    bool searchAfterSeries_ = false;  // a set or series just over: request_ again once idle (maybeSearchAfterSeries)
     QString pendingStart_;
     bool resultSent_ = false;
     bool wantNext_ = false;  // ready for the series' next match, not sent yet (the game still plays the last one's end)

@@ -84,12 +84,22 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
   without counting, a ranked one counts as leaving the set (it asks first). After a queue match the series card
   offers REMATCH (the same fighters), SELECT (both pick again) and LEAVE for 60 s, also as the Rematch? prompt over
   the game (on top, the controllers' even when the game kept the front: the game at its CONTINUE? menu takes no
-  presses while the launcher holds it); a ranked set (first to 2) plays on by itself. When both games still wait at
+  presses while the launcher holds it); a ranked set (first to 3, since 0.5.4; 2 before) plays on by itself. When both games still wait at
   their CONTINUE? menu the next match starts right there with the game's own `rematch` (no new connection), otherwise
   as a new match with games booted for it; the game comes back in front for it, and closes once the series is over
   (or 8 s after a result no series followed). A Kasual match that a game closed during, or whose games lost
   each other, does not count and the rematch is offered again (from new games): "Your game closed during the match
-  against X: it does not count." A ranked one still loses the set.
+  against X: it does not count." A ranked one still loses the set. *Search again when a set or series ends* (on by
+  default, shared by both queue pages, `online/search_again`, as MK3D Online since 0.1.18): once a ranked set or a
+  Kasual series is over and the launcher is idle again, the same search starts by itself (single player while it
+  waits, as any search); not when this player left it (LEAVE, a search or lobby elsewhere, their game closed during a
+  match), not after a Kasual rematch offer this player let run out, nor when neither came back to a ranked set
+  (`MatchController::maybeSearchAfterSeries`).
+  Ranked shows the player's rank, the title their Elo gives (the server's ladder, `welcome.ranks`: Ed Boon below 1300,
+  Apprentice, Kombatant from 1450 where everyone starts at 1500, Warrior, Gladiator, Master, Grand Master, Demigod,
+  God, Elder God, Elder God Supreme, Elder God of Destruction from 2000), and the next one up, every rank's Elo in its
+  tooltip; the ranked MATCH FOUND window shows "Your rank: X (N Elo)", the match log the opponent's once both
+  accepted, the set card the opponent's, and a set's end the rank change ("Ranked up to Warrior!").
 - **Lobby**: create (name, mode, optional password, best of 1/3/5, *King of the Hill*), join from the list or by its
   5-letter code, chat, Ready. Ready starts no game (it only checks that the game is built and the disc extracted).
   The two to play ready (both players, or the first two in a King of the Hill line), the server starts the match
@@ -111,7 +121,8 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
 - **Single player**: PLAY starts the game plainly (no `MK9_LINK`) with the persistent save folder: the game's own
   menus, every offline mode. In a source build the **Local test** card starts two games on this PC (slots 0 and 1,
   UDP 7001/7002 on 127.0.0.1, windowed) with matching start lines and the Settings' netcode; no server.
-- **Leaderboard**: top 100 by Elo per ranked mode (One vs One, Two vs Two).
+- **Leaderboard**: top 100 by Elo per ranked mode (One vs One, Two vs Two), with each player's rank (the Rank column,
+  every rank's Elo in its header's tooltip) and yours beside your place.
 - **Build game**: pick the Xbox 360 disc image (`.iso`), EXTRACT AND BUILD. `src/Xiso.cpp` finds the game partition
   at 0, 0xFD90000 (XGD2: this disc), 0x2080000 (XGD3) or 0x18300000 (XGD1), checks `default.xex`'s SHA-1 against
   `xex_sha1` in `data/mk9.json` (another release asks first) and the free space, and extracts into the game data
@@ -283,7 +294,8 @@ Command-line options (development and automation) are MK3D's (`--config`, `--ser
 with `MK9_DEV_PASSWORD`, `--register`, `--queue casual|ranked`, `--mode versus|tag|tyl`, `--auto-accept N`,
 `--rematches N`, `--rematch-choice`, `--leave-series`, `--solo`, `--lobby host|join|watch`, `--lobby-name`,
 `--lobby-matches`, `--page`, `--local-test`, `--extract`, `--auto-update`, `--updated`, `--cancel-search N`,
-`--leave-lobby`) plus `--koth`, `--netcode lockstep|rollback` and `--solo-wait on|off` (saved); `--practice` and
+`--leave-lobby`) plus `--koth`, `--netcode lockstep|rollback`, `--solo-wait on|off` and `--search-again on|off`
+(saved); `--practice` and
 `--death-traps` are gone.
 
 ## Not done yet

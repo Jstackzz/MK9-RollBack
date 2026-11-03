@@ -53,6 +53,8 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
         cfg::set(QStringLiteral("server/fingerprint"), ServerClient::normalizeFingerprint(opts_.fingerprint));
     if (!opts_.soloWait.isEmpty())
         cfg::set(QStringLiteral("online/solo_while_waiting"), opts_.soloWait != QLatin1String("off"));
+    if (!opts_.searchAgain.isEmpty())
+        cfg::set(QStringLiteral("online/search_again"), opts_.searchAgain != QLatin1String("off"));
     if (!opts_.netcode.isEmpty())
         cfg::set(QStringLiteral("online/netcode"),
                  opts_.netcode == QLatin1String("rollback") ? QStringLiteral("rollback") : QStringLiteral("lockstep"));
@@ -648,8 +650,14 @@ void MainWindow::onMatchFound(const QJsonObject& found) {
     const GameMode* m = g ? g->mode(found.value(QStringLiteral("mode")).toString()) : nullptr;
     const QueueRequest req = controller_->lastRequest();
     if (matchDialog_) matchDialog_->done(2);
+    // ranked: the rank this player searched with (the server's queued reply)
+    const QJsonObject queued = controller_->lastQueued();
+    const QString rank = found.value(QStringLiteral("ranked")).toBool() && queued.contains(QStringLiteral("title"))
+                             ? tr("Your rank: %1 (%2 Elo)").arg(queued.value(QStringLiteral("title")).toString())
+                                   .arg(queued.value(QStringLiteral("elo")).toInt())
+                             : QString();
     auto* dlg = new MatchFoundDialog(found, g ? g->title : QString(), m ? m->name : QString(),
-                                     g ? g->characterName(req.character) : req.character, this);
+                                     g ? g->characterName(req.character) : req.character, rank, this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     if (controller_->soloRunning())  // paused under it, its window hidden (MatchController::freezeSolo)
         dlg->setNote(tr("Your single-player game is paused. ACCEPT closes it and starts the match; Decline goes back "

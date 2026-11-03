@@ -79,6 +79,10 @@ the MK9 Online server, so whoever runs it can see what went wrong.
   game's own REMATCH or SELECT A NEW FIGHTER at its CONTINUE? menu, as a direct one did. The input delay rises
   sooner with the ping (4 frames at 180 ms, as MK3D Online), and a hidden match over 100 ms through the server
   tries a direct connection once (Settings keeps it hidden for good when you ask).
+- Since 0.5.4, as in MK3D Online: a ranked set goes to the first to win 3 matches (was 2), every ranked rating has
+  its rank title (Kombatant at the start, up to Elder God of Destruction), the launcher searches again by itself when
+  a set or a Kasual series ends (a box on the Ranked and Kasual pages turns it off), and there is no mouse pointer
+  over the game.
 
 ## Building from source
 

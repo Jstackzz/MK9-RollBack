@@ -172,6 +172,7 @@ int maxPing() { return get(QStringLiteral("online/max_ping"), 150).toInt(); }
 bool strict() { return get(QStringLiteral("online/strict"), false).toBool(); }
 bool pickInGame() { return get(QStringLiteral("online/pick_in_game"), true).toBool(); }
 bool soloWhileWaiting() { return get(QStringLiteral("online/solo_while_waiting"), true).toBool(); }
+bool searchAgain() { return get(QStringLiteral("online/search_again"), true).toBool(); }
 int inputDelay() {
     const QVariant v = get(QStringLiteral("online/delay"), QStringLiteral("auto"));
     bool number = false;

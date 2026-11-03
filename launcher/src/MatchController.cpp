@@ -32,6 +32,17 @@
 namespace {
 QString str(const QJsonObject& o, const char* key) { return o.value(QLatin1String(key)).toString(); }
 
+// Whether a set or series that is over is followed by the same search (cfg::searchAgain, MK3D Online's rule): not when
+// this player left it (LEAVE, a search or a lobby elsewhere, their game closed during a match) or let a Kasual rematch
+// offer run out without taking it, nor when neither player came back to a ranked set
+bool searchesAgain(const QJsonObject& over, const QString& me, bool wasReady) {
+    const QString left = str(over, "left");
+    if (!left.isEmpty() && left == me) return false;
+    if (str(over, "outcome") == QLatin1String("timeout"))
+        return !over.value(QStringLiteral("ranked")).toBool() && wasReady;
+    return true;  // won, a forfeit or a Kasual series the other left, void
+}
+
 QString reasonText(const QString& reason) {
     static const QHash<QString, QString> texts = {
         {QStringLiteral("declined"), QStringLiteral("a player declined")},
@@ -260,8 +271,23 @@ void MatchController::setPhase(Phase p, const QString& text) {
     emit phaseChanged(p, text);
     if (p == Phase::Idle) sendSeriesReady();
     maybeBackToSolo();
+    if (p == Phase::Searching) searchAfterSeries_ = false;  // a search started meanwhile is the search
     if (p == Phase::Idle) startWatch();  // a lobby match waiting to be watched
     maybeCloseIdleGame();
+    maybeSearchAfterSeries();
+}
+
+// Keep matchmaking (MK3D Online 0.1.18): once a set or series is over and this launcher is idle again (the match's game
+// closed) or in single player, the search it came from starts again, single player while it waits as any search
+// (cfg::searchAgain, searchesAgain); not for a lobby's match coming, a match to watch, or a new series.
+void MatchController::maybeSearchAfterSeries() {
+    if (!searchAfterSeries_ || (phase_ != Phase::Idle && phase_ != Phase::Solo)) return;
+    searchAfterSeries_ = false;
+    if (!series_.isEmpty() || lobbyComing_ || !watch_.isEmpty() || !watchQueue_.isEmpty() || request_.game.isEmpty())
+        return;
+    QString err;
+    if (findMatch(request_, &err)) log(tr("The series is over: searching again"));
+    else log(tr("Searching again: %1").arg(err));
 }
 
 // a match found over single player: the game paused and its window hidden, so MATCH FOUND has the screen (and the
@@ -652,6 +678,7 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
     const QString type = str(msg, "type");
     const QString match = str(msg, "match");
     if (type == QLatin1String("queued")) {
+        queued_ = msg;
         pingWiden_ = msg.value(QStringLiteral("ping_widen")).toObject();
         if (phase_ == Phase::Idle) {
             searchClock_.start();
@@ -701,6 +728,11 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
         }, 30);
     } else if (type == QLatin1String("match_peer")) {
         if (match != str(found_, "match")) return;
+        const QJsonObject opp = msg.value(QStringLiteral("opponent")).toObject();
+        // ranked: who it is, their rating and its rank, once both accepted
+        if (found_.value(QStringLiteral("opponent")).toObject().isEmpty() && !str(opp, "title").isEmpty())
+            log(tr("Your opponent: %1, %2 (%3 Elo)").arg(str(opp, "name"), str(opp, "title"))
+                    .arg(opp.value(QStringLiteral("elo")).toInt()));
         found_.insert(QStringLiteral("opponent"), msg.value(QStringLiteral("opponent")));
         const int punchMs = msg.value(QStringLiteral("punch_timeout")).toInt(10) * 1000;
         tunnel_ = msg.value(QStringLiteral("tunnel")).toBool();
@@ -812,6 +844,9 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
         finishMatch(str(msg, "status"));
     } else if (type == QLatin1String("series")) {
         const QString state = str(msg, "state");
+        // ready for the next match when it ended: a Kasual rematch chosen that the other did not take in time
+        const bool wasReady = str(series_, "state") == QLatin1String("between") &&
+                              (series_.value(QStringLiteral("you_ready")).toBool() || wantNext_);
         series_ = msg;
         if (state == QLatin1String("between") || state == QLatin1String("playing")) continueTimer_.stop();
         if (state == QLatin1String("over")) {  // no next match: the game closes (once idle: maybeCloseIdleGame below)
@@ -822,12 +857,16 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
         if (state == QLatin1String("between") && msg.value(QStringLiteral("ranked")).toBool() &&
             !msg.value(QStringLiteral("you_ready")).toBool())
             wantNext_ = true;
-        if (state == QLatin1String("over")) wantNext_ = false;
+        if (state == QLatin1String("over")) {
+            wantNext_ = false;
+            searchAfterSeries_ = cfg::searchAgain() && searchesAgain(msg, server_->accountName(), wasReady);
+        }
         emit seriesChanged(msg);
         if (state == QLatin1String("over")) series_ = {};
         sendSeriesReady();
         maybeBackToSolo();
         maybeCloseIdleGame();
+        maybeSearchAfterSeries();
     } else if (type == QLatin1String("result_ack")) {
         log(tr("Result of %1 acknowledged by the server").arg(match));
     } else if (type == QLatin1String("spectate")) {

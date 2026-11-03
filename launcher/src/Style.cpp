@@ -79,6 +79,7 @@ QLabel#CardTitle { font-family: "Bahnschrift"; font-size: 11pt; font-weight: 700
 QLabel#Muted { color: #8E8780; background: transparent; }
 QLabel#Big { font-family: "Bahnschrift"; font-size: 16pt; font-weight: 700; color: #FFFFFF; background: transparent; }
 QLabel#StatValue { font-family: "Bahnschrift"; font-size: 18pt; font-weight: 700; color: #FFFFFF; background: transparent; }
+QLabel#Rank { font-family: "Bahnschrift"; font-size: 11pt; font-weight: 700; color: #E8B04B; background: transparent; }
 QLabel#StatLabel { color: #8E8780; font-size: 8pt; background: transparent; }
 QLabel#Warning { color: #F0B35A; background: transparent; }
 QFrame#Card QLabel, QFrame#Card QCheckBox { background: transparent; }

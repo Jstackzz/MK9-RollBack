@@ -46,6 +46,9 @@ bool strict();
 bool pickInGame();
 // a Ranked or Kasual search waits in single player, the one game it runs (MatchController::findMatch; on by default)
 bool soloWhileWaiting();
+// once a Ranked set or a Kasual series is over (not left by this player), the same search starts again by itself
+// (MatchController::maybeSearchAfterSeries; on by default)
+bool searchAgain();
 // the input delay in frames, 0-6, or kAutoDelay (the default): from the match's measured ping, the server's
 // match_go delay (autoDelay); as the protocol writes it: "auto" or the number
 constexpr int kAutoDelay = -1;

@@ -51,6 +51,7 @@ struct LaunchOptions {
     bool leaveSeries = false;    // once those are chosen, leave the series at once instead of letting it run out
     bool solo = false;           // --queue: single player first, the search running alongside it (standby)
     QString soloWait;            // "on" / "off": single player while a search waits, saved (cfg::soloWhileWaiting)
+    QString searchAgain;         // "on" / "off": the same search again after a set or series, saved (cfg::searchAgain)
     QString netcode;             // "lockstep" / "rollback": saved (cfg::netcode)
     bool upnpProbe = false;  // find the router and its public address, open nothing
     QString updatedFrom;     // --updated: the version this launcher just replaced (Updater)

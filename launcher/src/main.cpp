@@ -90,6 +90,11 @@ int main(int argc, char* argv[]) {
         QStringLiteral("solo-wait"),
         QStringLiteral("Single player while a Ranked or Kasual search waits: on or off (saved like the queue pages' box)."),
         QStringLiteral("on|off"));
+    const QCommandLineOption searchAgainOpt(
+        QStringLiteral("search-again"),
+        QStringLiteral("Search again once a Ranked set or a Kasual series is over: on or off (saved like the queue "
+                       "pages' box)."),
+        QStringLiteral("on|off"));
     const QCommandLineOption updatedOpt(
         QStringLiteral("updated"),
         QStringLiteral("Started by an update of this version: waits for it to close, then deletes what it set aside."),
@@ -101,7 +106,7 @@ int main(int argc, char* argv[]) {
     for (const auto* o : {&configOpt, &serverOpt, &fpOpt, &userOpt, &pwEnvOpt, &regOpt, &queueOpt, &gameOpt, &modeOpt,
                           &charOpt, &pageOpt, &acceptOpt, &cancelOpt, &localTestOpt, &extractOpt, &lobbyOpt,
                           &lobbyNameOpt, &kothOpt, &lobbyMatchesOpt, &leaveLobbyOpt, &upnpProbeOpt, &rematchesOpt, &rematchChoiceOpt, &leaveSeriesOpt, &soloOpt,
-                          &soloWaitOpt, &netcodeOpt, &updatedOpt, &autoUpdateOpt, &sendCrashOpt})
+                          &soloWaitOpt, &searchAgainOpt, &netcodeOpt, &updatedOpt, &autoUpdateOpt, &sendCrashOpt})
         cli.addOption(*o);
     cli.process(app);
 
@@ -163,6 +168,7 @@ int main(int argc, char* argv[]) {
     opts.leaveSeries = cli.isSet(leaveSeriesOpt);
     opts.solo = cli.isSet(soloOpt);
     opts.soloWait = cli.value(soloWaitOpt);
+    opts.searchAgain = cli.value(searchAgainOpt);
     opts.netcode = cli.value(netcodeOpt);
     opts.upnpProbe = cli.isSet(upnpProbeOpt);
     opts.updatedFrom = cli.value(updatedOpt);

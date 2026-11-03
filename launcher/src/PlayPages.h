@@ -63,6 +63,7 @@ private:
     QComboBox* maxPing_;
     QCheckBox* strict_;
     QCheckBox* solo_;  // single player while the search waits (shared by both queue pages)
+    QCheckBox* searchAgain_;  // the same search again once a set or series ends (shared by both queue pages)
     QLabel* delayInfo_;
     QPushButton* find_;
     QLabel* status_;
@@ -71,6 +72,7 @@ private:
     QLabel* elo_;
     QLabel* wins_;
     QLabel* losses_;
+    QLabel* rank_;  // ranked: the title the Elo gives and the next one up (nullptr on the Kasual page)
     QWidget* mmCard_;
     QWidget* seriesCard_;
     QLabel* seriesTitle_;

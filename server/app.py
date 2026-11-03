@@ -112,7 +112,16 @@ class ServerConfig:
     relay_only: bool = False
     relay_rate: float = 400.0     # packets a second each player may send through the relay (a game sends ~120)
     relay_burst: float = 800.0
-    relay_linger: float = 15.0    # seconds a route outlives its match: the last packets of the end still arrive
+    # seconds a route outlives its match: the last packets of the end still arrive (MK3D Online's games play a
+    # fatality and the winner's pose through it after their results, which 15 s cut off); a series' routes wait
+    # longer, for its next match (_series_between)
+    relay_linger: float = 60.0
+    # a match relayed only because a player hides their address, slower than this through it (ms, 0: never), tries
+    # the players' own connections once and plays that way when it is direct_gain_ms faster (the user: "not going
+    # through the relay server if the ping is too high", as MK3D Online does since 0.1.18); one who hides their
+    # address even then ("hide_always" with "relay") keeps their matches on the relay
+    direct_above_ms: int = 100
+    direct_gain_ms: int = 20
     crash_dir: str | None = None  # crash reports launchers send (default: crashes beside the database)
     crash_keep: int = 500         # the newest kept
     crash_rate: int = 6           # reports one address may send an hour
@@ -219,6 +228,7 @@ class MatchPlayer:
     netcode: str = "lockstep"
     tunnel: bool = False  # plays through its TLS connection: its network lets no UDP through (on_tunnel)
     relay: bool = False  # asked to hide their address: the match goes through this server
+    relay_always: bool = False  # and even when that way is slow (no direct try, _tries_direct)
     link: str = ""  # "ethernet", "wifi", "other" ("" unknown): shown to the opponent with match_found
     server_rtt: int | None = None  # their round trip to this server, ms
 
@@ -244,6 +254,8 @@ class Match:
     # the two players' ends the relay joins, by side: a UDP endpoint, or the session of one who plays through it
     relay: list[tuple[str, int] | Session] | None = None
     tunnel_tried: bool = False  # the relay failed and was tried again with tunnels (_decide)
+    direct_tried: bool = False  # the relay was too slow and the players tried each other directly (_try_direct)
+    relay_rtt: int = 0  # the round trip through the relay before that try
     series: Series | None = None
     death_traps: bool = True
     netcode: str = "lockstep"  # rollback when both players asked for it (_go)
@@ -274,6 +286,7 @@ class SeriesPlayer:
     netcode: str = "lockstep"
     at_continue: bool = False  # once ready: its game still waits at its CONTINUE? menu with the other's
     relay: bool = False
+    relay_always: bool = False
 
 
 @dataclass(eq=False)
@@ -298,6 +311,11 @@ class Series:
     # the last match ended with a result and went straight between the two PCs (not through the relay): its games may
     # still be together at their CONTINUE? menu, where the next match can start (_rematch_in_game)
     last_direct: bool = False
+    # or went through this server's relay between the two UDP endpoints: its routes wait for the next match
+    # (_series_between) and carry it when it starts at the CONTINUE? menu (a tunnel's end goes with its launcher's
+    # bridge)
+    last_relay: list[tuple[str, int]] | None = None
+    last_match: str = ""
     last_rtt: int = 0
     last_remote: dict[int, str] = field(default_factory=dict)  # account id -> the endpoint its launcher reported
 
@@ -320,6 +338,7 @@ class LobbyMember:
     spectator: bool = False  # watches the lobby's matches instead of playing them
     netcode: str = "lockstep"
     relay: bool = False  # asked to hide their address (with their ready): their matches go through this server
+    relay_always: bool = False  # and even when that way is slow ("hide_always")
     link: str = ""  # their PC's connection ("ethernet", "wifi", "other"; "" unknown), with their join or ready
     server_rtt: int | None = None  # their round trip to this server, ms, with their join or ready
 
@@ -838,6 +857,9 @@ class Server:
             "min_client": self.cfg.min_client, "games": {g: list(m) for g, m in P.GAMES.items()},
             "ranked": {g: list(m) for g, m in P.RANKED_MODES.items()}, "netcodes": list(P.NETCODES),
             "regions": list(P.REGIONS), "tunnel": self.cfg.relay,
+            # a hidden address's match slower than this through the relay tries directly (0: never; the launcher's
+            # Settings say what hiding costs)
+            "direct_above_ms": self.cfg.direct_above_ms,
         }
         if update:
             welcome["update"] = update
@@ -1244,6 +1266,7 @@ class Server:
         death_traps = P.get_bool(msg, "death_traps", default=True)
         netcode = P.get_netcode(msg)
         relay = P.get_bool(msg, "relay", default=False)
+        relay_always = relay and P.get_bool(msg, "hide_always", default=False)
         link = self._link(msg)
         server_rtt = msg.get("server_rtt")
         if isinstance(server_rtt, bool) or not isinstance(server_rtt, int) or not 0 <= server_rtt <= 5000:
@@ -1257,6 +1280,7 @@ class Server:
             account_id=s.account_id, name=s.name, game=game, mode=mode, ranked=ranked, region=region,
             max_ping=max_ping, strict=strict, character=character, delay=delay, since=now, elo=rating,
             public_ip=s.ip, server_rtt=server_rtt, death_traps=death_traps, netcode=netcode, relay=relay, link=link,
+            relay_always=relay_always,
         )
         self.queue[s.account_id] = entry
         s.queue = entry
@@ -1306,7 +1330,7 @@ class Server:
             MatchPlayer(side=i + 1, account_id=e.account_id, name=e.name, session=sess, character=e.character,
                         delay=e.delay, max_ping=max_ping_now(e, now, self.cfg.mm), region=e.region,
                         elo=e.elo if e.ranked else None, entry=e, netcode=e.netcode, relay=e.relay, link=e.link,
-                        server_rtt=e.server_rtt)
+                        server_rtt=e.server_rtt, relay_always=e.relay_always)
             for i, (e, sess) in enumerate(pair)
         ]
         # the arenas' death traps: never in ranked; in casual the choice both searches made (they meet only when it
@@ -1453,11 +1477,20 @@ class Server:
             # a player who hides their address: neither learns the other's; a tunnelled one has none to punch
             self._start_relay(m, now)
             return
+        self._send_direct_peers(m)
+        assert a.session.udp_public is not None and b.session.udp_public is not None
+        log.info("match %s punching: %s %s / %s %s", m.id, a.name, P.format_endpoint(a.session.udp_public),
+                 b.name, P.format_endpoint(b.session.udp_public))
+
+    def _send_direct_peers(self, m: Match, extra: Callable[[MatchPlayer], dict[str, Any]] | None = None) -> None:
+        """match_peer to both players: the other's endpoint to punch and ping straight (plus `extra(player)`)."""
+        a, b = m.players
+        assert a.session is not None and b.session is not None
         assert a.session.udp_public is not None and b.session.udp_public is not None
         same_nat = a.session.udp_public[0] == b.session.udp_public[0]
         for p in m.players:
             o = m.other(p)
-            assert p.session is not None and o.session is not None
+            assert p.session is not None and o.session is not None and o.session.udp_public is not None
             p.session.send({
                 "type": "match_peer", "match": m.id, "side": p.side, "key": m.key,
                 "punch_timeout": self.cfg.punch_timeout, "same_nat": same_nat,
@@ -1465,9 +1498,8 @@ class Server:
                 "peer": {"public": P.format_endpoint(o.session.udp_public),
                          "lan": o.session.udp_lan if same_nat else ""},
                 "opponent": self._opponent(m, o),
+                **(extra(p) if extra else {}),
             })
-        log.info("match %s punching: %s %s / %s %s", m.id, a.name, P.format_endpoint(a.session.udp_public),
-                 b.name, P.format_endpoint(b.session.udp_public))
 
     def on_ping_report(self, s: Session, msg: dict[str, Any]) -> None:
         m, p = self._my_match(s, msg)
@@ -1487,7 +1519,21 @@ class Server:
     def _decide(self, m: Match, now: float) -> None:
         a, b = m.players
         assert a.ping is not None and b.ping is not None
-        if not (a.ping["ok"] and b.ping["ok"]):
+        ok = a.ping["ok"] and b.ping["ok"]
+        rtt = max(a.ping["rtt_ms"], b.ping["rtt_ms"])
+        if m.direct_tried and m.relay is None:
+            # the direct try after a relay too slow: played that way when it got through and is faster enough, else
+            # back through the relay, with no second try
+            if not ok or rtt + self.cfg.direct_gain_ms > m.relay_rtt:
+                log.info("match %s: %s directly, back through the relay (%d ms)", m.id,
+                         f"{rtt} ms" if ok else "no way", m.relay_rtt)
+                self._start_relay(m, now, back=True)
+                return
+            log.info("match %s: %d ms directly, %d ms through the relay: played directly", m.id, rtt, m.relay_rtt)
+        elif ok and m.relay is not None and self._tries_direct(m, rtt):
+            self._try_direct(m, rtt, now)
+            return
+        if not ok:
             if self.cfg.relay and m.relay is None and all(self._reachable(m, p) for p in m.players):
                 self._start_relay(m, now)
                 return
@@ -1505,7 +1551,6 @@ class Server:
             self.ping_cache.put_unreachable(a.account_id, b.account_id, now)
             self._cancel_match(m, "punch_failed")
             return
-        rtt = max(a.ping["rtt_ms"], b.ping["rtt_ms"])
         self.ping_cache.put(a.account_id, b.account_id, rtt, now)
         limits = [p.max_ping for p in m.players if p.max_ping > 0]
         if limits and rtt > min(limits):
@@ -1513,7 +1558,35 @@ class Server:
             return
         self._go(m, rtt, now)
 
-    def _start_relay(self, m: Match, now: float) -> None:
+    def _tries_direct(self, m: Match, rtt: int) -> bool:
+        """A match relayed only because a player hides their address, too slow that way (direct_above_ms): worth a
+        direct try, unless a player hides theirs always, or one has no UDP of their own (tunnelled)."""
+        return (0 < self.cfg.direct_above_ms < rtt and not m.direct_tried and not self.cfg.relay_only
+                and any(p.relay for p in m.players) and not any(p.relay_always or p.tunnel for p in m.players)
+                and all(p.session is not None and p.session.udp_public is not None for p in m.players))
+
+    def _try_direct(self, m: Match, rtt: int, now: float) -> None:
+        """The ping through the relay is too high for a match relayed because a player hides their address: the two
+        try each other straight (each learns the other's address, as in any direct match; the launchers say so) and
+        play that way when it is faster enough (_decide); else back through the relay. An attempt of its own, with a
+        key of its own; the relay's routes linger meanwhile."""
+        m.relay_rtt = rtt
+        m.direct_tried = True
+        self._end_relay(m)
+        m.relay = None
+        m.state = "punching"
+        m.key = secrets.token_hex(16)
+        m.deadline = now + self.cfg.ping_report_timeout
+        for p in m.players:
+            p.ping = None
+        self._send_direct_peers(m, lambda p: {"direct_why": "relay_ping", "relay_rtt": rtt, "relay_mine": p.relay})
+        a, b = m.players
+        assert a.session is not None and b.session is not None
+        log.info("match %s: %d ms through the relay, over %d: trying directly: %s %s / %s %s", m.id, rtt,
+                 self.cfg.direct_above_ms, a.name, P.format_endpoint(a.session.udp_public), b.name,
+                 P.format_endpoint(b.session.udp_public))
+
+    def _start_relay(self, m: Match, now: float, *, back: bool = False) -> None:
         """The two cannot reach each other (or relay_only, or a player's network lets no UDP through): this server
         carries their packets from now on, between the endpoints their hellos came from, or through the connection
         of a player who plays through it (a tunnel). Their launchers punch and ping through it as they would each
@@ -1539,6 +1612,11 @@ class Server:
                 src.tunnel = route
             else:
                 self.relay_routes[src] = route
+        # why, for the players' launchers to say (a hidden address costs ping: two players far from this server meet
+        # through it): "hidden" (a player hides their address; relay_mine: this one), "tunnel", "unreachable" (the
+        # punch failed), "relay_only" (this server's choice); back: a direct try after it was no faster
+        why = ("relay_only" if self.cfg.relay_only else "tunnel" if any(p.tunnel for p in m.players)
+               else "hidden" if any(p.relay for p in m.players) else "unreachable")
         for p in m.players:
             o = m.other(p)
             assert p.session is not None
@@ -1546,10 +1624,11 @@ class Server:
                 "type": "match_peer", "match": m.id, "side": p.side, "key": m.key,
                 "punch_timeout": self.cfg.punch_timeout, "same_nat": False, "relay": True, "tunnel": p.tunnel,
                 "peer": {"public": "", "lan": ""}, "opponent": self._opponent(m, o),
+                "relay_why": why, "relay_mine": why == "hidden" and p.relay, "back": back,
             })
         a, b = m.players
-        log.info("match %s relayed through this server: %s %s / %s %s", m.id, a.name, self._end_name(ends[0]),
-                 b.name, self._end_name(ends[1]))
+        log.info("match %s relayed through this server (%s%s): %s %s / %s %s", m.id, why, ", back" if back else "",
+                 a.name, self._end_name(ends[0]), b.name, self._end_name(ends[1]))
 
     @staticmethod
     def _end_name(end: tuple[str, int] | Session) -> str:
@@ -1843,7 +1922,7 @@ class Server:
             need=self.cfg.set_wins if m.ranked else 0, created=now, death_traps=m.death_traps,
             players=[SeriesPlayer(account_id=p.account_id, name=p.name, side=p.side, character=p.character,
                                   delay=p.delay, max_ping=p.max_ping, region=p.region, elo=p.elo, netcode=p.netcode,
-                                  relay=p.relay)
+                                  relay=p.relay, relay_always=p.relay_always)
                      for p in m.players],
         )
         self.series[series.id] = series
@@ -1864,6 +1943,10 @@ class Server:
         series.last_picks = fighters
         series.last_direct = (status == "agreed" and m.relay is None
                               and all(p.ping is not None and p.ping.get("remote") for p in m.players))
+        series.last_relay = ([end for end in m.relay if not isinstance(end, Session)]
+                             if status == "agreed" and m.relay is not None
+                             and not any(isinstance(end, Session) for end in m.relay) else None)
+        series.last_match = m.id
         series.last_rtt = m.rtt_ms
         series.last_remote = {p.account_id: p.ping["remote"] for p in m.players if p.ping is not None}
         if fault is not None and series.ranked:
@@ -1909,7 +1992,21 @@ class Server:
             p.choice = ""
             p.at_continue = False
         series.deadline = now + (self.cfg.set_next_timeout if series.ranked else self.cfg.rematch_timeout)
+        if series.last_relay is not None:  # the games at CONTINUE? still talk through it until the next match
+            self._move_routes(series.last_relay, series.last_match, series.last_match,
+                              series.deadline + self.cfg.relay_linger)
         self._send_series(series)
+
+    def _move_routes(self, ends: list[tuple[str, int]], old: str, new: str, expires: float | None) -> bool:
+        """A series' relayed match's routes, kept for the next match or handed over to it; False when one is gone."""
+        routes = [self.relay_routes.get(end) for end in ends]
+        if len(routes) != 2 or any(r is None or r.match != old for r in routes):
+            return False
+        for r in routes:
+            assert r is not None
+            r.match = new
+            r.expires = expires
+        return True
 
     def _series_match_cancelled(self, m: Match, blame: set[int] | frozenset[int], now: float) -> None:
         series = m.series
@@ -1942,14 +2039,18 @@ class Server:
         sessions = [self.by_account.get(p.account_id) for p in series.players]
         if any(sess is None or sess.match is not None for sess in sessions):
             return  # one of them is not here: the deadline decides
-        if series.last_direct and all(p.at_continue for p in series.players):
+        # straight between the two PCs, or through the relay while its routes are still there
+        together = series.last_direct or (series.last_relay is not None and self._move_routes(
+            series.last_relay, series.last_match, series.last_match, series.deadline + self.cfg.relay_linger))
+        if together and all(p.at_continue for p in series.players):
             self._rematch_in_game(series, sessions, now)
             return
         picks = self._series_picks(series)
         players = sorted(
             (MatchPlayer(side=p.side, account_id=p.account_id, name=p.name, session=sess,
                          character=picks[p.side - 1], delay=p.delay, max_ping=p.max_ping, region=p.region,
-                         elo=p.elo if series.ranked else None, accepted=True, netcode=p.netcode, relay=p.relay)
+                         elo=p.elo if series.ranked else None, accepted=True, netcode=p.netcode, relay=p.relay,
+                         relay_always=p.relay_always)
              for p, sess in zip(series.players, sessions)),
             key=lambda mp: mp.side,
         )
@@ -1972,12 +2073,13 @@ class Server:
     def _rematch_in_game(self, series: Series, sessions: list[Session | None], now: float) -> None:
         """Both games still wait together at their CONTINUE? menu after the last match: the next one starts there, as
         the game's REMATCH (the same fighters: casual, both chose it) or SELECT A NEW FIGHTER (both pick again: casual,
-        either chose it; a ranked set's next match), with no new UDP setup. match_go carries "rematch"."""
+        either chose it; a ranked set's next match), with no new UDP setup: a relayed match's routes carry this one.
+        match_go carries "rematch"."""
         choice = "select" if series.ranked or any(p.choice == "select" for p in series.players) else "same"
         players = sorted(
             (MatchPlayer(side=p.side, account_id=p.account_id, name=p.name, session=sess, character="", delay=p.delay,
                          max_ping=p.max_ping, region=p.region, elo=p.elo if series.ranked else None, accepted=True,
-                         netcode=p.netcode, relay=p.relay,
+                         netcode=p.netcode, relay=p.relay, relay_always=p.relay_always,
                          ping={"ok": True, "rtt_ms": series.last_rtt, "remote": series.last_remote.get(p.account_id, ""),
                                "via": "rematch"})
              for p, sess in zip(series.players, sessions)),
@@ -1986,11 +2088,14 @@ class Server:
         m = Match(id=secrets.token_hex(6), game=series.game, mode=series.mode, ranked=series.ranked, players=players,
                   created=now, from_queue=False, series=series, rounds=self.cfg.default_rounds, state="accepted",
                   deadline=now + self.cfg.udp_timeout, death_traps=series.death_traps)
+        if series.last_relay is not None and self._move_routes(series.last_relay, series.last_match, m.id, None):
+            m.relay = list(series.last_relay)
         series.state = "playing"
         series.match = m
         self._register_match(m)
-        log.info("%s %s: match %s from the games' CONTINUE? menu (%s, %d played)",
-                 "set" if series.ranked else "series", series.id, m.id, choice, series.played)
+        log.info("%s %s: match %s from the games' CONTINUE? menu (%s, %d played%s)",
+                 "set" if series.ranked else "series", series.id, m.id, choice, series.played,
+                 ", through the relay" if m.relay is not None else "")
         self._go(m, series.last_rtt, now, rematch=choice)
         self._send_series(series)
 
@@ -2019,6 +2124,8 @@ class Server:
         series.state = "over"
         self.series.pop(series.id, None)
         self._mark_online()
+        if series.last_relay is not None and series.match is None:  # no next match for the routes the last one kept
+            self._move_routes(series.last_relay, series.last_match, series.last_match, now + self.cfg.relay_linger)
         for p in series.players:
             if self.series_of.get(p.account_id) is series:
                 del self.series_of[p.account_id]
@@ -2457,6 +2564,7 @@ class Server:
         member.delay = P.get_delay(msg, default=member.delay)
         member.netcode = P.get_netcode(msg, default=member.netcode)
         member.relay = P.get_bool(msg, "relay", default=False)
+        member.relay_always = member.relay and P.get_bool(msg, "hide_always", default=False)
         self._member_connection(member, msg)
         self._broadcast_lobby(lobby, reply_to=(s, msg))
 
@@ -2518,7 +2626,8 @@ class Server:
         players = [
             MatchPlayer(side=i + 1, account_id=mem.session.account_id or 0, name=mem.session.name or "?",
                         session=mem.session, character=mem.character, delay=mem.delay, max_ping=0,
-                        region=lobby.region, elo=None, accepted=True, netcode=mem.netcode, relay=mem.relay)
+                        region=lobby.region, elo=None, accepted=True, netcode=mem.netcode, relay=mem.relay,
+                        relay_always=mem.relay_always)
             for i, mem in enumerate(self._lobby_pair(lobby))
         ]
         m = Match(id=secrets.token_hex(6), game=lobby.game, mode=lobby.mode, ranked=False, players=players,

@@ -189,13 +189,13 @@ def get_delay(msg: dict, key: str = "delay", *, default: int = 2) -> int:
 
 
 def auto_delay(rtt_ms: int, netcode: str = "lockstep") -> int:
-    """The input delay that covers the one-way latency of a round trip (half of it, plus 8 ms for the frame on its
-    way), in 60 Hz frames: 2 to 8. Lockstep waits at every frame whose input is still on its way; rollback guesses up
-    to 3 frames of it and corrects them (frames run again cost time, so the guesses stay short)."""
-    frames = math.ceil((rtt_ms / 2 + 8) / 16.67)
+    """The input delay for a round trip, in 60 Hz frames. Lockstep waits at every frame whose input is still on its
+    way, so it covers the one-way latency (half the trip, plus 8 ms for the frame on its way): 2 to 8. Rollback guesses
+    the rest and corrects it, so it covers the one-way trip but a frame, as MK3D Online does since its 0.1.18 (the
+    guesses stay about a frame long: fewer frames run again, steadier at a high ping): 2 to 6, 4 at 180 ms."""
     if netcode == "rollback":
-        frames -= 3
-    return min(8, max(2, frames))
+        return min(6, max(2, math.floor(rtt_ms / (2000 / 60) + 0.5) - 1))
+    return min(8, max(2, math.ceil((rtt_ms / 2 + 8) / 16.67)))
 
 
 def get_netcode(msg: dict, key: str = "netcode", *, default: str = "lockstep") -> str:

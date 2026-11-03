@@ -305,8 +305,9 @@ def test_auto_delay_covers_the_one_way_latency():
     from server import protocol as P
     # ceil((rtt / 2 + 8) / 16.67), 2 to 8 frames
     assert [P.auto_delay(rtt) for rtt in (0, 20, 38, 50, 51, 100, 150, 200, 250, 400)] == [2, 2, 2, 2, 3, 4, 5, 7, 8, 8]
-    # rollback guesses 3 of those frames
-    assert [P.auto_delay(rtt, "rollback") for rtt in (0, 100, 150, 200, 250, 400)] == [2, 2, 2, 4, 5, 8]
+    # rollback: the one-way trip in frames, rounded, but one (2 to 6): 3 from 117 ms, 4 from 150, 5 from 184, 6 from 217
+    rtts = (0, 100, 116, 117, 149, 150, 180, 183, 184, 216, 217, 400)
+    assert [P.auto_delay(rtt, "rollback") for rtt in rtts] == [2, 2, 2, 3, 3, 4, 4, 4, 5, 5, 6, 6]
     assert P.get_delay({"delay": "auto"}) == P.DELAY_AUTO and P.get_delay({}) == 2 and P.get_delay({"delay": 6}) == 6
     for bad in (7, -2, "fast", True):
         with pytest.raises(P.ProtocolError):

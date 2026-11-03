@@ -70,6 +70,9 @@ bool udpLoopback();  // development: matches on loopback only (one-PC tests, no 
 bool upnp();         // open the game UDP port on the router (UPnP)
 bool matchSound();   // a chime when a Ranked or Kasual match is found (the MATCH FOUND window comes up)
 bool hideIp();       // matches through the server: no opponent learns this player's address ("relay" to the server)
+// and even when the ping through the server is high: without it a hidden match slower than the server's
+// direct_above_ms that way tries a direct connection once ("hide_always" to the server)
+bool hideIpAlways();
 }  // namespace cfg
 
 namespace applog {

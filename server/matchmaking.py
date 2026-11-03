@@ -32,6 +32,7 @@ class QueueEntry:
     death_traps: bool = True  # the arenas' death traps the player wants (ranked never has them)
     netcode: str = "lockstep"  # what the player's game plays with: a match is rollback only when both want it
     relay: bool = False  # hides their address: their matches go through the server (relay or tunnel)
+    relay_always: bool = False  # and even when that way is slow (no direct try)
     link: str = ""  # the PC's connection to its router: "ethernet", "wifi", "other" ("" unknown)
 
     @property

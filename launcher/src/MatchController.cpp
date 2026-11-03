@@ -569,6 +569,7 @@ void MatchController::sendQueueJoin() {
                     {QStringLiteral("delay"), cfg::inputDelayValue(req.delay)},
                     {QStringLiteral("netcode"), req.netcode},
                     {QStringLiteral("relay"), cfg::hideIp()},
+                    {QStringLiteral("hide_always"), cfg::hideIpAlways()},
                     {QStringLiteral("link"), server_->linkType()}};
     if (serverRttMs() >= 0) msg.insert(QStringLiteral("server_rtt"), serverRttMs());
     pingWiden_ = {};
@@ -713,9 +714,25 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
         }
         if (msg.value(QStringLiteral("relay")).toBool()) {
             // no direct route between the two: the server passes the packets on, its UDP port is the opponent now
+            if (msg.value(QStringLiteral("back")).toBool())
+                log(tr("A direct connection to %1 was no faster: back through the server").arg(opponentName()));
+            else if (str(msg, "relay_why") == QLatin1String("hidden"))
+                log(msg.value(QStringLiteral("relay_mine")).toBool()
+                        ? tr("Through the server: you hide your IP address")
+                        : tr("Through the server: %1 hides their IP address").arg(opponentName()));
             setPhase(Phase::Connecting, tr("Connecting to %1 through the server...").arg(opponentName()));
             udp_->startRelayPunch(match, str(msg, "key"), msg.value(QStringLiteral("side")).toInt(), punchMs);
             return;
+        }
+        if (str(msg, "direct_why") == QLatin1String("relay_ping")) {
+            // a hidden match too slow through the server tries the players' own connections once (the server's
+            // direct_above_ms), played when it is faster enough
+            const int relayRtt = msg.value(QStringLiteral("relay_rtt")).toInt();
+            log(tr("%1 ms through the server: trying %2 directly").arg(relayRtt).arg(opponentName()));
+            if (msg.value(QStringLiteral("relay_mine")).toBool())
+                log(tr("%1 sees your IP address if the direct connection is faster (Settings: Hide my IP address "
+                       "even when the ping through the server is high keeps it hidden)")
+                        .arg(opponentName()));
         }
         setPhase(Phase::Connecting, tr("Connecting to %1...").arg(opponentName()));
         const QJsonObject peer = msg.value(QStringLiteral("peer")).toObject();

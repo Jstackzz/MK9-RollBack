@@ -27,10 +27,12 @@ ignored by MK9 launchers.
 ## Input delay
 
 `queue_join`'s and `lobby_ready`'s `delay` is 0-6 frames (MK3D: 0-4) or `"auto"`. `match_go`'s `delay` is the
-larger of the two players' delays, where an `"auto"` one is `clamp(ceil((rtt_ms / 2 + 8) / 16.67), 2, 8)` with the
-match's `rtt_ms` (the larger of the two players' measured round trips, `protocol.auto_delay`), at least 1 in ranked;
-`"delay_auto": true` says an auto delay took part. Both games get the same value, and a series' in-game rematch the
-same as its first match.
+larger of the two players' delays, where an `"auto"` one comes from the match's `rtt_ms` (the larger of the two
+players' measured round trips, `protocol.auto_delay`): with rollback `clamp(round(rtt_ms / 33.33) - 1, 2, 6)`, the
+one-way trip in frames but one, as MK3D Online since 0.1.18 (2 up to 116 ms, 3 from 117, 4 from 150, 5 from 184, 6
+from 217; until 0.5.4's server `ceil((rtt_ms / 2 + 8) / 16.67) - 3`, 3 at 180 ms); with lockstep all of it,
+`clamp(ceil((rtt_ms / 2 + 8) / 16.67), 2, 8)`; at least 1 in ranked. `"delay_auto": true` says an auto delay took
+part. Both games get the same value, and a series' in-game rematch the same as its first match.
 
 ## Ending a match without a result
 
@@ -50,8 +52,10 @@ launcher whose game is there says so when it is ready for the series' next match
 C: {"type": "series_ready", "series": "8d01c3e2a9f4", "ready": true, "choice": "rematch", "continue": true}
 ```
 
-When both said `continue`, the last match went straight between the two PCs (not through the relay) and its result
-was agreed, the server starts the next match there, with no `match_found`, no UDP hello and no punch:
+When both said `continue`, the last match's result was agreed and it went straight between the two PCs, or through
+the relay between their UDP endpoints (since 0.5.4's server: its routes stay while the series waits for its next
+match, until its deadline and `relay_linger` more, and carry that match; a tunnelled player's end does not, its
+launcher's bridge closes), the server starts the next match there, with no `match_found`, no UDP hello and no punch:
 
 ```json
 S: {"type": "match_go", "match": "41b0c2d9e7aa", "rematch": "same", "series": "8d01c3e2a9f4", "side": 1,
@@ -156,8 +160,20 @@ launcher after 0.4.0 works with a 0.2.0 server, which ignores them and sends non
   address from opponents*). A match where either player does goes through the server from the start, never
   directly: `match_peer` with `"relay": true` and an empty `peer` for both, as with `--relay-only` (which does it for
   every match; `--no-relay` does not stop it). It combines with the tunnel: a tunnelled player's end is their
-  connection, the other's the relay. A series keeps each player's choice; a relayed match is never the start of an
-  in-game rematch (its games are not together).
+  connection, the other's the relay. A series keeps each player's choice; a relayed match's in-game rematch goes on
+  through the same routes (since 0.5.4's server; a tunnelled one's never).
+- A match relayed only because a player hides their address whose round trip through the relay is over
+  `direct_above_ms` (100, `welcome` carries it, `--direct-above-ms`, 0: never) tries the players' own connections
+  once (MK3D Online's rule since 0.1.18; the user: "not going through the relay server if the ping is too high"):
+  `match_peer` as for a direct match, with a key of its own and `"direct_why": "relay_ping"`, `"relay_rtt": <ms>` and
+  `"relay_mine": true` for the player who hides theirs (their opponent learns it). It is played that way when it got
+  through and is 20 ms faster (`direct_gain_ms`); else back through the relay, with no second try: a relay
+  `match_peer` with `"back": true`. A player who sends `"hide_always": true` with `"relay": true` (Settings, *Even
+  when the ping through the server is high*) keeps their matches on the relay however slow; so does a tunnelled one.
+  Every relay `match_peer` says why it is relayed: `relay_why` is `hidden` (`relay_mine`: this player hides theirs),
+  `tunnel`, `unreachable` (the direct punch failed) or `relay_only`.
+- A relay route outlives its match by `relay_linger`, 60 s (was 15: MK3D Online's games play a fatality and the
+  winner's pose through it after their results).
 - Matchmaking estimates a pair whose match would go through the server (one hides their address, or `--relay-only`)
   from both `server_rtt`s, and does not pair them over the tighter max ping.
 - `match_peer`'s `peer.lan` (the home network's address) is sent only to a player behind the same router

@@ -200,6 +200,7 @@ bool udpLoopback() { return get(QStringLiteral("dev/udp_loopback"), false).toBoo
 bool upnp() { return get(QStringLiteral("online/upnp"), true).toBool(); }
 bool matchSound() { return get(QStringLiteral("online/match_sound"), true).toBool(); }
 bool hideIp() { return get(QStringLiteral("online/hide_ip"), false).toBool(); }
+bool hideIpAlways() { return get(QStringLiteral("online/hide_ip_always"), false).toBool(); }
 int localTestPort(int instance) {
     return get(QStringLiteral("dev/local_port%1").arg(instance), instance == 1 ? 7001 : 7002).toInt();
 }

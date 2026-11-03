@@ -192,6 +192,7 @@ LobbyPage::LobbyPage(ServerClient* server, MatchController* controller, QWidget*
         QJsonObject ready{{QStringLiteral("type"), QStringLiteral("lobby_ready")}, {QStringLiteral("ready"), on},
                           {QStringLiteral("delay"), cfg::inputDelayValue(cfg::inputDelay())},
                           {QStringLiteral("netcode"), cfg::netcode()}, {QStringLiteral("relay"), cfg::hideIp()},
+                          {QStringLiteral("hide_always"), cfg::hideIpAlways()},
                           {QStringLiteral("link"), server_->linkType()}};
         if (controller_->serverRttMs() >= 0) ready.insert(QStringLiteral("server_rtt"), controller_->serverRttMs());
         server_->send(ready);

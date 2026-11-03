@@ -125,11 +125,16 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
   key names, `[buttons]`); every game started gets its path in `MK9_CONTROLS`. Online matches run on a fresh save,
   so they play with the game's default button layout: remap here.
 - **Settings**: server address and pinned fingerprint, region, max ping, **input delay** (Auto, the default: from
-  the ping measured when the match connects; or 0-6 frames), **netcode** (Rollback,
+  the ping measured when the match connects, with rollback the one-way trip in frames but one, 2 to 6; or 0-6
+  frames), **netcode** (Rollback,
   the default, or Lockstep: a match plays rollback only when both players chose it), game UDP port,
   *Play a sound when a match is found* (on), UPnP, *Hide my IP address from opponents* (off: every match of the
   player's goes through the server, `relay` in `queue_join` / `lobby_ready`, at the cost of ping for players far
-  from it), **display** (below), the game's paths (table above), Python and local test ports.
+  from it; one over 100 ms that way tries a direct connection once, where the opponent learns the address, and plays
+  it when it is 20 ms faster), *Even when the ping through the server is high* (off, only with the one above:
+  `hide_always`, no direct try), **display** (below), the game's paths (table above), Python and local test ports.
+  The match log says why a match goes through the server (who hides their address, a punch that failed) and when a
+  direct try was faster or not.
 
   Display, all on the game's command line when it starts (the ReXGlue SDK's cvars; a game too old for one sets it
   aside): the game window (Fullscreen, borderless at the monitor's own resolution, or a Window: `--fullscreen` /

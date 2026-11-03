@@ -530,10 +530,11 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     delay->addItem(tr("Auto (from the ping, default)"), QStringLiteral("auto"));
     for (int f = 0; f <= 6; ++f) delay->addItem(tr("%n frame(s)", nullptr, f), f);
     delay->setCurrentIndex(cfg::inputDelay() < 0 ? 0 : qMax(0, delay->findData(cfg::inputDelay())));
-    delay->setToolTip(tr("Frames between a press and the game using it. Lockstep waits at every frame whose input is "
-                         "still on its way, so the delay has to cover the one-way latency: Auto takes it from the ping "
-                         "measured when the match connects, (ping / 2 + 8 ms) / 16.7 ms, 2 to 8 frames. A match "
-                         "takes the larger delay of the two players."));
+    delay->setToolTip(tr("Frames between a press and the game using it. Auto takes it from the ping measured when the "
+                         "match connects: with rollback the one-way trip in frames but one, 2 to 6 (2 up to 116 ms, "
+                         "4 at 180 ms), so the guesses stay short at a high ping; lockstep waits at every frame whose "
+                         "input is still on its way, so it covers all of it, (ping / 2 + 8 ms) / 16.7 ms, 2 to 8. A "
+                         "match takes the larger delay of the two players."));
     auto* netcode = new QComboBox;
     netcode->addItem(tr("Rollback (default)"), QStringLiteral("rollback"));
     netcode->addItem(tr("Lockstep"), QStringLiteral("lockstep"));
@@ -551,7 +552,14 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     auto* hideIp = new QCheckBox(tr("Hide my IP address from opponents"));
     hideIp->setChecked(cfg::hideIp());
     hideIp->setToolTip(tr("Your matches go through the server, so nobody you play can see your address. They get "
-                          "more ping the farther you and your opponent are from the server."));
+                          "more ping the farther you and your opponent are from the server; when that ping is over "
+                          "100 ms the match tries a direct connection once, and the opponent sees your address then "
+                          "(unless the box below is ticked)."));
+    auto* hideIpAlways = new QCheckBox(tr("Even when the ping through the server is high"));
+    hideIpAlways->setChecked(cfg::hideIpAlways());
+    hideIpAlways->setEnabled(cfg::hideIp());
+    hideIpAlways->setToolTip(tr("Keep every match on the server's route however slow it is: no direct try, your "
+                                "address never shows."));
     auto* matchSound = new QCheckBox(tr("Play a sound when a match is found"));
     matchSound->setChecked(cfg::matchSound());
     matchSound->setToolTip(tr("A short chime with the MATCH FOUND window, heard over the game you wait in."));
@@ -566,11 +574,13 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     of->addRow(QString(), matchSound);
     of->addRow(QString(), upnp);
     of->addRow(QString(), hideIp);
+    of->addRow(QString(), hideIpAlways);
     of->addRow(tr("Router"), routerState_);
-    auto* delayNote = ui::label(tr("A match takes the larger delay of the two players (Auto: from the ping, 2 to 8 "
-                                   "frames; Ranked at least 1). Players who cannot reach each other directly, or who "
-                                   "hide their IP address, play through the server: more ping the farther both are "
-                                   "from it."), "Muted");
+    auto* delayNote = ui::label(tr("A match takes the larger delay of the two players (Auto: from the ping, 2 to 6 "
+                                   "frames with rollback, 2 to 8 with lockstep; Ranked at least 1). Players who cannot "
+                                   "reach each other directly, or who hide their IP address, play through the server: "
+                                   "more ping the farther both are from it. A hidden match over 100 ms that way tries a "
+                                   "direct connection once and plays it when it is 20 ms faster."), "Muted");
     delayNote->setWordWrap(true);
     of->addRow(QString(), delayNote);
     grid->addWidget(onlineBox, 1, 0);
@@ -729,7 +739,12 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     });
     connect(strict, &QCheckBox::toggled, this, [](bool on) { cfg::set(QStringLiteral("online/strict"), on); });
     connect(matchSound, &QCheckBox::toggled, this, [](bool on) { cfg::set(QStringLiteral("online/match_sound"), on); });
-    connect(hideIp, &QCheckBox::toggled, this, [](bool on) { cfg::set(QStringLiteral("online/hide_ip"), on); });
+    connect(hideIp, &QCheckBox::toggled, this, [hideIpAlways](bool on) {
+        cfg::set(QStringLiteral("online/hide_ip"), on);
+        hideIpAlways->setEnabled(on);
+    });
+    connect(hideIpAlways, &QCheckBox::toggled, this,
+            [](bool on) { cfg::set(QStringLiteral("online/hide_ip_always"), on); });
     connect(window, &QComboBox::currentIndexChanged, this, [window, windowSize] {
         cfg::set(QStringLiteral("display/fullscreen"), window->currentData());
         windowSize->setEnabled(!window->currentData().toBool());

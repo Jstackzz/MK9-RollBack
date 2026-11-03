@@ -57,6 +57,10 @@ qt_add_executable(MK9Launcher WIN32
     src/MainWindow.cpp src/MainWindow.h
 )
 
+# its version and publisher, as Windows and antivirus programs read them (data/version.rc.in)
+configure_file(data/version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/MK9Launcher-version.rc" @ONLY)
+target_sources(MK9Launcher PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/MK9Launcher-version.rc")
+
 qt_add_resources(MK9Launcher "gamedata"
     PREFIX "/data"
     BASE data

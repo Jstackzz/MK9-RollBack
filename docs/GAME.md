@@ -207,7 +207,9 @@ fighters' numbers alone). A process is told apart by its object id counted from 
 object took at the last barrier: two PCs' menus and loading do not make the same number of objects
 before a fight (0.5.3 and 0.5.4: the same fighter script was process `10000BB7` in one game and
 `10000BBA` in the other, `100008AB` and `100008A2` in another match whose next object ids were 9
-apart), and the ones one PC made more came before the fight's scripts. Every 30 frames of a fight and
+apart), and the ones one PC made more came before the fight's scripts. At a fight's barrier every PC also takes
+slot 0's frame counter of the game state (`0x833C6C54 + 112`, `game.cpp`), which counts from when the fight began
+loading: bit 0 of it decides each frame whether P1's or P2's script processes run first. Every 30 frames of a fight and
 of its end (phases 8 and 11) both sides compare a state hash: the round timer, the round, the rounds
 won and the draws made at every call site so far (a fight that goes differently draws differently).
 Not outside them: until the next fight sets them the fight's values keep the last one's, which a game
@@ -547,8 +549,9 @@ rollbacks left them).
   the select screen, one PC with 26 draws more at `82383B38` than the other: the menus' draws go with what each
   PC has loaded, and only fights are checked now ("Netplay"). The lagged two-game test then had no check in the
   menus and every one of the fight's equal, the fight's scripts the same frame for frame.
-- **Not explained yet: after a rollback one PC spawns a pair of effect objects a frame before the other** (found in
-  the server's desync reports of 0.5.4 and reproduced in the two-game test, 2026-11-03). 0.5.4's first evening:
+- **Fights went out of step when two PCs' loading took a different number of frames: the fighters' scripts ran in
+  opposite orders, and one PC spawned a pair of effect objects a frame before the other** (found in the server's
+  desync reports of 0.5.4 and reproduced in the two-game test, fixed 2026-11-03). 0.5.4's first evening:
   five of the six lobby matches two players started, 47 ms apart through the relay, went out of step (none
   finished; the sixth was the id offset above). With the same next object id at the fight's barrier, a script
   process (`100009E8`) drew once in one game and never in the other by frame 1080; one (`100007EE`) drew 6 times
@@ -564,27 +567,34 @@ rollbacks left them).
   2 apart, so every later script process's draws went to other sites. The pair comes from the spawn list
   `sub_829F0BE8` goes through (fx.h): at the frame they parted both games had the same entries there with the same
   flags and values, in another order, and the order decides whether an entry is flagged again and spawns the next
-  frame. Two games' orders parted only after one of them had run the frames before again after a wrong guess (the
-  same fight in lockstep: never), at the same moments of the fight from run to run (the hit at about frame 1302 that
-  spawns five such pairs); none of the game's own calls around the list on the main thread changed its order (a
-  watch on `sub_829F44A0`, `sub_829EB328`, `sub_829ED498` and the spawns). Not the cause: frames run again drawing
-  everything (`MK9_RB_DRAW_ALL=1`), the memexport readback off, XAudio2's mixing stopped for the whole fight, bytes
-  made volatile (none of the list's; the simulation heap blocks other threads took over are FMOD's file readers and
-  a buffer the rendering side fills), the simulation heap's own bookkeeping (in its region, put back with it), the
-  job workers (with none taking a job in the fight, `sub_827783B0` answering nothing, the main thread running every
-  batch itself, the seed drifted at the same frames again). Going through the list by its objects' ids instead of
-  its order did not stop it either. Two runs in step (one each way) had other builds' timing: the drift needs a
-  rollback across that hit, and where rollbacks fall changes with the timing. What a replay leaves different is
-  open; the way to find it is to compare all of memory at the frame's top after a straight run with that after a
-  replay with a wrong guess first. A process that drew more in one game (the reports' other cases) may be this too
-  (the pairs shift every later id, and the fighters' main scripts, made by `sub_823B3EB8`, draw in bursts of 2 a
-  frame: the reports' differences of 2 and 10 are one and five such frames). Also open: a sync test that runs the
-  frames it takes back with other inputs first, where a game-flow script (made by process `1000033F`) slept 28
-  ticks against the straight run's 1, and FMOD's thread writing game memory through the game's file callbacks
-  (`sub_82602D00` / `sub_82604168` into `sub_82728A38`) at moments of each PC's real time, which made bytes of the
-  game state's page (`0x833C6000`) volatile for good. That sync test also crashed once (Reptile and Sub-Zero): the
-  rendering thread freed a simulation heap block that was free already ("freed twice") and then ran a render
-  command through a freed one.
+  frame. It looked like a rollback's doing: the orders parted at the same moments of the fight from run to run (the
+  hit at about frame 1302 that spawns five such pairs) in the game that had run frames again, the same fight in
+  lockstep never parted, and the list's order changed in no call of the game's around it (a watch on
+  `sub_829F44A0`, `sub_829EB328`, `sub_829ED498` and the spawns). Nothing a replay was suspected of changed it:
+  frames run again drawing everything (`MK9_RB_DRAW_ALL=1`), the memexport readback off, XAudio2's mixing stopped
+  for the whole fight, the job workers kept out (`sub_827783B0` answering nothing), the list gone through by its
+  objects' ids. A compare of all tracked memory at a frame's top after a straight run and after the same frames
+  run again (a wrong guess first, in the sync test) found GPU fence counters and the simulation heap's free lists
+  different, nothing of the lists. Traces of every entry put on the lists showed it: a script command
+  (`sub_829F0A48` / `sub_829F0B20`) takes an effect's entry out (`sub_829ED348`) and puts it at the list's end
+  (`sub_829ED270`), and at the hit P1's and P2's main processes each do that to their effects, so the list ends in
+  the order the processes ran. The script VM runs 21 lists of processes in order (`sub_82A164C8`, at `0x8342CDFC`),
+  and every frame a script command (`sub_823BCC70`) puts P1's processes in list 12 plus bit 0 of the game state's
+  frame counter (`0x833C6C54 + 112`) and P2's in the other. That counter counts from when the fight began loading,
+  and the two games came to the fight's barrier with it one apart (531 and 532 in a run that parted, 534 and 533 in
+  another; rollback puts it back like any other word): every frame of the fight they ran the fighters' scripts in
+  opposite orders, which shows only where both queue effects on one list in one frame. A run in step had the lists
+  alike on every frame. Since 0.5.5 the barrier's words carry the counter and every PC takes slot 0's
+  (`game::Agree`): the mash seed that had gone out of step in 11 runs of 13 stayed in step in 4 runs of 4, its two
+  games coming to the barrier 1 to 3 frames apart (213 and 210 in the first) and fighting from slot 0's count.
+  The reports' other cases fit this too (a process that drew more in one game: the pairs shift every later id, and
+  the fighters' main scripts, made by `sub_823B3EB8`, draw in bursts of 2 a frame, so the reports' differences of 2
+  and 10 are one and five such frames). Still open from this hunt: a sync test that runs the frames it takes back
+  with other inputs first, where a game-flow script (made by process `1000033F`) slept 28 ticks against the
+  straight run's 1; FMOD's thread writing game memory through the game's file callbacks (`sub_82602D00` /
+  `sub_82604168` into `sub_82728A38`) at moments of each PC's real time, which made bytes of the game state's page
+  (`0x833C6000`) volatile for good; and that sync test's crash (Reptile and Sub-Zero): the rendering thread freed a
+  simulation heap block that was free already ("freed twice") and then ran a render command through a freed one.
 - **Rollback crashed the game in XAudio2's mixing thread** in 0.5.1 and 0.5.2 (found in players' crash reports
   and fixed 2026-10-29): `C0000005` at `sub_832C93D0+0x1f9` reading guest address 0, on the thread XAudio2 mixes
   on (`sub_832C92D0`), a minute or two into lagged online matches (four reports, three in a row from one player

@@ -9,7 +9,9 @@ that session's game.log with feed=127.0.0.1:<port>: it plays the match frame for
 checks are in the log to compare), with MK9_DIAG_DUMP / MK9_SNAP_FRAMES / MK9_TRACE_SCRIPT as wanted.
 --gap 0 sends everything at once, as a spectator of a match under way gets it; a gap of a few seconds between
 matches is what a spectator watching from the start gets.
-Usage: feedreplay.py --seed 3997265532 [--port 7302] [--version 0.5.2] [--delay 2] [--gap 0] <net log>"""
+From 0.5.5 on a fight starts with slot 0's frame counter: give each fight's with --counters (slot 0's game.log, the
+"frame counter" of the fight's "agreed seed" line), or the two fighters' scripts may run in the other order.
+Usage: feedreplay.py --seed 3997265532 [--port 7302] [--version 0.5.2] [--delay 2] [--gap 0] [--counters D5,1A0] <net log>"""
 import argparse
 import socket
 import struct
@@ -67,18 +69,26 @@ def main():
     ap.add_argument("--delay", type=int, default=2)
     ap.add_argument("--end", action="store_true", help="END for both slots after the last match")
     ap.add_argument("--gap", type=float, default=0.0)
+    ap.add_argument("--counters", default="",
+                    help="0.5.5 on: each fight's frame counter as slot 0's game.log says it was agreed (\"frame counter "
+                         "<hex>\" of its \"agreed seed\" line), comma-separated, matches 2, 3, ...")
     ap.add_argument("log")
     a = ap.parse_args()
     stamp = fnv(a.version.encode())
+    counters = [int(c, 16) for c in a.counters.split(",") if c]
     parts = []
     ms = matches(a.log)
     for k, frames in enumerate(ms, start=1):
         feed = bytearray()
         seed = a.seed if k == 1 else (0x89ABCDEF ^ (k - 1))
         n = max(frames) + 1
-        print(f"match {k}: frames 0..{n - 1}, seed {seed:08X}", flush=True)
+        # the words of a READY: the release's stamp, the round timer (unused), and a fight's frame counter (a fight's
+        # barrier takes slot 0's: mk9/src/mk9/game.cpp, ReadyWords)
+        words = [stamp, 0] + ([counters[k - 2]] if 2 <= k < len(counters) + 2 else [])
+        print(f"match {k}: frames 0..{n - 1}, seed {seed:08X}, words {' '.join(f'{w:X}' for w in words)}", flush=True)
         for slot in (0, 1):
-            feed += packet(MEET, slot, k, struct.pack("<IBIIB", seed, 2, stamp, 0, a.delay))
+            body = struct.pack("<IB", seed, len(words)) + b"".join(struct.pack("<I", w) for w in words)
+            feed += packet(MEET, slot, k, body + struct.pack("<B", a.delay))
         for slot in (0, 1):
             for first in range(0, n, 128):
                 chunk = [wire(frames[f][slot]) if f in frames else bytes(8) for f in range(first, min(n, first + 128))]

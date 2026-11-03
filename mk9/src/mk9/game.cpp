@@ -125,7 +125,15 @@ uint32_t ReleaseStamp() {
   return stamp;
 }
 
-std::vector<uint32_t> ReadyWords() { return {ReleaseStamp(), uint32_t(RoundTimer())}; }
+// The game state's frame counter (0x833C6C54 + 112), which counts from when a fight starts loading: two PCs come to the
+// fight's barrier with it as many frames apart as their loading was. Bit 0 of it decides each frame whose script
+// processes run first (sub_823BCC70 puts P1's in run list 12 + that bit and P2's in the other, and the lists run in
+// order), so the fighters' scripts ran in opposite orders on two PCs one frame apart, and at a hit where both queue
+// effects on one list (sub_829ED270) the order of the list told one game to spawn a pair of effects a frame later
+// (0.5.4's remaining desync). Every PC takes slot 0's at the barrier (Agree)
+constexpr uint32_t kFrameCounter = 0x833C6CC4;
+
+std::vector<uint32_t> ReadyWords() { return {ReleaseStamp(), uint32_t(RoundTimer()), ReadU32(kFrameCounter)}; }
 
 bool SameRelease(const mk9::net::Agreement& agreed) {
   for (int s = 0; s < mk9::net::kMaxSlots; s++) {
@@ -270,8 +278,17 @@ void Agree(PPCContext& ctx, uint8_t* base, const mk9::net::Agreement& agreed) {
   g_check_draws.clear();
   SetGameRandState(agreed.seed);
   SetMainRandState(ctx, base, Mix(agreed.seed, 0xC0FFEEu));
-  REXLOG_INFO("mk9 game: agreed seed {:08X} (the game's generator was {:08X}, rand() {:08X}; next object id {:08X})",
-              agreed.seed, before, crt_before, ReadU32(0x83394B44));
+  // a fight's barrier: the frame counter as the lowest slot that sent one has it (a watcher sends none). Not at the
+  // launcher's start, where each game counts the menus since it was parked
+  const uint32_t counter_before = ReadU32(kFrameCounter);
+  for (int s = 0; Phase() == kPhaseFight && s < mk9::net::kMaxSlots; s++) {
+    if (agreed.words[s].size() < 3) continue;
+    WriteU32(kFrameCounter, agreed.words[s][2]);
+    break;
+  }
+  REXLOG_INFO("mk9 game: agreed seed {:08X} (the game's generator was {:08X}, rand() {:08X}; next object id {:08X}; "
+              "frame counter {:X}, was {:X})",
+              agreed.seed, before, crt_before, ReadU32(0x83394B44), ReadU32(kFrameCounter), counter_before);
 }
 
 bool SyncPoint() {

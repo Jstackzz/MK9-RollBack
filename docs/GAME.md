@@ -192,14 +192,21 @@ set from the agreed seed; outside fights each call site draws from its own strea
 site, count), so loading-time differences between PCs cannot change menu picks (the arena
 variant, Test Your Luck's slots; in fights every MK script process has a stream of its own, so a
 script drawing more often, an arena's ambience reacting to a sound ending, say, leaves the
-fighters' numbers alone). Every 30 frames both sides compare a state hash: the round timer, the
-round, the rounds won and the draws made at every call site so far (a fight that goes differently
-draws differently). The fight's values count only in a fight and at its end (phases 8 and 11): until
-the next fight sets them they keep the last one's, which a game booted since never saw (a lobby match
-on 0.5.0 desynced at frame 0 between a fresh game and one that had played the title's demo fight).
-Not while a fight loads (the VS screen, phase 1): each PC finishes loading when
-it does and the fight's scripts start then, a frame or two apart from one PC to the next, drawing
-and setting the round timer, until the fight's barrier puts them in step.
+fighters' numbers alone). A process is told apart by its object id counted from the id the next
+object took at the last barrier: two PCs' menus and loading do not make the same number of objects
+before a fight (0.5.3 and 0.5.4: the same fighter script was process `10000BB7` in one game and
+`10000BBA` in the other, `100008AB` and `100008A2` in another match whose next object ids were 9
+apart), and the ones one PC made more came before the fight's scripts. Every 30 frames of a fight and
+of its end (phases 8 and 11) both sides compare a state hash: the round timer, the round, the rounds
+won and the draws made at every call site so far (a fight that goes differently draws differently).
+Not outside them: until the next fight sets them the fight's values keep the last one's, which a game
+booted since never saw (a lobby match on 0.5.0 desynced at frame 0 between a fresh game and one that
+had played the title's demo fight); the menus' and select screen's draws go with what each PC has
+loaded by then (0.5.3: two matches stopped before their fight, one PC's select screen with 26 draws
+more at `82383B38`), and what the players pick there is in their inputs; and while a fight loads (the
+VS screen, phase 1) each PC finishes loading when it does and the fight's scripts start then, a frame
+or two apart from one PC to the next, drawing and setting the round timer, until the fight's barrier
+puts them in step and starts every draw anew.
 
 What a game sees must not depend on its PC. The GPU's occlusion queries (how much of something got
 drawn) decide what UE3 counts as seen, and some of the game's effects draw from their streams only
@@ -213,10 +220,9 @@ for frame (the effects' draws differed, not the fighters'). The game now sets th
 (`query_occlusion_fake_sample_count`, 1000) for every query, unless the command line says otherwise.
 A desync's log (and so its report) lists the failed check's draws by call site, grouped by return address
 (`mk9 net: draws at frame f by site: 82A23504: 824790DC=40 8247063C=8 ...`, 4 lines at most; a script's
-draws are at `8247061C ^ (process id << 4)`): the two players' reports side by side show what drew
-differently. Since 0.5.4 the report also has each fight's `next object id` (on its `match N in sync` line: two PCs
-whose loading made a different number of objects number their script processes, and so their draw sites,
-differently) and each check's round and rounds won beside its timer in the net log
+draws are at `8247061C ^ ((process id - next object id) << 4)`, the next object id at the fight's barrier, on its
+`match N in sync` line since 0.5.4; until 0.5.5 `8247061C ^ (process id << 4)`): the two players' reports side by
+side show what drew differently. Since 0.5.4 each check's round and rounds won are beside its timer in the net log
 (`check <hash> timer 90 round 1 won 0-0 rand <state>`): what of a check differed when the draws did not.
 
 - **Lockstep** (default): a frame runs once every player's input for it is there; input delay 2.
@@ -509,9 +515,20 @@ rollbacks left them).
   it: their attacks come again a frame later and draw at the same sites before the next check. A desync's report
   now lists the draws by call site ("Netplay"); until then by the 64 KB of code, and for checks below about frame
   500 not at all (each match numbers its frames from 0, and the 16 checks kept for it were the menus' later ones).
-  Not explained yet: `a5e3862d9529` went out of step at the first check, frame 30, before either game had rolled
-  back and with no input from either player. The lagged two-game test stays in step with one game's audio queued
-  64 frames ahead (`audio_maxqframes`), with its memexport readback off, or drawing at 3x3 resolution.
+  `a5e3862d9529` went out of step at the first check, frame 30, before either game had rolled back and with no
+  input from either player (explained in 0.5.3's reports, the next entry). The lagged two-game test stays in step
+  with one game's audio queued 64 frames ahead (`audio_maxqframes`), with its memexport readback off, or drawing at
+  3x3 resolution.
+- **Fights stopped as out of step when their scripts drew alike** until 0.5.5 (found in the server's desync reports
+  of 0.5.3 and 0.5.4, fixed 2026-11-03): a script process's draws were keyed by its object id, and two PCs' menus
+  and loading do not make the same number of objects. In 0.5.3 two fights stopped at their first check, frame 30,
+  the same fighter script drawing as process `10000BB7` in one game and `10000BBA` in the other; in 0.5.4's first
+  lobby match the fight stopped at frame 1020 as round 1 began, its draws alike but at processes `100008AB` and
+  `100008A2`, the next object ids at the fight's barrier `100008C7` and `100008BE`, 9 apart as well. Draws are now
+  keyed by the id counted from that barrier's (`g_id_base`, `game.cpp`). Two more of 0.5.3's matches stopped at
+  the select screen, one PC with 26 draws more at `82383B38` than the other: the menus' draws go with what each
+  PC has loaded, and only fights are checked now ("Netplay"). The lagged two-game test then had no check in the
+  menus and every one of the fight's equal, the fight's scripts the same frame for frame.
 - **Rollback crashed the game in XAudio2's mixing thread** in 0.5.1 and 0.5.2 (found in players' crash reports
   and fixed 2026-10-29): `C0000005` at `sub_832C93D0+0x1f9` reading guest address 0, on the thread XAudio2 mixes
   on (`sub_832C92D0`), a minute or two into lagged online matches (four reports, three in a row from one player

@@ -91,10 +91,13 @@ std::vector<std::string> CheckDraws(uint32_t frame);
 // at the top of a frame in sync: true once when every PC must meet again before going on (a fight
 // begins: the phase turned to kPhaseFight)
 bool SyncPoint();
-// whether the state at the top of this frame is the same on every PC in sync, so worth a check: not
-// while a fight loads (kPhaseLoading, the VS screen). Each PC finishes loading when it does, and the
-// fight's scripts start then (a frame or two apart, drawing, setting the round timer) until each PC
-// reaches the fight's barrier, which puts them in step again (SyncPoint)
+// whether the state at the top of this frame is the same on every PC in sync, so worth a check: only in a
+// fight and at its end (kPhaseFight, kPhaseOver). Each PC finishes loading when it does, and the fight's
+// scripts start then (a frame or two apart, drawing, setting the round timer) until each PC reaches the
+// fight's barrier, which puts them in step again (SyncPoint); and the menus' and select screen's draws go
+// with what each PC has loaded by then (0.5.3: two matches stopped before their fight, the select screen of
+// one PC with 26 draws more at 82383B38). What the players pick is in their inputs, and the fight's barrier
+// starts every draw anew
 bool Comparable();
 
 }  // namespace mk9::game

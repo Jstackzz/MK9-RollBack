@@ -175,17 +175,23 @@ namespace {
 // current context at 0x8342CDF0, its object id at +4), so one script drawing more often (an arena's
 // ambience reacting to a sound ending) leaves the others' numbers alone. The id comes from the one
 // counter every MK object takes its id from (0x83394B44, sub_829DBEF0), in the order the main thread
-// makes them, so it is the same process on every PC; the site shows it as 8247061C ^ (id << 4)
-// (82A23504/824790DC: process 1000096C, a fighter's own script)
+// makes them; but two PCs' menus and loading do not make the same number of objects before a fight
+// (0.5.3: the same script drew on frames 0-29 in both games as process 10000BB7 in one and 10000BBA
+// in the other, its stream and the checks then apart by frame 30), so a process counts from the id
+// the next object took at the last barrier (g_id_base, Agree): the same on every PC for the objects
+// made after it, and for those made before it as long as what one PC made more came first. The site
+// shows it as 8247061C ^ ((id - base) << 4) (82A23504/824790DC: a fighter's own script 0x96C after
+// the base). Netplay's "match N in sync" line names the base (next object id)
 constexpr uint32_t kScriptRandomCaller = 0x8247061C;
 constexpr uint32_t kScriptContext = 0x8342CDF0;
+uint32_t g_id_base = 0;
 
 uint64_t DrawSite(const PPCContext& ctx) {
   uint32_t up = 0;
   StackReturns(ctx, &up, 1);
   if (up == kScriptRandomCaller) {
     const uint32_t context = ReadU32(kScriptContext);
-    if (context) up ^= ReadU32(context + 4) << 4;
+    if (context) up ^= (ReadU32(context + 4) - g_id_base) << 4;
   }
   return (uint64_t(uint32_t(ctx.lr)) << 32) | up;
 }
@@ -257,6 +263,7 @@ void RolledBack(uint32_t frame) {
 void Agree(PPCContext& ctx, uint8_t* base, const mk9::net::Agreement& agreed) {
   const uint32_t before = GameRandState(), crt_before = MainRandState(ctx, base);
   g_agreed_seed = agreed.seed;
+  g_id_base = NextObjectId();  // script processes count from here (DrawSite)
   g_site_draws.clear();
   g_site_journal.clear();
   // each match numbers its frames from 0: the menus' checks, at higher frames, kept a fight's first ones out
@@ -276,7 +283,10 @@ bool SyncPoint() {
   return begins;
 }
 
-bool Comparable() { return Phase() != kPhaseLoading; }
+bool Comparable() {
+  const int32_t phase = Phase();
+  return phase == kPhaseFight || phase == kPhaseOver;
+}
 
 uint32_t StateHash(PPCContext& ctx, uint8_t* base) {
   // only values that do not depend on where this process's heaps put things (the script globals

@@ -669,6 +669,25 @@ bool RestoreLocked(uint32_t frame, PPCContext& ctx) {
       }
     }
   }
+  // pages taken since the last frame closed (written while the simulation is held, by threads outside it) that this
+  // restore put back: what was kept of them is from before it, and OpenFrame would file it under the frame gone back
+  // to, so that a second restore to that frame put back the frames this one takes back (in the sync test, 2026-11-03,
+  // a 64 KB block of the simulation heap taken that way left the heap's free lists wrong). Protected again, they are
+  // kept afresh at their next write
+  if (!g_pending_pages.empty()) {
+    size_t keep = 0;
+    for (size_t i = 0; i < g_pending_pages.size(); i++) {
+      const uint32_t p = g_pending_pages[i];
+      if (mark[p >> 12] == 2) continue;
+      if (keep != i) {
+        g_pending_pages[keep] = p;
+        std::memcpy(g_pending_data.data() + keep * kPage, g_pending_data.data() + i * kPage, kPage);
+      }
+      keep++;
+    }
+    g_pending_pages.resize(keep);
+    g_pending_data.resize(keep * size_t(kPage));
+  }
   for (uint32_t p : touched) {
     mark[p >> 12] = 0;
     g_page[p >> 12] = kClean;

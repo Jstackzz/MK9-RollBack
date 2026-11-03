@@ -214,7 +214,10 @@ for frame (the effects' draws differed, not the fighters'). The game now sets th
 A desync's log (and so its report) lists the failed check's draws by call site, grouped by return address
 (`mk9 net: draws at frame f by site: 82A23504: 824790DC=40 8247063C=8 ...`, 4 lines at most; a script's
 draws are at `8247061C ^ (process id << 4)`): the two players' reports side by side show what drew
-differently.
+differently. Since 0.5.4 the report also has each fight's `next object id` (on its `match N in sync` line: two PCs
+whose loading made a different number of objects number their script processes, and so their draw sites,
+differently) and each check's round and rounds won beside its timer in the net log
+(`check <hash> timer 90 round 1 won 0-0 rand <state>`): what of a check differed when the draws did not.
 
 - **Lockstep** (default): a frame runs once every player's input for it is there; input delay 2.
 - **Rollback** (`netcode=rollback`): frames of a fight run ahead on guessed inputs (up to 8) and a

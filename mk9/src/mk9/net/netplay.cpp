@@ -168,8 +168,12 @@ FILE* g_log = nullptr;
 Clock::time_point g_last_hello{};
 bool g_rolling = false;                    // rollback armed: frames may run on guesses
 std::map<uint32_t, uint32_t> g_tentative;  // state hashes at frame tops, until every input before is known
-// what each check frame's hash was made of (the log's "timer" and "rand"), as of its last run
-std::map<uint32_t, std::pair<uint32_t, uint32_t>> g_check_detail;
+// what each check frame's hash was made of (the log's "timer", "round" and "rand"), as of its last run
+struct CheckDetail {
+  uint32_t timer = 0, rand = 0;
+  int round = 0, won1 = 0, won2 = 0;
+};
+std::map<uint32_t, CheckDetail> g_check_detail;
 uint32_t g_paced_at = 0;                   // the last frame held back to let the others catch up
 
 // this side's own input delay, and the match's: the largest any side asked at the barrier (each
@@ -580,15 +584,15 @@ void LogFrame(bool again) {
   auto it = g_my_checks.find(g_frame);
   auto t = g_tentative.find(g_frame);
   if (it != g_my_checks.end() || t != g_tentative.end()) {
-    uint32_t timer = 0, rand_state = 0;
-    if (auto d = g_check_detail.find(g_frame); d != g_check_detail.end()) {
-      timer = d->second.first;
-      rand_state = d->second.second;
+    CheckDetail d;
+    if (auto found = g_check_detail.find(g_frame); found != g_check_detail.end()) {
+      d = found->second;
     } else {
-      game::LastCheckDetail(timer, rand_state);
+      game::LastCheckDetail(d.timer, d.rand);
     }
-    std::fprintf(g_log, " check %08X timer %u rand %08X", it != g_my_checks.end() ? it->second : t->second,
-                 timer, rand_state);
+    // the round and the rounds won are in the hash too (in a fight): a desync's report shows them beside the timer
+    std::fprintf(g_log, " check %08X timer %u round %d won %d-%d rand %08X",
+                 it != g_my_checks.end() ? it->second : t->second, d.timer, d.round, d.won1, d.won2, d.rand);
   }
   std::fputc('\n', g_log);
 }
@@ -678,9 +682,12 @@ void SetFrameInputs(uint32_t f) {
 void Tentative(uint32_t f, PPCContext& ctx, uint8_t* base) {
   if (f % 30 == 0 && game::Comparable()) {
     g_tentative[f] = game::StateHash(ctx, base);
-    uint32_t timer, rand_state;
-    game::LastCheckDetail(timer, rand_state);
-    g_check_detail[f] = {timer, rand_state};
+    CheckDetail d;
+    game::LastCheckDetail(d.timer, d.rand);
+    d.round = game::Round();
+    d.won1 = game::RoundsWon(0);
+    d.won2 = game::RoundsWon(1);
+    g_check_detail[f] = d;
     while (g_check_detail.size() > 64) g_check_detail.erase(g_check_detail.begin());
   }
 }
@@ -1179,7 +1186,10 @@ bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agree
   }
   g_status = Status::InSync;
   input::SetSource(&FrameInput);
-  REXLOG_INFO("mk9 net: match {} in sync, seed {:08X}, input delay {}", g_match, agreed.seed, Delay());
+  // with the id the game's next object takes: each script process's draws are told apart by its id, so two PCs whose
+  // loading made a different number of objects before a fight draw at different sites (a desync's report has it)
+  REXLOG_INFO("mk9 net: match {} in sync, seed {:08X}, input delay {}, next object id {:08X}", g_match, agreed.seed,
+              Delay(), game::NextObjectId());
   return true;
 }
 

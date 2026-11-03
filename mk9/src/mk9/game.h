@@ -54,6 +54,9 @@ int Round();
 // the rounds player 1 (0) or 2 (1) won as the game counts them in a match played on one PC (0x833C7A38, 0x833C7A3C,
 // final once the CONTINUE? menu is up): in a lobby match they stay 0 (autopilot.cpp counts them from RoundWinner)
 int RoundsWon(int player);
+// the id the game's next counted object takes (0x83394B44, sub_829DBEF0): script processes among them, whose draws
+// are told apart by it
+uint32_t NextObjectId();
 
 // what the barrier tells the other players: this build's release stamp first, then the match's
 // settings this game would use

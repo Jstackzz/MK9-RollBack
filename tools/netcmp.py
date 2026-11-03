@@ -1,6 +1,7 @@
 """Compare two games' netplay logs (MK9_NET_LOG) frame by frame.
 
-Each line: <frame> <slot inputs...> [check <hash> timer <t> rand <r>]; "r<frame>" when a rollback
+Each line: <frame> <slot inputs...> [check <hash> timer <t> [round <n> won <a>-<b>] rand <r>] (round and won since
+0.5.4's game); "r<frame>" when a rollback
 ran the frame again (that line then stands for the frame). A match's frames start at 0 again, so
 the logs are split into matches where the frame number goes back.
 Usage: netcmp.py a/net.log b/net.log
@@ -55,6 +56,8 @@ for m, (ma, mb) in enumerate(zip(a, b), 1):
             if field(pa, "timer") != field(pb, "timer"):
                 timer_diff += 1
                 first.setdefault("timer", pa[0])
+            if (field(pa, "round"), field(pa, "won")) != (field(pb, "round"), field(pb, "won")):
+                first.setdefault("round", pa[0])
             if field(pa, "rand") != field(pb, "rand"):
                 rand_diff += 1
                 first.setdefault("rand", pa[0])

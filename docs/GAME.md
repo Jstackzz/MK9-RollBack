@@ -381,6 +381,9 @@ restore is only right if the memory it puts back is the simulation's and nothing
    block, the D3D device, every critical section outside the simulation heap (a lock's state never
    goes back), the GPU callback's frame-time globals, the engine heap's own state, FMOD's table
    of the memory it uses (`0x834B7F78`, below) and XAudio2's globals (`0x833C3AC0`, `0x834C19A4`).
+   A restore writes none of them: it copies only a page's other bytes (until 2026-11-03 it copied the
+   page whole and then those bytes from a copy taken just before, which undid what another thread
+   wrote to them in between: "Known gaps").
    Pages other threads write first are "foreign" (never put back), but a page holding volatile
    bytes is logged whoever writes it, and so is a page of the executable's data with a lock on it
    (it holds the simulation's globals too). A page elsewhere with only locks on it is its writer's
@@ -587,12 +590,13 @@ rollbacks left them).
   game state's page (`0x833C6000`) volatile for good. That sync test also crashed once (Reptile and Sub-Zero): the
   rendering thread freed a simulation heap block that was free already ("freed twice") and then ran a render
   command through a freed one (the next entry).
-- **Rollbacks put back memory from frames they took back, and the sync test crashed in the rendering thread** (found
-  and fixed 2026-11-03): the sync test that runs the frames it takes back with an attack nobody pressed first, goes
-  back again and then runs them with the real inputs (a "ghost pass") crashed in one run of three, Reptile and
-  Sub-Zero at frame 7425: the rendering thread freed a simulation heap block that was free already and then called
-  through a freed skinned mesh's dynamic data (`sub_829396A8`, the render command that swaps the data a mesh proxy
-  holds at +236 and deletes the old, queued by `sub_82944228`; the old one's 16 bytes were by then another object's).
+- **Rollbacks put back memory from frames they took back and undid other threads' writes: the sync test crashed in
+  the rendering thread, the mash test froze** (found and fixed 2026-11-03): the sync test that runs the frames it
+  takes back with an attack nobody pressed first, goes back again and then runs them with the real inputs (a "ghost
+  pass") crashed in one run of three, Reptile and Sub-Zero at frame 7425: the rendering thread freed a simulation
+  heap block that was free already and then called through a freed skinned mesh's dynamic data (`sub_829396A8`, the
+  render command that swaps the data a mesh proxy holds at +236 and deletes the old, queued by `sub_82944228`; the
+  old one's 16 bytes were by then another object's).
   Found with a diagnostic build that keeps every simulation heap allocation and free with its frame, thread and guest
   stack, checks the heap's blocks and free lists after every restore and every frame run again, lists every word
   still pointing at a block freed twice, and compares all tracked memory after the ghost pass's second restore with
@@ -626,6 +630,22 @@ rollbacks left them).
      goes back with it, and a thread that finds its work taken back by a restore waits again (`engine.cpp`). A first
      try that kept a woken pool thread waiting from the hold's start hung the game: the rendering thread can wait in
      a command for pool work (`sub_827EF9F8`) while the hold waits for the rendering thread.
+  3. A restore put a page with volatile bytes back whole and then those bytes from a copy of the page taken just
+     before, so that what another thread wrote to them in between was undone (older than the two faults above). The
+     two-game mash test of the fixes above (lagged, both players mashing specials) froze the game in 2 of 18 runs:
+     the GPU's interrupt (`sub_82BFB838`, which the SDK runs holding its global lock) spun for good on the D3D
+     device's spinlock (`0x40016BE0`, the device's `+0x4260`, taken in `sub_82BF66D0`), whose word named the GPU's
+     vertical blank thread as its owner while that thread was itself waiting for the global lock, and the main
+     thread waited for that lock at the next frame's top (`EventOf`, the SDK's object table). Found with a build
+     that writes every thread's host stack into hang.txt, and the spinlock's word read from the frozen game: the
+     device's bytes are volatile, and a restore had copied its page while an interrupt held the spinlock and put
+     that back after the interrupt let go. A restore now copies only a page's other bytes (`net/rollback.cpp`), so
+     that no restore writes a volatile byte (every critical section outside the simulation heap is one too: a
+     restore could have undone another thread's release of one the same way). With the old restore made to copy
+     the device's page only while the spinlock was held and to wait 50 us before putting its volatile bytes back (a
+     diagnostic build), the mash test froze the same way at its 33rd and at its 6th rollback, the spinlock's word
+     the vertical blank thread's both times; the fixed restore under the same timing went through two whole fights
+     (232 and 273 rollbacks in their busier game) without.
   The comparison also found UE3's GPU frame start time (`0x833F351C`, written by the GPU's interrupt thread beside
   the flag at `0x833F3520` that restores left alone) put back under that thread in a quarter of the ghost passes:
   volatile now. Not fixed: bytes just past the D3D device's 0x6000 (`0x4001898A`, 90 bytes) and beside the engine
@@ -638,9 +658,13 @@ rollbacks left them).
   after every restore and every frame run again, no crash; with the frame's close and the restore 5 ms apart, 340
   rollbacks the same; with the pool's race widened, the plain sync test went 160 rollbacks with no pool thread
   writing once a hold was complete, until the timed-out hold above. The lagged two-game test (50 ms, 30 of
-  jitter, both attacking) twice with the build as committed: both games to frame 9600 with no DESYNC, 165 to 173
+  jitter, both attacking) twice with the build of 1. and 2.: both games to frame 9600 with no DESYNC, 165 to 173
   checks a game and none different, the fights' scripts the same frame for frame (0 of 4,935 and 0 of 5,028 frames
-  differ), every input change read on its frame, 24 to 35 rollbacks every 10 s.
+  differ), every input change read on its frame, 24 to 35 rollbacks every 10 s. With 3. as well, the build as
+  committed: the ghost sync test twice more to 640 rollbacks with no block freed twice and no crash, and the lagged
+  two-game test again (0 of 5,027 fight frames differ, no check different, every input change read on its frame);
+  with hang.txt's every-thread stacks added, 17 fights of the mash test (seed 11, both games to frame 9600) with no
+  freeze.
 - **Rollback crashed the game in XAudio2's mixing thread** in 0.5.1 and 0.5.2 (found in players' crash reports
   and fixed 2026-10-29): `C0000005` at `sub_832C93D0+0x1f9` reading guest address 0, on the thread XAudio2 mixes
   on (`sub_832C92D0`), a minute or two into lagged online matches (four reports, three in a row from one player
@@ -698,7 +722,10 @@ rollbacks left them).
 - Another stop before the first frame, at a file read: four games booting at once (2026-11-03, two two-game tests
   started together), one crashed in the SDK's read (`rexruntime.dll+0x3ff086` reading 0x18, from `sub_827288E0+0xf3`
   under `sub_82728A70`, 1 s in) and another stood still at the same moment of its boot, its main thread logging
-  nothing more. A player's crash report of 0.5.2 (Jenogi, 2 s in) has the same place. Not looked into yet.
+  nothing more. A player's crash report of 0.5.2 (Jenogi, 2 s in) has the same place. Not looked into yet. One
+  diagnostic build of the restore fix above (2026-11-03) stopped there in 10 of 15 boots, alone as well, while
+  builds that differ from it only in code a restore runs booted every time but once: the stop depends on how the
+  executable is laid out or timed, and such a build brings it on at will.
 - Four-player TWO VS TWO (slots 2-3) is in the netplay core but untested.
 - The autopilot steers menus by fixed steps from a fresh save's cursor; the roster grid is not
   mapped yet, so the launcher cannot pick a named fighter (players pick in the game).

@@ -182,6 +182,29 @@ void ForVolatile(uint32_t page, F&& fn) {
   }
 }
 
+// the runs of a page's other bytes (the simulation's)
+template <class F>
+void ForNonVolatile(uint32_t page, F&& fn) {
+  auto it = g_masks.find(page);
+  if (it == g_masks.end()) return fn(0u, kPage);
+  const uint64_t* bits = it->second.bits;
+  uint32_t b = 0;
+  while (b < kPage) {
+    uint64_t w = ~bits[b >> 6] >> (b & 63);
+    if (!w) {
+      b = (b | 63) + 1;
+      continue;
+    }
+    if (!(w & 1)) {
+      b++;
+      continue;
+    }
+    uint32_t start = b;
+    while (b < kPage && !((bits[b >> 6] >> (b & 63)) & 1)) b++;
+    fn(start, b - start);
+  }
+}
+
 void Protect(uint32_t page, bool read_only) {
   DWORD old;
   VirtualProtect(g_base + page, kPage, read_only ? PAGE_READONLY : PAGE_READWRITE, &old);
@@ -660,10 +683,13 @@ bool RestoreLocked(uint32_t frame, PPCContext& ctx) {
       if (mark[p >> 12] != 1) continue;  // foreign, untracked, or put back already
       mark[p >> 12] = 2;
       if (g_shared[p >> 12]) {
-        alignas(8) uint8_t now[kPage];
-        std::memcpy(now, g_base + p, kPage);
-        std::memcpy(g_base + p, f->data.data() + i * kPage, kPage);
-        ForVolatile(p, [&](uint32_t off, uint32_t n) { std::memcpy(g_base + p + off, now + off, n); });
+        // the simulation's bytes only: the volatile ones are other threads', which may be writing them meanwhile. The
+        // page copied whole and its volatile bytes then put back from a copy taken just before undid what such a thread
+        // wrote in between: in the mash test (2026-11-03) the GPU interrupt's release of the D3D device's spinlock
+        // (0x40016BE0), after which the next interrupt spun on it forever holding the SDK's global lock, and the game
+        // froze at the next frame's top (EventOf)
+        const uint8_t* kept = f->data.data() + i * kPage;
+        ForNonVolatile(p, [&](uint32_t off, uint32_t n) { std::memcpy(g_base + p + off, kept + off, n); });
       } else {
         std::memcpy(g_base + p, f->data.data() + i * kPage, kPage);
       }

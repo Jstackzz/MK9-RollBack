@@ -74,6 +74,11 @@ the MK9 Online server, so whoever runs it can see what went wrong.
 - Until 0.5.3 a rollback could stop a match as out of step when both games were alike: once it took back the
   first random numbers a part of the game had drawn, its game kept counting that part (at 0) and the other
   player's did not, so their checks differed. Fixed in 0.5.3 (docs/GAME.md, "Known gaps").
+- Until 0.5.4 a Kasual or ranked rematch played through the server (a player who hides their IP address, two
+  players who cannot reach each other) closed both games and started new ones; since 0.5.4 it starts from the
+  game's own REMATCH or SELECT A NEW FIGHTER at its CONTINUE? menu, as a direct one did. The input delay rises
+  sooner with the ping (4 frames at 180 ms, as MK3D Online), and a hidden match over 100 ms through the server
+  tries a direct connection once (Settings keeps it hidden for good when you ask).
 
 ## Building from source
 

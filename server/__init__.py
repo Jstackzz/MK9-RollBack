@@ -4,4 +4,7 @@ One asyncio process, standard library only (sqlite3, ssl, hashlib). The wire pro
 specified in docs/PROTOCOL.md.
 """
 
-__version__ = "0.3.0"  # 0.3.0: connections and hidden addresses, lobby countdowns and seats, desync reports
+# 0.3.0: connections and hidden addresses, lobby countdowns and seats, desync reports; 0.3.1: series rematches at the
+# games' CONTINUE? menu through the relay, rollback's auto delay by MK3D Online's rule, a slow hidden match tries
+# directly
+__version__ = "0.3.1"

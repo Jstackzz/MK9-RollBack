@@ -83,6 +83,15 @@ the MK9 Online server, so whoever runs it can see what went wrong.
   its rank title (Kombatant at the start, up to Elder God of Destruction), the launcher searches again by itself when
   a set or a Kasual series ends (a box on the Ranked and Kasual pages turns it off), and there is no mouse pointer
   over the game.
+- Until 0.5.5 fights could go out of step when the two PCs' loading differed: by the objects each game made while
+  loading (a fight stopped at its first check), and by a frame count that started with the loading, which made the
+  two games run the fighters' scripts in opposite orders (busy fights went out of step a few seconds after a hit
+  that sparked effects from both fighters at once). Since 0.5.5 both are counted from the fight's start alike, and
+  the menus are no longer compared (docs/GAME.md, "Known gaps").
+- Until 0.5.5 a rollback could crash the game in its drawing or freeze a fight for good: it could bring back memory
+  of the frames it took back, run on while a helper thread worked, or undo what another thread had just written.
+  Fixed in 0.5.5 (docs/GAME.md, "Known gaps"). Since 0.5.5, as in MK3D Online, the launcher also tells the server in
+  a few lines where the game crashed or stood still in a match; SEND REPORT still sends the whole report.
 
 ## Building from source
 

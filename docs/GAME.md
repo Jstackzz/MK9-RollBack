@@ -496,7 +496,7 @@ rollbacks left them).
   "Rollback" 1). On the way: a frame run again called the tick with the return address of the call before it
   (`0x823668D0`, not GuardedMain's `0x823668D8`; `frame.cpp`), which only the scripts' traces saw.
 - **Matches stopped as out of step when they were not** until 0.5.3 (found in the server's desync reports and
-  fixed 2026-10-29): 13 lobby matches were lost to desyncs on 0.5.2's first evening, 12 of them between the same
+  fixed 2026-10-29): 14 lobby matches were lost to desyncs on 0.5.2's first evening, 13 of them between the same
   two players. Four of the eight reports that listed their draws had the same draws on both sides, and in one
   (`c5e6fb59f4df`) the game's first run of frame 1920 had sent the other player's very check: a rollback to 1920
   after that check had gone out ran the frame again and sent a second one, with the same draws, round timer and

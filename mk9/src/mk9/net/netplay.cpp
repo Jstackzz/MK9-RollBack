@@ -870,6 +870,19 @@ uint64_t g_meet_frame = 0;  // tests: meet at the top of this frame (counted fro
 std::atomic<bool> g_meet_asked{false};  // the launcher's start
 std::atomic<uint32_t> g_meet_seed{0};
 
+// this frame's local input, which waits `delay` frames (a test's script for this slot stands in for the pad), to
+// every other player
+void SendOwn() {
+  input::Pad local;
+  if (!autopilot::LocalPad(local) && !testinput::ScriptedPad(uint32_t(g_cfg.slot), local))
+    local = input::ReadPhysical(0);
+  const uint32_t at = g_frame + uint32_t(Delay());
+  if (g_cfg.rollback && g_match >= 2 && at < kQuietFrames) local = input::Pad{};  // a fight's first frames
+  g_mine[at] = Pack(local);
+  FeedOwn(at, g_mine[at]);
+  for (PeerState& p : g_peers) SendInputs(p);
+}
+
 void OnTop(PPCContext& ctx, uint8_t* base) {
   // the rendering thread and the job workers, held while rollback keeps or puts back memory, go
   // on once the frame does
@@ -897,9 +910,16 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
     return;
   }
   if (g_status != Status::InSync) return;
+  bool sent = false;
   if (g_rolling) {
     engine::Hold();
     rb::CloseFrame();  // the frame that just ran
+    // this frame's input goes before any frame runs again: a rollback 3 frames back takes 25 ms or more, and all
+    // that time the others would guess it, and roll back themselves once it came (until 0.5.5 it went after)
+    if (!g_cfg.watch) {
+      SendOwn();
+      sent = true;
+    }
     if (!CorrectGuesses(ctx, base)) return Lost(Status::Desynced);
     // the fight is over: lockstep again once every frame so far ran with the real inputs
     if (game::Phase() != game::kPhaseFight) {
@@ -916,17 +936,7 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
     if (!game::SameRelease(agreed)) return Lost(Status::Mismatch);
     game::Agree(ctx, base, agreed);
   }
-  // this frame's local input waits `delay` frames (a test's script for this slot stands in for the pad)
-  if (!g_cfg.watch) {
-    input::Pad local;
-    if (!autopilot::LocalPad(local) && !testinput::ScriptedPad(uint32_t(g_cfg.slot), local))
-      local = input::ReadPhysical(0);
-    const uint32_t at = g_frame + uint32_t(Delay());
-    if (g_cfg.rollback && g_match >= 2 && at < kQuietFrames) local = input::Pad{};  // a fight's first frames
-    g_mine[at] = Pack(local);
-    FeedOwn(at, g_mine[at]);
-    for (PeerState& p : g_peers) SendInputs(p);
-  }
+  if (!g_cfg.watch && !sent) SendOwn();
   if (g_rolling) {
     // never further ahead of what anyone sent than kMaxPredict frames
     if (g_frame >= kMaxPredict && !WaitForInputs(g_frame - kMaxPredict)) return Lost(Status::Disconnected);

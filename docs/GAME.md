@@ -436,6 +436,13 @@ rollbacks every 10 s of the fight's busiest stretch):
   (snapshots of both at the same frames: a spot on a fighter's arm, the floor's splashes; 0.05-0.6 %
   of the screen with the skip, 1.1-1.5 % with every frame drawn): the GPU's textures do not go
   back, so the blood of a hit a rollback took back stays painted.
+- **The frame's input first.** Until 0.5.5 a frame's own input went to the other players after the
+  frame's rollback had run its frames again (25 ms or more for 3 frames back), and all that time
+  they guessed it and ran ahead on the guess: a rollback on one PC put off the input that the other
+  needed, and so brought on its rollbacks too. It now goes out at the frame's top, before anything
+  runs again (`SendOwn`, `netplay.cpp`). The two-game test's busiest 10 s: 37 and 27 rollbacks, 95 and
+  65 frames run again, against 40 and 32, 95 and 80 just before; the test's jitter (30 ms either way)
+  makes most of its rollbacks, and a real match's rollbacks come more from the other PC's.
 
 Diagnostics: `MK9_RB_TRACE_FOREIGN=1` (who writes which pages first, stacks of foreign writers,
 each page a simulation thread writes after another thread wrote it first), `MK9_RB_TRACE_SHARED=1`

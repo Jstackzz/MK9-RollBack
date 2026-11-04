@@ -23,8 +23,14 @@ bool IsSimulationThread(uint32_t host_tid);
 // The other simulation threads held still while rollback keeps or puts back memory: the rendering
 // thread done with everything queued and asleep in its idle loop, every job worker in its idle
 // wait. False when one did not get there within timeout_ms (the others are held anyway). Release
-// lets them go. Main thread, top of a frame; a second Hold is the same hold.
+// lets them go. Main thread, top of a frame; a second Hold is the same hold (true once complete).
 bool Hold(int timeout_ms = 200);
+// The hold complete, waiting up to timeout_ms more for the threads still running (Hold first if there is none; once a
+// hold: a second call says how it stands without waiting again).
+// A restore must not go on otherwise: it would put memory back under a thread that runs (until 2026-11-04 one
+// went on after a hold timed out: the rendering thread, in a D3D call, crashed at sub_82820828+0x402, the stack
+// of a player's 0.5.2 crash report). MK9_RB_NO_HOLD_WAIT=1 (comparisons): true at once, as before
+bool WaitHeld(int timeout_ms);
 void Release();
 
 // Where the rendering thread was while Hold waited for it, sampled every 100 us while on: the guest's

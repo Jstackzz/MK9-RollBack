@@ -78,6 +78,9 @@ constexpr uint32_t kMaxPredict = 8;
 // sets the fight's sounds up through FMOD, which rollback does not put back, and every rollback to the fight's first
 // frame crashed in FMOD (docs/GAME.md, "Known gaps"). Half a second, inside the fight's intro
 constexpr uint32_t kQuietFrames = 30;
+// rollback: how much longer a restore waits for a hold that timed out (engine::WaitHeld) before the guesses wait for a
+// later frame's top; after such a wait in vain, how much the next one waits
+constexpr int kRestoreHoldMs = 1500, kRestoreHoldShortMs = 100;
 // how far ahead of this game's frame a peer's inputs and checks are kept, at most (a spectator's feed:
 // it may watch far behind the players); what lies beyond is left out
 constexpr uint32_t kMaxAhead = 600, kMaxFeedAhead = 60 * 3600;
@@ -167,6 +170,9 @@ Stats g_stats;
 FILE* g_log = nullptr;
 Clock::time_point g_last_hello{};
 bool g_rolling = false;                    // rollback armed: frames may run on guesses
+bool g_correction_waits = false;           // a wrong guess found whose restore waits for a later frame's top
+uint32_t g_restores_waited = 0;            // how often that happened
+uint32_t g_hold_fails = 0;                 // restores in a row whose hold was not complete in time
 std::map<uint32_t, uint32_t> g_tentative;  // state hashes at frame tops, until every input before is known
 // what each check frame's hash was made of (the log's "timer", "round" and "rand"), as of its last run
 struct CheckDetail {
@@ -783,8 +789,9 @@ void StopRolling() {
   rb::Disarm();
   g_rolling = false;
   LogReplayTimes(true);
-  REXLOG_INFO("mk9 net: lockstep from frame {} of match {} ({} rollbacks so far, longest {} frames)", g_frame,
-              g_match, g_stats.rollbacks, g_stats.max_rollback);
+  REXLOG_INFO("mk9 net: lockstep from frame {} of match {} ({} rollbacks so far, longest {} frames; {} waited for a "
+              "later frame's top)",
+              g_frame, g_match, g_stats.rollbacks, g_stats.max_rollback, g_restores_waited);
 }
 
 void Lost(Status s) {
@@ -807,8 +814,26 @@ bool CorrectGuesses(PPCContext& ctx, uint8_t* base) {
         break;
       }
     }
-    p.confirmed = std::max(p.confirmed, known);
   }
+  // memory goes back only with every other simulation thread held still: a hold that timed out (the rendering thread
+  // waiting for the GPU) is waited for a while longer (briefly when the last such wait was in vain too), and if it is
+  // still not complete the guesses are put right at a later frame's top (the inputs are looked at again from where
+  // they were confirmed) while the frame to go back to will still be kept then; past that the restore goes on, as
+  // every restore did until 2026-11-04
+  g_correction_waits = false;
+  if (wrong < g_frame) {
+    const bool held = engine::WaitHeld(g_hold_fails ? kRestoreHoldShortMs : kRestoreHoldMs);
+    g_hold_fails = held ? 0 : g_hold_fails + 1;
+    if (!held && wrong >= rb::OldestFrame() + 2) {
+      g_correction_waits = true;
+      g_restores_waited++;
+      REXLOG_WARN("mk9 net: frame {}'s guess put right at a later frame's top: the other simulation threads still run",
+                  wrong);
+      return true;
+    }
+    if (!held) REXLOG_WARN("mk9 net: back to frame {} with other simulation threads still running", wrong);
+  }
+  for (PeerState& p : g_peers) p.confirmed = std::max(p.confirmed, std::min(p.contiguous, g_frame));
   if (wrong >= g_frame) return true;
   const uint32_t now = g_frame;
   const PPCContext top = ctx;
@@ -918,7 +943,7 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
   if (g_status != Status::InSync) return;
   bool sent = false;
   if (g_rolling) {
-    engine::Hold();
+    if (engine::Hold()) g_hold_fails = 0;
     rb::CloseFrame();  // the frame that just ran
     // this frame's input goes before any frame runs again: a rollback 3 frames back takes 25 ms or more, and all
     // that time the others would guess it, and roll back themselves once it came (until 0.5.5 it went after)
@@ -931,7 +956,7 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
     if (game::Phase() != game::kPhaseFight) {
       if (g_frame && !WaitForInputs(g_frame - 1)) return Lost(Status::Disconnected);
       if (!CorrectGuesses(ctx, base)) return Lost(Status::Desynced);
-      if (game::Phase() != game::kPhaseFight) StopRolling();
+      if (game::Phase() != game::kPhaseFight && !g_correction_waits) StopRolling();
     }
   }
   // The game reached a point where everyone must start alike (a fight, once it is loaded): meet again there,

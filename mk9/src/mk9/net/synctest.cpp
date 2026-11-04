@@ -4,6 +4,8 @@
 // again must write the same pages with the same contents as the first time. Mismatches are
 // logged with the pages that differ.
 //   MK9_SYNCTEST=<depth>  MK9_SYNCTEST_FROM=<frame>  MK9_SYNCTEST_EVERY=<frames, default 10>
+// MK9_SYNCTEST_LOCKSTEP=1: rollback ends with the fight, as netplay's does: at the first frame's top out of a fight it
+// goes back once more (whether a rollback is due or not) and then is disarmed for good
 
 #include <chrono>
 #include <cstdlib>
@@ -14,6 +16,7 @@
 
 #include "mk9/engine.h"
 #include "mk9/frame.h"
+#include "mk9/game.h"
 #include "mk9/net/rollback.h"
 
 namespace mk9::synctest {
@@ -31,10 +34,11 @@ std::map<uint64_t, uint64_t> g_hash;  // frame -> its page hash the first time i
 std::map<uint64_t, std::vector<uint32_t>> g_pages;
 uint64_t g_checked = 0, g_bad = 0, g_rollbacks = 0;
 double g_worst_ms = 0, g_rerun_ms = 0;  // the worst rollback, and all of them together
+bool g_lockstep = false, g_seen_fight = false, g_done = false;
 
 void OnTop(PPCContext& ctx, uint8_t* base) {
   const uint64_t n = frame::Count();
-  if (n < g_from) return;
+  if (n < g_from || g_done) return;
   if (n == g_from) {
     rb::SetHashing(true);
     engine::Hold();
@@ -54,7 +58,12 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
     g_hash.erase(g_hash.begin());
     g_pages.erase(g_pages.begin());
   }
-  if ((n - g_from) % uint64_t(g_every) == 0 && n >= g_from + uint64_t(g_depth) + 1) {
+  const bool fight = game::Phase() == game::kPhaseFight;
+  g_seen_fight = g_seen_fight || fight;
+  const bool last = g_lockstep && g_seen_fight && !fight;
+  // no restore under a thread that runs (engine::WaitHeld): this rollback is left out then
+  if (((n - g_from) % uint64_t(g_every) == 0 || last) && n >= g_from + uint64_t(g_depth) + 1 &&
+      engine::WaitHeld(1500)) {
     const PPCContext top = ctx;
     const uint64_t target = n - uint64_t(g_depth);
     const auto t0 = Clock::now();
@@ -93,6 +102,14 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
     }
     ctx = top;
   }
+  if (last) {
+    rb::Disarm();
+    rb::SetHashing(false);
+    g_done = true;
+    engine::Release();
+    REXLOG_INFO("mk9 synctest: the fight is over at frame {}: disarmed after {} rollbacks", n, g_rollbacks);
+    return;
+  }
   rb::OpenFrame(uint32_t(n), ctx);
   // the frame the first rollback goes back to, as it starts
   if (g_verify && n == g_from + uint64_t(g_every) - uint64_t(g_depth)) rb::DebugSnapshot();
@@ -116,6 +133,7 @@ bool Init() {
   if (const char* v = std::getenv("MK9_SYNCTEST_FROM")) g_from = std::strtoull(v, nullptr, 10);
   if (const char* v = std::getenv("MK9_SYNCTEST_EVERY")) g_every = std::max(1, std::atoi(v));
   if (const char* v = std::getenv("MK9_SYNCTEST_VERIFY")) g_verify = *v == '1';
+  if (const char* v = std::getenv("MK9_SYNCTEST_LOCKSTEP")) g_lockstep = *v == '1';
   frame::SetTopHook(&OnTop);
   REXLOG_INFO("mk9 synctest: depth {} every {} frames from frame {}", g_depth, g_every, g_from);
   return true;

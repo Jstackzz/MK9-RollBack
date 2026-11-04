@@ -33,6 +33,7 @@ include(generated/rexglue.cmake)
 set(MK9_SOURCES
     src/main.cpp
     src/mk9_app.cpp
+    src/mk9/asyncio.cpp
     src/mk9/autopilot.cpp
     src/mk9/controls.cpp
     src/mk9/crash.cpp

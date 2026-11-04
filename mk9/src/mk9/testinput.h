@@ -8,6 +8,8 @@
 //                      user always does)
 //   MK9_NO_PHYSICAL=1  the PC's own controllers and keyboard reach no user (test runs a person
 //                      at the PC must not steer)
+//   MK9_TEST_DRIFT=n   scripted sticks drift: each axis off centre by up to n of 127, another amount
+//                      every frame (netplay's drift filter, net/netplay.cpp)
 // A scripted user ignores the PC's own controller.
 #include <cstdint>
 

@@ -2,6 +2,7 @@
 
 #include "mk9/testinput.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <cstring>
@@ -28,6 +29,7 @@ std::array<std::vector<Step>, 4> g_script;
 std::array<bool, 4> g_scripted{};
 int g_pads = 0;
 bool g_no_physical = false;
+int g_drift = 0;  // MK9_TEST_DRIFT
 bool g_active = false;
 
 bool ParseButtons(const std::string& s, Pad& pad) {
@@ -99,6 +101,21 @@ Pad ScriptAt(uint32_t user, uint64_t now) {
     if (s.frame > now) break;
     pad = s.pad;
   }
+  if (g_drift) {
+    // a drifting controller: each stick axis off centre by up to g_drift of 127, another amount every frame (the
+    // same for a frame each time it is read)
+    const auto off = [&](uint32_t axis) {
+      uint32_t h = uint32_t(now) * 2654435761u ^ (user * 40503u + axis * 9973u);
+      h ^= h >> 15;
+      h *= 2246822519u;
+      h ^= h >> 13;
+      return int16_t((int(h % uint32_t(2 * g_drift + 1)) - g_drift) * 256);
+    };
+    pad.lx = int16_t(pad.lx + off(0));
+    pad.ly = int16_t(pad.ly + off(1));
+    pad.rx = int16_t(pad.rx + off(2));
+    pad.ry = int16_t(pad.ry + off(3));
+  }
   return pad;
 }
 
@@ -141,6 +158,7 @@ void Init() {
     g_pads = std::atoi(p);
     g_active = true;
   }
+  if (const char* p = std::getenv("MK9_TEST_DRIFT"); p && *p) g_drift = std::max(0, std::min(100, std::atoi(p)));
   if (const char* p = std::getenv("MK9_NO_PHYSICAL"); p && *p == '1') {
     g_no_physical = true;
     g_active = true;

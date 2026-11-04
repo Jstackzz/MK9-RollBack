@@ -876,6 +876,29 @@ uint64_t g_meet_frame = 0;  // tests: meet at the top of this frame (counted fro
 std::atomic<bool> g_meet_asked{false};  // the launcher's start
 std::atomic<uint32_t> g_meet_seed{0};
 
+// A stick or trigger that drifts (reads a little pushed while nobody touches it) changes the input every frame, and
+// every change the other PC guessed wrong is a rollback: a player's 0.5.5 opponent, sticks a few steps off centre,
+// had them roll back up to 8 frames at almost every frame. So each stick axis within 25 of 127 (6400, under the 0.2
+// of full deflection UE3's axes ignore) and each trigger within 25 of 255 reads as untouched, on both PCs alike: no
+// push the game itself reads is that small (a direction needs far more)
+constexpr int kStickQuiet = 6400, kTriggerQuiet = 25;
+
+input::Pad Quiet(input::Pad p) {
+  static const bool off = [] {  // tests: MK9_TEST_NO_QUIET=1, what drift costs without it
+    const char* v = std::getenv("MK9_TEST_NO_QUIET");
+    return v && *v == '1';
+  }();
+  if (off) return p;
+  const auto axis = [](int16_t v) { return std::abs(int(v)) <= kStickQuiet ? int16_t(0) : v; };
+  p.lx = axis(p.lx);
+  p.ly = axis(p.ly);
+  p.rx = axis(p.rx);
+  p.ry = axis(p.ry);
+  if (p.left_trigger <= kTriggerQuiet) p.left_trigger = 0;
+  if (p.right_trigger <= kTriggerQuiet) p.right_trigger = 0;
+  return p;
+}
+
 // this frame's local input, which waits `delay` frames (a test's script for this slot stands in for the pad), to
 // every other player
 void SendOwn() {
@@ -884,7 +907,7 @@ void SendOwn() {
     local = input::ReadPhysical(0);
   const uint32_t at = g_frame + uint32_t(Delay());
   if (g_cfg.rollback && g_match >= 2 && at < kQuietFrames) local = input::Pad{};  // a fight's first frames
-  g_mine[at] = Pack(local);
+  g_mine[at] = Pack(Quiet(local));
   FeedOwn(at, g_mine[at]);
   for (PeerState& p : g_peers) SendInputs(p);
 }

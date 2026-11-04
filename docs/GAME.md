@@ -209,7 +209,14 @@ before a fight (0.5.3 and 0.5.4: the same fighter script was process `10000BB7` 
 `10000BBA` in the other, `100008AB` and `100008A2` in another match whose next object ids were 9
 apart), and the ones one PC made more came before the fight's scripts. At a fight's barrier every PC also takes
 slot 0's frame counter of the game state (`0x833C6C54 + 112`, `game.cpp`), which counts from when the fight began
-loading: bit 0 of it decides each frame whether P1's or P2's script processes run first. Every 30 frames of a fight and
+loading: bit 0 of it decides each frame whether P1's or P2's script processes run first. The other globals two PCs
+come to a fight with apart (the game state's frame count from boot at `+108` and its copies, GCurrentTime at
+`0x833DD518`, the words at `0x833AFA84` that look like a generator's state) steer nothing: with each moved in one game
+of a test pair, a lockstep fight played to its end the same frame for frame. Each PC sends its own input with every
+stick axis within 25 of 127 and every trigger within 25 of 255 read as untouched (`Quiet`, `netplay.cpp`): a stick that
+drifts a few steps off centre changed the input every frame, and the other PC rolled back on each one (a player's
+0.5.5 opponent: up to 8 frames at almost every frame; a test pair drifting by up to 7 rolled back on 64 % of its frames,
+the same pair with the filter as often as without drift). Every 30 frames of a fight and
 of its end (phases 8 and 11) both sides compare a state hash: the round timer, the round, the rounds
 won and the draws made at every call site so far (a fight that goes differently draws differently).
 Not outside them: until the next fight sets them the fight's values keep the last one's, which a game

@@ -374,11 +374,15 @@ restore is only right if the memory it puts back is the simulation's and nothing
    events as they stood (the key presses had the same fault, "Known gaps").
 2. **Whose memory.** `GMalloc` (the MemoryManager at `0x83423BA8`) is routed from boot on
    (`gmalloc.cpp`): the simulation's threads allocate from the simulation heap (a TLSF heap in a
-   region of its own, its bookkeeping inside it), FMOD (from its code or UE3's file callbacks for
-   it) from the audio heap, which rollback never tracks, and every other thread from the engine
-   heap. While armed the simulation never writes the engine heap's bookkeeping: its frees of
-   engine blocks wait for disarm, unless a rollback took the frame back. A simulation block
-   another thread writes (FMOD's file handles, a loader's buffer) is that thread's from then on.
+   region of its own, its bookkeeping inside it), FMOD (its allocator, called from its code, or
+   UE3's file callbacks for it) from the audio heap, which rollback never tracks, and every other
+   thread from the engine heap. While armed nobody writes the engine heap's bookkeeping, which it
+   keeps in its free blocks on pages it shares with the simulation's own engine blocks: other
+   threads allocate from the audio heap, every free of an engine block waits for disarm (the
+   simulation's not when a rollback took back the frame that freed it), and an engine block
+   reallocated moves to the simulation heap or (another thread's) the audio heap. A simulation
+   block another thread writes (FMOD's file handles, a loader's buffer) is that thread's from then
+   on. Both rules date from 2026-11-04 ("Known gaps").
 3. **What a restore leaves alone** (volatile bytes): the rendering command ring and its control
    block, the D3D device, every critical section outside the simulation heap (a lock's state never
    goes back), the GPU callback's frame-time globals, the engine heap's own state, FMOD's table
@@ -475,6 +479,58 @@ rollbacks left them).
 
 ## Known gaps
 
+- **0.5.5 crashed in almost every online match** (found and fixed 2026-11-04): 12 crash notes in the server's
+  journal from its first evening, 9 with full reports. 7 in the rendering thread, 5 of those in the HUD's
+  rendering commands (`SetUIGeometryBufferReadPropertiesFromCacheCommand`, `sub_82A569E0`, 3 times;
+  `DrawUIIndexedTriListCommand`, `sub_82A595E0` / `sub_82A58EE0`, twice), one in `FDrawSceneCommand`
+  (`sub_8281F3F0`) and one in a D3D call reading past the rendering thread's stack; 2 on the main thread as a
+  fight ended (an assert, `sub_826CC7F8` from `sub_826FE460`: a package's file tag was not `0x9E2A83C1`; and the
+  simulation heap's Malloc); 2 AMD GPU hangs (as since 0.5.2). Players saw the crashes come right after HUD text
+  came up. Two faults of GMalloc's routing (`gmalloc.cpp`), both older than 0.5.5:
+  1. The HUD's memory came from the audio heap, which rollback never tracks. An allocation counted as FMOD's
+     when any of 16 guest frames was in FMOD's code range (`0x82DC0000`-`0x82E90000`), and the top of that range
+     is the UI library the HUD is drawn with (from about `0x82E81248`; its allocator `0x82EF4384`): one boot sent
+     it 18 of that library's allocations (942,458 bytes), among them the block holding the HUD's double-buffered
+     geometry records (a vtable, two pointers to entries in the simulation heap, the index in use; one at
+     `0x540471E0`, the address in every report of a HUD command crash, already in 0.4.0's Test Your Luck one, which
+     had no rollback). Rollback put back the HUD's state and the entries, and left the library's memory as it
+     was: records that could point at entries a restore had freed (the rendering thread writes through them, into
+     whatever the simulation heap gave that memory to next: the fight's end Malloc crash fits) or at none where one
+     had come back ("a rendering command's entry was not there yet" in the log just before one crash), and the
+     HUD's cache giving out what was by then something else (an index of `0xF0ED8F01`, an entry at `0x8219B6D8`).
+     An allocation is FMOD's now when its allocator or the frame above it is FMOD's code (FMOD calls GMalloc from
+     `0x82DCFE24`); after the fix one boot sent the audio heap none but FMOD's.
+  2. Rollback put back the engine heap's bookkeeping under other threads. The engine heap keeps its free lists
+     in its free blocks, on pages it shares with the simulation's own engine blocks, and a restore of a page
+     logged for a simulation write took back what the async loader's thread (`sub_827327B8`, copying a request
+     and its file name) had freed or taken there since. The ghost sync test, 8 frames back every 4 (Cyber
+     Sub-Zero against Sub-Zero, and Reptile against Sub-Zero), crashed in the loader's Malloc
+     (`sub_82A49558+0x2d2`) at the same moment both times, round 2's start 1,448 rollbacks in, reading a free
+     list's link that was text (`..\A`). While armed no thread writes that bookkeeping now ("Rollback", 2).
+  Not reproduced here: a crash in the HUD's commands (the lagged two-game tests never had one, nor the HUD's
+  guard firing), so that the first fault made them is inferred from the reports and the routing log; and the
+  fight's end assert, which the first fault can explain (the rendering thread writing into memory given since to
+  the loader's file names or buffers) and the second (the loader's file name copies in the engine heap). Still
+  open: the async loader's 128 KB read cache (`+188` of its object, filled by `sub_826B4DE8`) is reallocated in the
+  simulation heap near a fight's end, and its object is another thread's (volatile), so a rollback taking back
+  that frame leaves the loader filling memory the restore gave back to the heap. The same at a fight's end, where
+  both of the main thread's crashes were: in its last frame before lockstep (7891 of a whole lagged fight here) a
+  package load (`sub_827041B8`) makes an `FArchiveAsync` precache buffer (`sub_8270C5E8`, 128 KB at `+168`) and
+  counts a request up at its loader, both in the simulation heap, and the loader's thread fills the one and counts
+  the other down whenever it gets to it: a rollback taking back that frame frees both under it, and the frame run
+  again likely gets the same memory back (the Malloc crash's stack was that allocation's; the assert's, that load).
+  Not fixed: a read the simulation queues while armed would have to be done within its frame, or its memory kept
+  out of rollback.
+  Tested, private builds of these sources: the ghost sync test 8 frames back every 4 crashed in the loader's
+  thread at round 2's start (1,448 rollbacks) in all 3 runs of 0.5.5 (Cyber Sub-Zero against Sub-Zero twice, one
+  without the heap checks; Reptile against Sub-Zero once); with the engine heap's fix alone it went to frame 13,200
+  (about 1,900 rollbacks), and with both fixes both pairings went to frame 13,800 (2,048 rollbacks each), no
+  crash. The lagged two-game test (50 ms, 30 of jitter, both attacking) with both: both games to frame 9600, no
+  check different, 0 of 4,931 fight frames differ (`scriptcmp.py`), every input change read on its frame. The
+  sync test's frames logged no more pages with the HUD in the simulation heap (3,084 against 3,667 at frame
+  6,600). A check of the HUD's two records after every restore, with the old routing, found none pointing at
+  freed memory in 2,048 restores (their entries are made once), nor did that run crash: how the HUD's cache came
+  to give out garbage is not shown here.
 - Rollback is tested on one PC over loopback with simulated lag (see "Rollback"), not yet over the
   internet. Frames run again also render; a long rollback costs about 17 ms a frame (16.5 ms measured by
   the sync test, which now logs it; 13 ms with the SDK's vsync off while they run, not kept: unproven).

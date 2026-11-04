@@ -40,6 +40,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <random>
@@ -174,7 +175,18 @@ struct CheckDetail {
   int round = 0, won1 = 0, won2 = 0;
 };
 std::map<uint32_t, CheckDetail> g_check_detail;
-uint32_t g_paced_at = 0;                   // the last frame held back to let the others catch up
+// Pace(): how far ahead of the others this PC ran lately, and the frames it held back
+struct Pacing {
+  std::deque<int> samples;     // the last frames' mine - theirs (Pace), twice the frames ahead
+  double round_trip = -1;      // mine + theirs, slowly smoothed: the round trip in this PC's frames
+  std::deque<uint32_t> holds;  // the frames held back lately, for as long as they have not all shown
+  // for the log every 10 s: frames held back, the sum and count of the averages, the frames that waited at the
+  // prediction limit (kMaxPredict) and how long
+  uint32_t held = 0, ahead_n = 0, limit_waits = 0;
+  double ahead_sum = 0, limit_ms = 0;
+};
+Pacing g_pace;
+uint32_t g_barrier_id = 0;  // the id the game's next object took at the last barrier (the desync line has it)
 
 // this side's own input delay, and the match's: the largest any side asked at the barrier (each
 // side's inputs start `delay` frames in, so every side must use the same)
@@ -647,8 +659,11 @@ void CompareChecks() {
         continue;
       }
       if (mine->second != it->second) {
-        REXLOG_ERROR("mk9 net: DESYNC at frame {} with slot {}: {:08X} here, {:08X} there", it->first, p.slot,
-                     mine->second, it->second);
+        // with the id the next object took at the barrier: the two players' reports show whether their loading made a
+        // different number of objects before the fight (a script process's draws are told apart by its id from there)
+        REXLOG_ERROR("mk9 net: DESYNC at frame {} with slot {}: {:08X} here, {:08X} there (next object id at the "
+                     "barrier {:08X}, now {:08X})",
+                     it->first, p.slot, mine->second, it->second, g_barrier_id, game::NextObjectId());
         // what this check counted, for the desync report: the other player's shows what drew differently
         if (g_status != Status::Desynced)
           for (const std::string& line : game::CheckDraws(it->first))
@@ -713,6 +728,9 @@ bool StartRolling(PPCContext& ctx) {
   if (!rb::Arm(ctx, g_frame)) return false;
   rb::OpenFrame(g_frame, ctx);  // the frame Arm keeps first: what goes back with it is kept too (key presses)
   g_rolling = true;
+  // lockstep kept the sides even until now: what Pace saw before it is past
+  g_pace.samples.clear();
+  g_pace.holds.clear();
   for (PeerState& p : g_peers) p.confirmed = g_frame;
   REXLOG_INFO("mk9 net: rollback from frame {} of match {}", g_frame, g_match);
   return true;
@@ -757,6 +775,14 @@ void LogReplayTimes(bool now) {
                 r.logs_ms, r.longest_ms);
   if (const std::string where = engine::TakeRenderWaitSamples(4); !where.empty())
     REXLOG_INFO("mk9 net: the rendering thread while frames run again waited for it: {}", where);
+  // how even the sides were (Pace)
+  if (g_pace.ahead_n)
+    REXLOG_INFO("mk9 net: {:.2f} frames ahead of the others on average (a round trip {:.1f} frames), {} frames held back, "
+                "{} waited for their inputs at the {}-frame limit ({:.0f} ms)",
+                g_pace.ahead_sum / g_pace.ahead_n / 2.0, g_pace.round_trip, g_pace.held, g_pace.limit_waits,
+                kMaxPredict, g_pace.limit_ms);
+  g_pace.held = g_pace.ahead_n = g_pace.limit_waits = 0;
+  g_pace.ahead_sum = g_pace.limit_ms = 0;
   // what keeping the frames costs every frame, rolled back or not: the pages first written (each a fault)
   const rb::Stats s = rb::GetStats();
   const uint32_t frames = g_stats.frames - last_frames;
@@ -856,19 +882,75 @@ bool CorrectGuesses(PPCContext& ctx, uint8_t* base) {
   return true;
 }
 
-// Keep the sides even: when this PC runs further ahead of the others than they run ahead of it, it
-// would do all the rolling back; hold a frame back now and then until it does not
+// Keep the sides even: a PC that runs ahead of the others guesses their inputs further ahead, and every guess that
+// was wrong is a rollback that long; the PC behind never guesses. So a PC ahead by more than kPaceAhead / 2 frames
+// holds a frame back (the next frame starts a frame late, frame::HoldNext; the screen shows this one once more), as
+// often as every kPaceGap frames. A PC that runs fewer frames a second than the other (a slower CPU or GPU, its own
+// rollbacks) has the other hold back the frames it falls behind by. Until 0.5.6 a PC held back one frame in 20 at most,
+// by sleeping in the frame, which the frame cap mostly made up for (frame.cpp): a player's 0.5.5 game ran ahead of one
+// at 49 a second until it guessed 8 frames ahead, its rollbacks 4.5 frames long on average.
+// How far ahead: mine - theirs is twice the frames (mine: our frame less theirs as we heard it; theirs: theirs less
+// ours as they heard it; the trip each way counted in both, once with each sign). Averaged over kPaceWindow frames,
+// as a packet's way varies by a frame or more. A frame held back shows in it in two halves: mine is one less from the
+// next frame on, theirs one more once they heard of it (a round trip later). Whatever of the holds has not shown in
+// the average yet counts as if it had, or the frames held back meanwhile would put this PC behind
+constexpr int kPaceWindow = 8;
+constexpr double kPaceAhead = 2.5;
+constexpr uint32_t kPaceGap = 2;
+
 void Pace() {
-  int ahead = 0;
+  Pacing& s = g_pace;
+  int sample = std::numeric_limits<int>::min(), trip = 0;
   for (const PeerState& p : g_peers) {
-    const int mine = int(g_frame) - int(p.now);  // how far ahead of them we are, as we hear them
-    const int theirs = int(p.now) - int(p.heard);  // how far ahead of us they were, as they heard us
-    ahead = std::max(ahead, mine - theirs);       // twice the frames we are ahead by
+    if (!p.now) continue;  // not heard in this match yet
+    const int mine = int(g_frame) - int(p.now);
+    const int theirs = int(p.now) - int(p.heard);
+    if (mine - theirs > sample) {
+      sample = mine - theirs;
+      trip = mine + theirs;
+    }
   }
-  if (ahead >= 3 && g_frame - g_paced_at >= 20) {
-    g_paced_at = g_frame;
-    std::this_thread::sleep_for(std::chrono::microseconds(16667));
-    Receive();
+  if (sample == std::numeric_limits<int>::min()) return;
+  s.samples.push_back(sample);
+  if (s.samples.size() > size_t(kPaceWindow)) s.samples.pop_front();
+  s.round_trip = s.round_trip < 0 ? trip : s.round_trip + (trip - s.round_trip) / 32.0;
+  double average = 0;
+  for (int v : s.samples) average += v;
+  average /= double(s.samples.size());
+  // what the frames held back lately have not taken off the average yet
+  while (!s.holds.empty() && double(g_frame - s.holds.front()) >= s.round_trip + kPaceWindow) s.holds.pop_front();
+  double unseen = 0;
+  for (uint32_t h : s.holds) {
+    // the samples since it that show it: mine's half from the frame after it on, theirs' from the frame the
+    // round trip after it on (they heard of the frame after it then)
+    const double k = double(g_frame - h);
+    unseen += double(kPaceWindow - std::clamp(k, 0.0, double(kPaceWindow))) / kPaceWindow;
+    unseen += double(kPaceWindow - std::clamp(k - s.round_trip, 0.0, double(kPaceWindow))) / kPaceWindow;
+  }
+  const double ahead = average - unseen;
+  s.ahead_sum += ahead;
+  s.ahead_n++;
+  static const double at_least = [] {  // tests: MK9_TEST_PACE_AHEAD=<twice the frames>, 0 never holds
+    const char* v = std::getenv("MK9_TEST_PACE_AHEAD");
+    return v && *v ? std::atof(v) : kPaceAhead;
+  }();
+  const bool hold =
+      at_least > 0 && ahead >= at_least && (s.holds.empty() || g_frame - s.holds.back() >= kPaceGap);
+  // MK9_TRACE_PACE=<file> (diagnostics): every frame's sample, round trip, average, unseen part, hold, and the time
+  static FILE* trace = [] {
+    const char* v = std::getenv("MK9_TRACE_PACE");
+    return v && *v ? std::fopen(v, "w") : nullptr;
+  }();
+  if (trace) {
+    static const auto t0 = Clock::now();
+    std::fprintf(trace, "%u %d %d %.2f %.2f %.2f %d %.1f\n", g_frame, sample, trip, average, unseen, ahead, hold ? 1 : 0,
+                 Ms(Clock::now() - t0));
+    std::fflush(trace);
+  }
+  if (hold) {
+    s.holds.push_back(g_frame);
+    s.held++;
+    frame::HoldNext();
   }
 }
 
@@ -968,7 +1050,15 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
   if (!g_cfg.watch && !sent) SendOwn();
   if (g_rolling) {
     // never further ahead of what anyone sent than kMaxPredict frames
-    if (g_frame >= kMaxPredict && !WaitForInputs(g_frame - kMaxPredict)) return Lost(Status::Disconnected);
+    if (g_frame >= kMaxPredict) {
+      const auto t = Clock::now();
+      const uint32_t waits = g_stats.waits;
+      if (!WaitForInputs(g_frame - kMaxPredict)) return Lost(Status::Disconnected);
+      if (g_stats.waits != waits) {
+        g_pace.limit_waits++;
+        g_pace.limit_ms += Ms(Clock::now() - t);
+      }
+    }
     if (!CorrectGuesses(ctx, base)) return Lost(Status::Desynced);
     Pace();
     rb::OpenFrame(g_frame, ctx);
@@ -1117,7 +1207,7 @@ bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agree
   g_my_checks.clear();
   g_tentative.clear();
   g_check_detail.clear();
-  g_paced_at = 0;
+  g_pace = {};
   Writer w = Header(kReady);
   w.U32(my_seed);
   const uint8_t n = uint8_t(std::min<size_t>(words.size(), kMaxWords));
@@ -1228,8 +1318,9 @@ bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agree
   input::SetSource(&FrameInput);
   // with the id the game's next object takes: each script process's draws are told apart by its id, so two PCs whose
   // loading made a different number of objects before a fight draw at different sites (a desync's report has it)
+  g_barrier_id = game::NextObjectId();
   REXLOG_INFO("mk9 net: match {} in sync, seed {:08X}, input delay {}, next object id {:08X}", g_match, agreed.seed,
-              Delay(), game::NextObjectId());
+              Delay(), g_barrier_id);
   return true;
 }
 

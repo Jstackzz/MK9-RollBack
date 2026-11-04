@@ -468,6 +468,24 @@ rollbacks every 10 s of the fight's busiest stretch):
   runs again (`SendOwn`, `netplay.cpp`). The two-game test's busiest 10 s: 37 and 27 rollbacks, 95 and
   65 frames run again, against 40 and 32, 95 and 80 just before; the test's jitter (30 ms either way)
   makes most of its rollbacks, and a real match's rollbacks come more from the other PC's.
+- **Keeping the sides even.** A PC that runs ahead of the other guesses the other's inputs further
+  ahead, and each wrong guess is a rollback that long; the PC behind never guesses. A PC more than
+  a frame and a quarter ahead holds a frame back, as often as every other frame (`Pace`,
+  `netplay.cpp`): the next frame starts a whole frame later than the frame cap would start it
+  (`frame::HoldNext`; the screen shows the frame before once more). How far ahead is averaged over 8
+  frames, with what the frames it held back have not yet taken off the average counted as if they
+  had (half of each shows the next frame, half a round trip later, once the other PC heard of it).
+  Until 0.5.6 a PC held back one frame in 20 at most, by sleeping 16.7 ms in the frame, and the cap
+  made most of that up: it starts a late frame's next one as if it had been on time, so a frame of 6
+  ms of work lost 5 ms, not a frame (a test game holding back every other frame that way still ran 52
+  frames a second against one at 50). Against a PC that ran fewer frames a second (a player's 0.5.5
+  match: 49) the faster one ran ahead until it guessed 8 frames ahead, its rollbacks 4.5 frames long
+  on average. The two-game test with one game held to 50 frames a second (26 ms each way, 15 of
+  jitter, delay 2, both mashing; 0.5.5 against this): the faster game held back 7-8 frames a second
+  and stayed 0.9 frames ahead; 1,408 frames run again in the fight instead of 2,092, rollbacks 2.5
+  frames long on average instead of 3.7, none longer than 5 frames instead of 81 of 6-8. The log has
+  it every 10 s (`frames ahead of the others on average`, the frames held back and the frames that
+  waited at the 8-frame limit); `MK9_TRACE_PACE=<file>` writes every frame's numbers.
 
 Diagnostics: `MK9_RB_TRACE_FOREIGN=1` (who writes which pages first, stacks of foreign writers,
 each page a simulation thread writes after another thread wrote it first), `MK9_RB_TRACE_SHARED=1`

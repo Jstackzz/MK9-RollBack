@@ -126,9 +126,22 @@ void WaitUntil(Steady::time_point t) {
   }
 }
 
+// a frame held back (HoldNext): the next frame starts a period later than it would. Not a sleep in the frame: the cap
+// starts a late frame's next one as if it had been on time, so a sleep only took away what the frame waited here
+// anyway (a frame of 6 ms of work slept 16.7 and lost 5: a game held back every other frame still ran 52 a second)
+bool g_hold = false;
+
 void Cap() {
-  if (g_cap_period == Steady::duration::zero()) return;
+  if (g_cap_period == Steady::duration::zero()) {
+    if (g_hold) std::this_thread::sleep_for(std::chrono::microseconds(16667));
+    g_hold = false;
+    return;
+  }
   auto now = Steady::now();
+  if (g_hold) {
+    g_cap_next = std::max(g_cap_next, now - kCapSlack) + g_cap_period;
+    g_hold = false;
+  }
   if (now < g_cap_next) {
     WaitUntil(g_cap_next);
     now = Steady::now();
@@ -165,6 +178,7 @@ bool OnMainThread() { return CurrentTid() == MainThreadId(); }
 void SetTopHook(Hook hook) { g_top = hook; }
 void SetEndHook(Hook hook) { g_end = hook; }
 bool Replaying() { return g_replaying.load(std::memory_order_relaxed); }
+void HoldNext() { g_hold = true; }
 
 namespace {
 

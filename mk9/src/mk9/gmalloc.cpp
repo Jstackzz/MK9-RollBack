@@ -10,19 +10,28 @@
 //   - FMOD's allocations (made from its code, on any thread) come from the audio heap, which rollback
 //     never tracks: FMOD's threads mix on through rollbacks. So does what UE3's file callbacks for
 //     FMOD allocate (open sub_82602B30, read sub_82602D00, seek sub_82602D88: the file reader FMOD's
-//     stream thread reads sound banks through)
+//     stream thread reads sound banks through), and the readers UE3 makes for FMOD's streams
+//     (FmodReader, since 2026-11-04)
 //   - the main thread's, the rendering thread's and the job workers' other allocations come from
 //     the simulation heap
 //   - everything else (loaders, the thread pool's own threads, ...) stays in the engine's heap
-// Frees and reallocations go to the heap the block came from. While rollback is armed the
-// simulation's threads leave the engine heap's bookkeeping alone (other threads share it, and a
-// restore would put it back under them): an engine block they free is freed once rollback is
-// disarmed, unless a rollback took back the frame that freed it (the frame then runs again and frees
-// it again, or not). The simulation heap is the simulation's own: a block of it another thread
-// frees is freed by the main thread at the next frame's top, one another thread reallocates moves
-// to the engine's heap. A block of it another thread writes (UE3's streaming file reader FMOD's
-// stream thread fills, a counter the loader counts down) is that thread's from then on: rollback
-// leaves it as it is (volatile) until it is freed.
+// Frees and reallocations go to the heap the block came from. While rollback is armed no thread
+// changes the engine heap's bookkeeping: it keeps its free lists in its free blocks, on pages it
+// shares with the simulation's own engine blocks (made before the simulation heap was there), and a
+// restore of such a page, logged for the simulation's write, put back whatever other threads had
+// freed or taken there since (2026-11-04: the async loader's thread, copying a request's file name,
+// read a free list's link that was text, `..\A`, and crashed in the engine's Malloc, in every ghost
+// sync test run at the same moment of a fight). So while armed: other threads allocate from the audio heap;
+// an engine block anyone frees is freed once rollback is disarmed (the simulation's not if a rollback
+// took back the frame that freed it: the frame then runs again and frees it again, or not); an engine
+// block anyone reallocates moves to the simulation heap (the simulation's threads) or the audio heap
+// (the others), its free waiting likewise. The simulation heap is the simulation's own: a block of it
+// another thread frees is freed by the main thread at the next frame's top, one another thread
+// reallocates moves to the engine's heap (the audio heap while armed). A block of it another thread
+// writes (UE3's streaming file reader FMOD's stream thread fills, a counter the loader counts down) is
+// that thread's from then on: rollback leaves it as it is (volatile) until it is freed. A block the
+// other threads took from the audio heap while armed is freed at once by them, and by the simulation's
+// threads as an engine block is (the restored simulation may still hold it).
 // MK9_SIMHEAP=0 turns the routing off.
 
 #include "mk9/gmalloc.h"
@@ -38,6 +47,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <fmt/format.h>
@@ -66,8 +76,9 @@ namespace mk9::gmalloc {
 namespace {
 
 constexpr uint32_t kGMalloc = 0x83423BA8;
-// FMOD's code (its threads start at 0x82DEB0B8; its functions seen from 0x82DD2090 to 0x82E717B4)
-constexpr uint32_t kFmodLo = 0x82DC0000, kFmodHi = 0x82E90000;
+// FMOD's code (its threads start at 0x82DEB0B8; its functions seen from 0x82DD2090 to 0x82E72CE0; the HUD's UI library
+// from 0x82E81248 on)
+constexpr uint32_t kFmodLo = 0x82DC0000, kFmodHi = 0x82E80000;
 
 const bool g_on = [] {
   const char* v = std::getenv("MK9_SIMHEAP");
@@ -79,8 +90,11 @@ struct EngineFree {
 };
 
 std::mutex g_lock;
-std::vector<EngineFree> g_engine_frees;  // engine blocks simulation threads freed while armed
+std::vector<EngineFree> g_engine_frees;  // engine blocks (and others' audio blocks) simulation threads freed while armed
+std::vector<uint32_t> g_other_frees;     // engine blocks other threads freed while armed
 std::vector<uint32_t> g_sim_frees;       // simulation blocks other threads freed
+std::atomic<uint64_t> g_sim_freed_by_others{0};
+std::unordered_set<uint32_t> g_others_audio;  // audio heap blocks other threads took while armed
 std::atomic<uint64_t> g_routed{0}, g_audio{0}, g_fallback{0}, g_engine_reallocs{0};
 std::atomic<bool> g_audio_untracked{false};
 thread_local int t_audio_file = 0;  // in one of UE3's file callbacks for FMOD
@@ -103,15 +117,18 @@ bool SimThread() {
   return sim;
 }
 
-// called (through a few frames: FMOD's file callbacks go deep into UE3's file code) from FMOD's code
+// FMOD's code allocating: its allocator calls GMalloc (from 0x82DCFE24), or through one wrapper. Not deeper: the code
+// right above FMOD's (from about 0x82E80000) is the UI library the HUD is drawn with, and until 2026-11-04 any of 16
+// frames in FMOD's range counted, so the HUD's allocations made through that library (its allocator 0x82EF4384) came
+// from the audio heap, which rollback never tracks: the HUD's geometry records (one at 0x540471E0 in every report of a
+// rendering command crash there, the first in 0.4.0) stayed as they were through every rollback while the HUD's state
+// and the entries they point at went back. UE3's file callbacks for FMOD, which go deep into UE3's file code, are
+// told apart by their own hooks (t_audio_file)
 bool FromFmod(const PPCContext& ctx) {
   auto in = [](uint32_t a) { return a >= kFmodLo && a < kFmodHi; };
   if (in(uint32_t(ctx.lr))) return true;
-  uint32_t returns[16];
-  const int n = game::StackReturns(ctx, returns, 16);
-  for (int i = 0; i < n; i++)
-    if (in(returns[i])) return true;
-  return false;
+  uint32_t up = 0;
+  return game::StackReturns(ctx, &up, 1) == 1 && in(up);
 }
 
 // MK9_GMALLOC_TRACE=1 (diagnostics): the simulation heap's last frees, and for a block freed twice
@@ -190,11 +207,87 @@ bool SimReady() {
   return true;
 }
 
-// the heap a new block of this call comes from: 0 the engine's
-simheap::Heap* Route(const PPCContext& ctx) {
+// UE3's readers for FMOD's streams: a sound resource's virtual +180 (sub_825AE6D0) makes one (20 or 28 bytes) for each
+// of its chunks, at the chunk's +88, and FMOD's stream thread reads through it (the read callback sub_82602D00 ->
+// sub_82604168, the seek callback, writing its position) for as long as the stream plays. FMOD's streams never go back
+// with a rollback, so neither may their readers: one in the simulation heap, made in a frame a rollback took back, was
+// freed under the stream that kept it, and the frame run again could give its memory to the next one. They come from
+// the audio heap, and a simulation thread's free of one waits as an engine block's does (noted with the other threads'
+// audio blocks)
+bool FmodReader(const PPCContext& ctx) {
+  const uint32_t lr = uint32_t(ctx.lr);
+  return lr == 0x825AE768 || lr == 0x825AE7B4;
+}
+std::atomic<uint64_t> g_readers{0};
+
+// UE3's async loader's memory (gmalloc.h, LoaderMemory): its request queue and the requests' file names, which the
+// main thread allocates as it queues a read and the loader's thread frees as it takes the request. In the simulation
+// heap a rollback taking back the frame that queued one gave that memory back while the loader still held it (the queue
+// is in the loader's object, which a restore leaves alone), and the loader's free of it then waited for a frame's top
+// that came after the frames were run again, freeing what they had put there (2026-11-04: "freed was free already",
+// then the heap's walk at the frame's top reading a block's size that was something else)
+thread_local int t_loader = 0;
+
+// the heap a new block of this call comes from: 0 the engine's. *others: it is another thread's block taken from the
+// audio heap while armed (not FMOD's), or a reader for FMOD's streams
+simheap::Heap* Route(const PPCContext& ctx, bool* others = nullptr) {
   if (!g_on) return nullptr;
   if (t_audio_file || FromFmod(ctx)) return AudioReady() ? &Audio() : nullptr;
-  return SimThread() && SimReady() ? &Sim() : nullptr;
+  if (FmodReader(ctx) || t_loader) {
+    if (!AudioReady()) return nullptr;
+    if (others) *others = true;
+    if (!t_loader) g_readers++;
+    return &Audio();
+  }
+  if (SimThread()) return SimReady() ? &Sim() : nullptr;
+  // another thread while armed: the engine heap's bookkeeping stays as it is (see the top)
+  if (!rb::Armed() || !AudioReady()) return nullptr;
+  if (others) *others = true;
+  return &Audio();
+}
+
+void NoteOthers(uint32_t block) {
+  std::lock_guard lock(g_lock);
+  g_others_audio.insert(block);
+}
+
+// guest bytes from va to the end of the committed run of pages it is in (0: not committed). The run's size counts from
+// the start of va's page
+uint32_t CommittedFrom(uint32_t va) {
+  auto* heap = REX_KERNEL_STATE()->memory()->LookupHeap(va);
+  rex::memory::HeapAllocationInfo info{};
+  if (!heap || !heap->QueryRegionInfo(va, &info) || !(info.state & 1)) return 0;
+  const uint32_t page = va & ~(heap->page_size() - 1);
+  return uint32_t(uint64_t(page) + info.region_size - va);
+}
+
+// an engine block freed while armed: freed once disarmed (see the top)
+void DeferEngineFree(uint32_t block) {
+  std::lock_guard lock(g_lock);
+  if (SimThread()) g_engine_frees.push_back({rb::CurrentFrame(), block});
+  else g_other_frees.push_back(block);
+}
+
+// an audio heap block freed: one the other threads took while armed is freed by the simulation's threads as an engine
+// block is (the restored simulation may still hold it), by anyone else at once
+void FreeAudioBlock(uint32_t block) {
+  {
+    std::lock_guard lock(g_lock);
+    auto it = g_others_audio.find(block);
+    if (it != g_others_audio.end()) {
+      if (rb::Armed() && SimThread()) {
+        g_engine_frees.push_back({rb::CurrentFrame(), block});
+        return;
+      }
+      g_others_audio.erase(it);
+    }
+  }
+  Audio().Free(block);
+}
+
+bool OthersAudio(uint32_t block) {
+  std::lock_guard lock(g_lock);
+  return g_others_audio.count(block) != 0;
 }
 
 uint32_t Allocate(simheap::Heap* heap, uint32_t size, uint32_t alignment) {
@@ -224,6 +317,7 @@ void FreeSimBlock(const PPCContext& ctx, uint32_t block) {
   } else {
     std::lock_guard lock(g_lock);
     g_sim_frees.push_back(block);
+    g_sim_freed_by_others++;
   }
 }
 
@@ -241,17 +335,28 @@ const bool g_listening = [] {
 
 }  // namespace
 
+LoaderMemory::LoaderMemory() { t_loader++; }
+LoaderMemory::~LoaderMemory() { t_loader--; }
+
 void OnFrameTop(PPCContext& ctx, uint8_t* base) {
   std::vector<uint32_t> sim;
   std::vector<EngineFree> engine;
   {
     std::lock_guard lock(g_lock);
     sim.swap(g_sim_frees);
-    if (!rb::Armed()) engine.swap(g_engine_frees);
+    if (!rb::Armed()) {
+      engine.swap(g_engine_frees);
+      for (const uint32_t b : g_other_frees) engine.push_back({0, b});
+      g_other_frees.clear();
+    }
   }
   for (uint32_t p : sim) {
     Forget(p);
-    Sim().Free(p);
+    // free already: a rollback took back the frame that made it, under the thread that kept it
+    if (!Sim().Free(p)) {
+      static int told = 0;
+      if (told++ < 20) REXLOG_WARN("mk9 gmalloc: simulation block {:08X} another thread freed was free already", p);
+    }
   }
   // blocks other threads wrote: theirs
   for (const rb::OtherWrite& w : rb::TakeOtherThreadsWrites()) {
@@ -272,6 +377,10 @@ void OnFrameTop(PPCContext& ctx, uint8_t* base) {
     }
   }
   for (const EngineFree& f : engine) {
+    if (Audio().Owns(f.block)) {
+      FreeAudioBlock(f.block);
+      continue;
+    }
     rex::CallFrame frame(ctx);
     frame.ctx.r1.u32 -= 0x200;
     frame.ctx.r3.u32 = kGMalloc;
@@ -283,9 +392,10 @@ void OnFrameTop(PPCContext& ctx, uint8_t* base) {
     const auto st = Sim().GetStats(), au = Audio().GetStats();
     REXLOG_INFO(
         "mk9 gmalloc: simulation heap {} MB in {} blocks (peak {} MB), audio heap {} MB (peak {} MB); {} allocations "
-        "routed, {} to audio, {} fell back, {} engine blocks reallocated while armed",
+        "routed, {} to audio ({} readers for FMOD's streams), {} fell back, {} engine blocks moved while armed, {} "
+        "simulation blocks freed by other threads",
         st.in_use >> 20, st.blocks, st.peak >> 20, au.in_use >> 20, au.peak >> 20, g_routed.load(), g_audio.load(),
-        g_fallback.load(), g_engine_reallocs.load());
+        g_readers.load(), g_fallback.load(), g_engine_reallocs.load(), g_sim_freed_by_others.load());
   }
 }
 
@@ -324,8 +434,10 @@ MK9_AUDIO_FILE_HOOK(sub_82602D00)
 MK9_AUDIO_FILE_HOOK(sub_82602D88)
 
 REX_HOOK_RAW(sub_829AEB30) {
-  if (auto* heap = gmalloc::Route(ctx)) {
+  bool others = false;
+  if (auto* heap = gmalloc::Route(ctx, &others)) {
     if (const uint32_t p = gmalloc::Allocate(heap, ctx.r4.u32, ctx.r5.u32)) {
+      if (others) gmalloc::NoteOthers(p);
       ctx.r3.u64 = p;
       return;
     }
@@ -337,21 +449,90 @@ REX_HOOK_RAW(sub_829AEB38) {
   const uint32_t block = ctx.r4.u32, size = ctx.r5.u32, alignment = ctx.r6.u32;
   auto& sim = gmalloc::Sim();
   auto& audio = gmalloc::Audio();
+  auto* mem = REX_KERNEL_STATE()->memory();
   if (block == 0) {
-    if (auto* heap = gmalloc::Route(ctx)) {
+    bool others = false;
+    if (auto* heap = gmalloc::Route(ctx, &others)) {
       if (const uint32_t p = gmalloc::Allocate(heap, size, alignment)) {
+        if (others) gmalloc::NoteOthers(p);
         ctx.r3.u64 = p;
         return;
       }
     }
     return __imp__sub_829AEB38(ctx, base);
   }
+  // UE3's async loader's memory (LoaderMemory) stays in the audio heap or moves there, whoever reallocates it
+  if (gmalloc::t_loader && size && gmalloc::AudioReady()) {
+    if (audio.Owns(block)) {
+      if (const uint32_t p = audio.Realloc(block, size, alignment)) {
+        std::lock_guard lock(gmalloc::g_lock);
+        gmalloc::g_others_audio.erase(block);
+        gmalloc::g_others_audio.insert(p);
+        ctx.r3.u64 = p;
+        return;
+      }
+    } else if (const uint32_t have = sim.Owns(block) ? sim.UsableSize(block) : gmalloc::CommittedFrom(block)) {
+      if (const uint32_t p = gmalloc::Allocate(&audio, size, alignment)) {
+        std::memcpy(mem->TranslateVirtual<uint8_t*>(p), mem->TranslateVirtual<uint8_t*>(block), std::min(size, have));
+        gmalloc::NoteOthers(p);
+        if (sim.Owns(block)) {
+          gmalloc::FreeSimBlock(ctx, block);
+        } else if (rb::Armed()) {
+          gmalloc::DeferEngineFree(block);
+        } else {
+          rex::CallFrame frame(ctx);
+          frame.ctx.r1.u32 -= 0x200;
+          frame.ctx.r3.u32 = gmalloc::kGMalloc;
+          frame.ctx.r4.u32 = block;
+          __imp__sub_829AEB40(frame.ctx, base);
+        }
+        ctx.r3.u64 = p;
+        return;
+      }
+    }
+  }
+  // While armed a block the restored simulation may still hold goes to a new one, and is freed as an engine block is
+  // (see the top): an engine block (the engine heap's bookkeeping stays as it is then), and an audio block the other
+  // threads took that a simulation thread reallocates. The simulation's threads take the new one from the simulation
+  // heap, the others from the audio heap
+  const bool sim_thread = gmalloc::SimThread();
+  const bool engine = !audio.Owns(block) && !sim.Owns(block);
+  if (rb::Armed() && (engine || (sim_thread && audio.Owns(block) && gmalloc::OthersAudio(block)))) {
+    if (size == 0) {
+      if (engine) gmalloc::DeferEngineFree(block);
+      else gmalloc::FreeAudioBlock(block);
+      ctx.r3.u64 = 0;
+      return;
+    }
+    simheap::Heap* heap = sim_thread ? (gmalloc::SimReady() ? &sim : nullptr) : (gmalloc::AudioReady() ? &audio : nullptr);
+    const uint32_t have = engine ? gmalloc::CommittedFrom(block) : audio.UsableSize(block);
+    if (heap && have) {
+      if (const uint32_t p = gmalloc::Allocate(heap, size, alignment)) {
+        // an engine block's size is the engine's to know: what follows it up to `size` comes along, unused
+        std::memcpy(mem->TranslateVirtual<uint8_t*>(p), mem->TranslateVirtual<uint8_t*>(block), std::min(size, have));
+        if (!sim_thread) gmalloc::NoteOthers(p);
+        if (engine) gmalloc::DeferEngineFree(block);
+        else gmalloc::FreeAudioBlock(block);
+        if (engine && gmalloc::g_engine_reallocs++ < 10)
+          REXLOG_INFO("mk9 gmalloc: engine block {:08X} moved to {:08X} ({} bytes) while armed (host thread {}, lr {:08X})",
+                      block, p, size, GetCurrentThreadId(), uint32_t(ctx.lr));
+        ctx.r3.u64 = p;
+        return;
+      }
+    }
+    // no room: the engine's own realloc, as before
+    if (engine) {
+      REXLOG_WARN("mk9 gmalloc: engine block {:08X} reallocated to {} bytes while armed, no room elsewhere (lr {:08X})",
+                  block, size, uint32_t(ctx.lr));
+      return __imp__sub_829AEB38(ctx, base);
+    }
+  }
   if (audio.Owns(block) || sim.Owns(block)) {
     auto& heap = audio.Owns(block) ? audio : sim;
     // the simulation heap's blocks move only on the simulation's threads
-    const bool here = &heap == &audio || gmalloc::SimThread();
+    const bool here = &heap == &audio || sim_thread;
     if (size == 0) {
-      if (&heap == &audio) heap.Free(block);
+      if (&heap == &audio) gmalloc::FreeAudioBlock(block);
       else gmalloc::FreeSimBlock(ctx, block);
       ctx.r3.u64 = 0;
       return;
@@ -359,49 +540,42 @@ REX_HOOK_RAW(sub_829AEB38) {
     if (here) {
       if (const uint32_t p = heap.Realloc(block, size, alignment)) {
         if (p != block && &heap == &sim) gmalloc::Forget(block);
+        if (p != block && &heap == &audio && gmalloc::OthersAudio(block)) {
+          std::lock_guard lock(gmalloc::g_lock);
+          gmalloc::g_others_audio.erase(block);
+          gmalloc::g_others_audio.insert(p);
+        }
         ctx.r3.u64 = p;
         return;
       }
     }
-    // another thread's, or no room left: the engine's heap takes it
+    // another thread's, or no room left: the engine's heap takes it (another thread's while armed: the audio heap)
     const uint32_t have = heap.UsableSize(block);
-    ctx.r4.u64 = 0;
-    __imp__sub_829AEB38(ctx, base);
-    if (const uint32_t p = ctx.r3.u32) {
-      auto* mem = REX_KERNEL_STATE()->memory();
+    uint32_t p = 0;
+    if (rb::Armed() && !sim_thread && gmalloc::AudioReady() && (p = gmalloc::Allocate(&audio, size, alignment))) {
+      gmalloc::NoteOthers(p);
+    } else {
+      ctx.r4.u64 = 0;
+      __imp__sub_829AEB38(ctx, base);
+      p = ctx.r3.u32;
+    }
+    if (p) {
       std::memcpy(mem->TranslateVirtual<uint8_t*>(p), mem->TranslateVirtual<uint8_t*>(block), std::min(size, have));
-      if (&heap == &audio) heap.Free(block);
+      if (&heap == &audio) gmalloc::FreeAudioBlock(block);
       else gmalloc::FreeSimBlock(ctx, block);
     }
+    ctx.r3.u64 = p;
     return;
   }
-  // an engine block
-  if (rb::Armed() && gmalloc::SimThread()) {
-    if (size == 0) {
-      std::lock_guard lock(gmalloc::g_lock);
-      gmalloc::g_engine_frees.push_back({rb::CurrentFrame(), block});
-      ctx.r3.u64 = 0;
-      return;
-    }
-    if (gmalloc::g_engine_reallocs++ < 10)
-      REXLOG_WARN("mk9 gmalloc: the simulation reallocates engine block {:08X} to {} bytes while armed (lr {:08X})",
-                  block, size, uint32_t(ctx.lr));
-  }
+  // an engine block, not armed
   __imp__sub_829AEB38(ctx, base);
 }
 
 REX_HOOK_RAW(sub_829AEB40) {
   const uint32_t block = ctx.r4.u32;
   if (!block) return;
-  if (gmalloc::Audio().Owns(block)) {
-    gmalloc::Audio().Free(block);
-    return;
-  }
+  if (gmalloc::Audio().Owns(block)) return gmalloc::FreeAudioBlock(block);
   if (gmalloc::Sim().Owns(block)) return gmalloc::FreeSimBlock(ctx, block);
-  if (rb::Armed() && gmalloc::SimThread()) {
-    std::lock_guard lock(gmalloc::g_lock);
-    gmalloc::g_engine_frees.push_back({rb::CurrentFrame(), block});
-    return;
-  }
+  if (rb::Armed()) return gmalloc::DeferEngineFree(block);
   __imp__sub_829AEB40(ctx, base);
 }

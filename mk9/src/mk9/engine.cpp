@@ -280,7 +280,18 @@ std::atomic<int> g_workers_waiting{0};
 std::atomic<int> g_physics_waiting{0};
 thread_local bool t_physics = false;
 bool g_holding = false;
+bool g_hold_waited = false;  // WaitHeld waited for this hold already
 constexpr uint32_t kWorkerIdleWait = 0x82775FD4;   // return address of the idle wait in sub_82775F80
+// the job workers' guest registers while they run, and which of them is in its idle wait (diagnostics: where one is
+// when a hold times out)
+constexpr int kMaxWorkers = 8;
+std::atomic<PPCContext*> g_worker_ctx[kMaxWorkers];
+std::atomic<bool> g_worker_idle[kMaxWorkers];
+std::atomic<int> g_worker_slots{0};
+thread_local int t_worker = -1;
+void WorkerIdle(bool idle) {
+  if (t_worker >= 0) g_worker_idle[t_worker] = idle;
+}
 constexpr uint32_t kRenderIdleSleep = 0x8274117C;  // return address of the idle sleep in RenderingThreadMain
 
 // leaving a wait: if the main thread holds, stay (counted as waiting) until it lets go. Waiting is
@@ -419,30 +430,25 @@ static bool PoolWorkPending() {
   return false;
 }
 
-bool Hold(int timeout_ms) {
-  if (g_holding) return true;
-  const auto t0 = std::chrono::steady_clock::now();
-  // the ring drained first: once held, the rendering thread would run no more of it
-  bool ok = WaitRenderIdle(timeout_ms);
-  g_hold = true;
-  g_holding = true;
+// every simulation thread in its wait (the hold set): the hold is complete. False at `until`, the warning then logged
+// with `what` (the first 20 times)
+static bool WaitForAll(std::chrono::steady_clock::time_point until, const char* what) {
   const size_t workers = g_workers.Count(), physics = g_physics.Count(), pool = g_pool.Count();
-  const auto until = t0 + std::chrono::milliseconds(timeout_ms);
   for (int spins = 0;; spins++) {
     const bool render = !g_render_alive.load() || g_render_waiting.load();
     if (render && size_t(g_workers_waiting.load()) >= workers && size_t(g_physics_waiting.load()) >= physics &&
         size_t(g_pool_waiting.load()) >= pool && !PoolWorkPending()) {
       g_held = true;
-      break;
+      return true;
     }
     if (std::chrono::steady_clock::now() > until) {
       static int warned = 0;
       if (warned++ < 20) {
         REXLOG_WARN(
-            "mk9 engine: hold timed out (rendering thread {}, {} of {} job workers, {} of {} PhysX threads and {} of {} "
+            "mk9 engine: {} timed out (rendering thread {}, {} of {} job workers, {} of {} PhysX threads and {} of {} "
             "pool threads waiting)",
-            g_render_waiting.load() ? "waiting" : "busy", g_workers_waiting.load(), workers, g_physics_waiting.load(),
-            physics, g_pool_waiting.load(), pool);
+            what, g_render_waiting.load() ? "waiting" : "busy", g_workers_waiting.load(), workers,
+            g_physics_waiting.load(), physics, g_pool_waiting.load(), pool);
         if (PPCContext* rc = g_render_ctx.load(); rc && !g_render_waiting.load()) {
           uint32_t returns[16];
           const int n = game::StackReturns(*rc, returns, 16);
@@ -451,18 +457,59 @@ bool Hold(int timeout_ms) {
           REXLOG_WARN("mk9 engine: the rendering thread is at lr {:08X} r3 {:08X}, stack{}", uint32_t(rc->lr), rc->r3.u32,
                       chain);
         }
+        for (int i = 0; i < std::min(g_worker_slots.load(), kMaxWorkers); i++) {
+          PPCContext* wc = g_worker_ctx[i].load();
+          if (!wc || g_worker_idle[i].load()) continue;
+          uint32_t returns[16];
+          const int n = game::StackReturns(*wc, returns, 16);
+          std::string chain;
+          for (int k = 0; k < n; k++) chain += fmt::format(" {:08X}", returns[k]);
+          REXLOG_WARN("mk9 engine: job worker {} is at lr {:08X} r3 {:08X}, stack{}", i, uint32_t(wc->lr), wc->r3.u32,
+                      chain);
+        }
       }
-      ok = false;
-      break;
+      return false;
     }
     if (spins > 64) std::this_thread::yield();
   }
-  return ok;
+}
+
+bool Hold(int timeout_ms) {
+  if (g_holding) return g_held;
+  const auto t0 = std::chrono::steady_clock::now();
+  // the ring drained first: once held, the rendering thread would run no more of it (a ring not drained by then is
+  // drained meanwhile: the rendering thread parks only once it is empty)
+  WaitRenderIdle(timeout_ms);
+  g_hold = true;
+  g_holding = true;
+  return WaitForAll(t0 + std::chrono::milliseconds(timeout_ms), "hold");
+}
+
+bool WaitHeld(int timeout_ms) {
+  // MK9_RB_NO_HOLD_WAIT=1 (comparisons): a restore goes on whatever the hold's state, as every one did until 2026-11-04
+  static const bool no_wait = [] {
+    const char* v = std::getenv("MK9_RB_NO_HOLD_WAIT");
+    return v && *v == '1';
+  }();
+  if (no_wait) return true;
+  if (!g_holding) return Hold(timeout_ms);
+  // once a hold, the longer wait (a second restore at the same frame's top does not wait again)
+  if (g_held || g_hold_waited) return g_held;
+  g_hold_waited = true;
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool held = WaitForAll(t0 + std::chrono::milliseconds(timeout_ms), "the wait for a complete hold");
+  const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  static int told = 0;
+  if (told++ < 20)
+    REXLOG_INFO("mk9 engine: a restore waited {:.1f} ms more for the hold to be complete ({})", ms,
+                held ? "it was" : "it was not");
+  return held;
 }
 
 void Release() {
   if (!g_holding) return;
   g_holding = false;
+  g_hold_waited = false;
   g_held = false;
   g_hold = false;
 }
@@ -471,8 +518,13 @@ void Release() {
 
 REX_HOOK_RAW(sub_825617A8) {
   g_workers.Add();
+  if (const int i = g_worker_slots.fetch_add(1); i < kMaxWorkers) {
+    t_worker = i;
+    g_worker_ctx[i] = &ctx;
+  }
   REXLOG_INFO("mk9 engine: a job worker runs on host thread {}", GetCurrentThreadId());
   __imp__sub_825617A8(ctx, base);
+  if (t_worker >= 0) g_worker_ctx[t_worker] = nullptr;
 }
 
 REX_HOOK_RAW(sub_83103F38) {
@@ -545,11 +597,38 @@ REX_HOOK_RAW(sub_831040A8) {
 REX_HOOK_RAW(sub_8255D798) {
   if (uint32_t(ctx.lr) != kWorkerIdleWait) return __imp__sub_8255D798(ctx, base);
   g_workers_waiting.fetch_add(1);
+  WorkerIdle(true);
   __imp__sub_8255D798(ctx, base);
-  Park([] { g_workers_waiting.fetch_sub(1); }, [] { g_workers_waiting.fetch_add(1); });
+  Park(
+      [] {
+        WorkerIdle(false);
+        g_workers_waiting.fetch_sub(1);
+      },
+      [] {
+        WorkerIdle(true);
+        g_workers_waiting.fetch_add(1);
+      });
 }
 
 REX_HOOK_RAW(sub_8255D030) {
+  // a job that polls (sleeps between looks at something another thread sets): its worker is held there like an idle
+  // one. A system message box's job (sub_82AA5850: XamShowMessageBoxUI, then appSleep until its XOVERLAPPED is no
+  // longer 997, ERROR_IO_PENDING) runs until the box is dismissed: while it ran every hold timed out
+  if (t_worker >= 0) {
+    g_workers_waiting.fetch_add(1);
+    WorkerIdle(true);
+    __imp__sub_8255D030(ctx, base);
+    Park(
+        [] {
+          WorkerIdle(false);
+          g_workers_waiting.fetch_sub(1);
+        },
+        [] {
+          WorkerIdle(true);
+          g_workers_waiting.fetch_add(1);
+        });
+    return;
+  }
   if (uint32_t(ctx.lr) != kRenderIdleSleep) return __imp__sub_8255D030(ctx, base);
   g_render_waiting = true;
   __imp__sub_8255D030(ctx, base);

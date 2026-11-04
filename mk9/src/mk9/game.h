@@ -79,8 +79,19 @@ void RolledBack(uint32_t frame);
 // the main thread's rand() state (its CRT per-thread data +20), and setting it
 uint32_t MainRandState(PPCContext& ctx, uint8_t* base);
 void SetMainRandState(PPCContext& ctx, uint8_t* base, uint32_t state);
-// what every PC in the match must have alike at the top of a frame
-uint32_t StateHash(PPCContext& ctx, uint8_t* base);
+// A check at the top of a frame, what every PC in the match compares. `fight`: the fight as the players see it (the round
+// timer, the round, both fighters' health and super meters): where it differs the games no longer play the same fight.
+// `draws`: what the simulation drew at each call site so far, where a script that only dresses the arena can differ from
+// PC to PC while the fight stays the same
+struct StateCheck {
+  uint32_t fight = 0, draws = 0;
+};
+StateCheck StateHash(PPCContext& ctx, uint8_t* base);
+// both fighters' health and super meters on the fight's HUD at this moment (0 outside a fight), each 0 to 1
+struct FightBars {
+  float health[2] = {0, 0}, meter[2] = {0, 0};
+};
+FightBars FightNow();
 // the values behind the last StateHash, for the per-frame log (rand_state: the game's generator)
 void LastCheckDetail(uint32_t& timer, uint32_t& rand_state);
 // what the StateHash of `frame` counted, for a desync's log (and so its report): the draws at each call site, by

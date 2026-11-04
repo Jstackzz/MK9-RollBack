@@ -305,18 +305,43 @@ bool Comparable() {
   return phase == kPhaseFight || phase == kPhaseOver;
 }
 
-uint32_t StateHash(PPCContext& ctx, uint8_t* base) {
+// The fight's HUD (mk9/names.cpp: 0x833CED48 holds it from a fight's first round to its end, 0 otherwise), an object of
+// the simulation heap that rollback puts back: the two fighters' health at +0x20 and +0x24 (floats, 1 full, back at 1 each
+// round), their super meters at +0x7C and +0x80 and the meters' whole bars at +0x8C and +0x90. It moves in fixed steps a
+// frame (test games at different frame rates held the same values on the same frames; the bars' animation at +0x40 is
+// 0.005 a frame, its timers 1/60).
+constexpr uint32_t kFightHud = 0x833CED48;
+// Not in a fight's first frames: the HUD is made as the first round begins, and it comes with values of no meaning
+constexpr uint32_t kHudFromFrame = 60;
+
+float F32At(uint32_t address) {
+  const uint32_t v = ReadU32(address);
+  float f;
+  std::memcpy(&f, &v, sizeof f);
+  return f;
+}
+
+FightBars FightNow() {
+  FightBars b;
+  const uint32_t hud = Phase() == kPhaseFight ? ReadU32(kFightHud) : 0;
+  if (!hud) return b;
+  b.health[0] = F32At(hud + 0x20);
+  b.health[1] = F32At(hud + 0x24);
+  b.meter[0] = F32At(hud + 0x7C);
+  b.meter[1] = F32At(hud + 0x80);
+  return b;
+}
+
+StateCheck StateHash(PPCContext& ctx, uint8_t* base) {
   // only values that do not depend on where this process's heaps put things (the script globals
-  // hold pointers): the round timer so far, and below the draws per call site. The game's random
-  // number generator is logged beside it (LastCheckDetail): other threads draw from it in their
-  // own order, so it is no check of its own
+  // hold pointers): the round timer and the fight's HUD, and below the draws per call site. The game's
+  // random number generator is logged beside it (LastCheckDetail): other threads draw from it in
+  // their own order, so it is no check of its own
   (void)ctx, (void)base;
   g_last_rand = GameRandState();
   g_last_timer = ReadU32(kRoundTimer);
-  // with the round and the rounds each player won: a fight that went differently (a different
-  // winner, a round more) shows at the next check. Not the phase: loading ends on its own time.
-  // And what the simulation drew at each call site so far: every hit spark, blood drop and
-  // reaction picks numbers, so a fight that went differently draws differently
+  // what the simulation drew at each call site so far: a fight that went differently draws differently, and so may
+  // a script that only dresses the arena (netplay.cpp, CompareChecks)
   std::vector<std::pair<uint64_t, uint32_t>> draws(g_site_draws.begin(), g_site_draws.end());
   std::sort(draws.begin(), draws.end());
   // MK9_NET_SITES_LOG=<file> (diagnostics): the draws per call site at every check
@@ -338,12 +363,36 @@ uint32_t StateHash(PPCContext& ctx, uint8_t* base) {
   g_check_draws[net::Frame()] = draws;
   while (g_check_draws.size() > 16) g_check_draws.erase(g_check_draws.begin());
   // the fight's values only in a fight and at its end: outside one they still hold the last fight's,
-  // which differ from game to game (a demo fight the title played, a match watched, none since boot)
+  // which differ from game to game (a demo fight the title played, a match watched, none since boot).
+  // With the round and the rounds each player won: a fight that went differently (a different
+  // winner, a round more) shows at the next check. Not the phase: loading ends on its own time.
+  // And what the fighters have left: a hit, a blocked hit or a special that landed in one game only
   const int32_t phase = Phase();
   const bool fight = phase == kPhaseFight || phase == kPhaseOver;
-  uint32_t v[5] = {fight ? g_last_timer : 0u, fight ? uint32_t(Round()) : 0u, fight ? uint32_t(RoundsWon(0)) : 0u,
-                   fight ? uint32_t(RoundsWon(1)) : 0u, sites};
-  return Fnv(reinterpret_cast<const uint8_t*>(v), sizeof v);
+  const uint32_t hud = phase == kPhaseFight && net::Frame() >= kHudFromFrame ? ReadU32(kFightHud) : 0;
+  uint32_t v[10] = {fight ? g_last_timer : 0u,
+                    fight ? uint32_t(Round()) : 0u,
+                    fight ? uint32_t(RoundsWon(0)) : 0u,
+                    fight ? uint32_t(RoundsWon(1)) : 0u,
+                    hud ? ReadU32(hud + 0x20) : 0u,
+                    hud ? ReadU32(hud + 0x24) : 0u,
+                    hud ? ReadU32(hud + 0x7C) : 0u,
+                    hud ? ReadU32(hud + 0x80) : 0u,
+                    hud ? ReadU32(hud + 0x8C) : 0u,
+                    hud ? ReadU32(hud + 0x90) : 0u};
+  // tests: MK9_TEST_CHECK_DIFF=draws:<frame> or fight:<frame>: from that frame of the fight on this game's check says
+  // it differs in that part, what a script that only dresses the arena or a fight gone differently look like
+  static const auto test_diff = []() -> std::pair<char, uint32_t> {
+    const char* e = std::getenv("MK9_TEST_CHECK_DIFF");
+    if (!e || !*e) return {0, 0};
+    const char* colon = std::strchr(e, ':');
+    return {e[0], colon ? uint32_t(std::strtoul(colon + 1, nullptr, 10)) : 0u};
+  }();
+  if (test_diff.first && phase == kPhaseFight && net::Frame() >= test_diff.second) {
+    if (test_diff.first == 'd') sites ^= 0x5A5A5A5Au;
+    if (test_diff.first == 'f') v[4] ^= 1;
+  }
+  return {Fnv(reinterpret_cast<const uint8_t*>(v), sizeof v), sites};
 }
 
 void LastCheckDetail(uint32_t& timer, uint32_t& rand_state) {

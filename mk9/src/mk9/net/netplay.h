@@ -84,8 +84,8 @@ void RequestMeet(uint32_t seed);
 // the frame's inputs for the game's pads: installed as mk9::input's source while in sync
 bool FrameInput(uint32_t user, input::Pad& out);
 
-// a check both PCs compare (the game layer's state hash at the top of a frame)
-void Check(uint32_t frame, uint32_t hash);
+// a check both PCs compare (the game layer's state check at the top of a frame): the fight, what its scripts drew
+void Check(uint32_t frame, uint32_t fight, uint32_t draws);
 
 // how a rollback tells the GPU that the frames it runs again are not shown (true) and that they are
 // over (false), while the rendering thread is held: the app's graphics system (at start)

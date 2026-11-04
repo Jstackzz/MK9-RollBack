@@ -1,7 +1,7 @@
 """Compare two games' netplay logs (MK9_NET_LOG) frame by frame.
 
-Each line: <frame> <slot inputs...> [check <hash> timer <t> [round <n> won <a>-<b>] rand <r>] (round and won since
-0.5.4's game); "r<frame>" when a rollback
+Each line: <frame> <slot inputs...> [check <hash> timer <t> [round <n> won <a>-<b>] rand <r> [draws <d> hp <h1> <h2>
+meter <m1> <m2>]] (round and won since 0.5.4's game, the last ones since 0.5.6's); "r<frame>" when a rollback
 ran the frame again (that line then stands for the frame). A match's frames start at 0 again, so
 the logs are split into matches where the frame number goes back.
 Usage: netcmp.py a/net.log b/net.log
@@ -40,7 +40,7 @@ a, b = matches(sys.argv[1]), matches(sys.argv[2])
 print(f"{len(a)} matches in A, {len(b)} in B")
 for m, (ma, mb) in enumerate(zip(a, b), 1):
     n = min(len(ma), len(mb))
-    in_diff = check_diff = timer_diff = rand_diff = 0
+    in_diff = check_diff = timer_diff = rand_diff = draws_diff = hp_diff = 0
     first = {}
     for i in range(n):
         pa, pb = ma[i], mb[i]
@@ -61,5 +61,13 @@ for m, (ma, mb) in enumerate(zip(a, b), 1):
             if field(pa, "rand") != field(pb, "rand"):
                 rand_diff += 1
                 first.setdefault("rand", pa[0])
+            if field(pa, "draws") != field(pb, "draws"):
+                draws_diff += 1
+                first.setdefault("draws", pa[0])
+            if "hp" in pa and "hp" in pb:
+                ha, hb = pa.index("hp"), pb.index("hp")
+                if pa[ha + 1 : ha + 6] != pb[hb + 1 : hb + 6]:  # both fighters' health and meters
+                    hp_diff += 1
+                    first.setdefault("hp", pa[0])
     print(f"match {m}: {len(ma)} / {len(mb)} frames; inputs differ {in_diff}, checks {check_diff} "
-          f"(timer {timer_diff}, rand {rand_diff}); first: {first}")
+          f"(timer {timer_diff}, rand {rand_diff}, draws {draws_diff}, hp and meters {hp_diff}); first: {first}")

@@ -9,14 +9,14 @@
 //            the sender's own inputs for frames first..first+n-1; ack: how many of the receiver's
 //            inputs the sender holds without a gap; now: the frame the sender runs; seen: the
 //            frame the sender last heard the receiver run (for keeping rollback's sides even)
-//   4 CHECK  u32 frame, u32 hash                the sender's state hash at the top of that frame
+//   4 CHECK  u32 frame, u32 fight, u32 draws    the sender's state check at the top of that frame (game::StateCheck)
 //   5 BYE    u32 frame                          the sender left the match
 //
 // The spectator feed (TCP to the launcher on this PC, each packet after its u16 length; the header's
 // slot is the sender's): a player's game writes
 //   6 MEET   u32 seed, u8 n, n x u32            its READY at a barrier
 //   7 OWN    u32 first, u8 n, n x 8 bytes       its own inputs, frames first..first+n-1
-//   8 CHECK  u32 frame, u32 hash                its checks
+//   8 CHECK  u32 frame, u32 fight, u32 draws    its checks
 //   9 END    u32 frame                          it left the match
 // and a spectator's game reads every player's from it (the launcher sends a spectator everything
 // again when it connects again: duplicates are taken as they come) and plays the match in lockstep
@@ -136,7 +136,7 @@ struct PeerState {
   std::vector<uint32_t> next_words;
   int next_delay = -1;
   uint32_t old_ack = 0, old_now = 0;  // they are still in the match before ours: what they need of us
-  std::map<uint32_t, uint32_t> checks;
+  std::map<uint32_t, game::StateCheck> checks;
   bool left = false;
   std::map<uint32_t, Wire> used;  // what each frame ran with for this player (theirs or a guess)
   uint32_t confirmed = 0;         // frames below this ran with their real inputs
@@ -161,18 +161,19 @@ uint16_t g_match = 0;
 uint32_t g_frame = 0;
 std::map<uint32_t, Wire> g_mine;
 Wire g_now[kMaxSlots];
-std::map<uint32_t, uint32_t> g_my_checks;
+std::map<uint32_t, game::StateCheck> g_my_checks;
 std::deque<Outgoing> g_outbox;
 std::mt19937 g_rng{12345};
 Stats g_stats;
 FILE* g_log = nullptr;
 Clock::time_point g_last_hello{};
 bool g_rolling = false;                    // rollback armed: frames may run on guesses
-std::map<uint32_t, uint32_t> g_tentative;  // state hashes at frame tops, until every input before is known
-// what each check frame's hash was made of (the log's "timer", "round" and "rand"), as of its last run
+std::map<uint32_t, game::StateCheck> g_tentative;  // state checks at frame tops, until every input before is known
+// what each check frame's hash was made of (the log's "timer", "round", "rand" and "hp"), as of its last run
 struct CheckDetail {
   uint32_t timer = 0, rand = 0;
   int round = 0, won1 = 0, won2 = 0;
+  game::FightBars bars;
 };
 std::map<uint32_t, CheckDetail> g_check_detail;
 // Pace(): how far ahead of the others this PC ran lately, and the frames it held back
@@ -187,6 +188,7 @@ struct Pacing {
 };
 Pacing g_pace;
 uint32_t g_barrier_id = 0;  // the id the game's next object took at the last barrier (the desync line has it)
+uint32_t g_draws_apart = 0;  // checks of this match whose fight was the same and whose draws were not
 
 // this side's own input delay, and the match's: the largest any side asked at the barrier (each
 // side's inputs start `delay` frames in, so every side must use the same)
@@ -350,8 +352,8 @@ void HandlePacket(const uint8_t* b, int n) {
     TakeInputs(p, u32(20), b[24], b + 25, n - 25);
   } else if (type == kFeedOwn && n >= 13 && match == g_match) {
     TakeInputs(p, u32(8), b[12], b + 13, n - 13);
-  } else if ((type == kCheck || type == kFeedCheck) && n >= 16 && match == g_match && u32(8) <= Horizon()) {
-    p->checks[u32(8)] = u32(12);
+  } else if ((type == kCheck || type == kFeedCheck) && n >= 20 && match == g_match && u32(8) <= Horizon()) {
+    p->checks[u32(8)] = {u32(12), u32(16)};
   } else if ((type == kBye || type == kFeedEnd) && match == g_match) {
     p->left = true;
   }
@@ -602,9 +604,12 @@ void LogFrame(bool again) {
     } else {
       game::LastCheckDetail(d.timer, d.rand);
     }
-    // the round and the rounds won are in the hash too (in a fight): a desync's report shows them beside the timer
-    std::fprintf(g_log, " check %08X timer %u round %d won %d-%d rand %08X",
-                 it != g_my_checks.end() ? it->second : t->second, d.timer, d.round, d.won1, d.won2, d.rand);
+    // the round and the rounds won are in the hash too (in a fight): a desync's report shows them beside the timer,
+    // and what the fighters had left
+    const game::StateCheck c = it != g_my_checks.end() ? it->second : t->second;
+    std::fprintf(g_log, " check %08X timer %u round %d won %d-%d rand %08X draws %08X hp %.4f %.4f meter %.4f %.4f", c.fight,
+                 d.timer, d.round, d.won1, d.won2, d.rand, c.draws, d.bars.health[0], d.bars.health[1], d.bars.meter[0],
+                 d.bars.meter[1]);
   }
   std::fputc('\n', g_log);
 }
@@ -658,19 +663,38 @@ void CompareChecks() {
         ++it;
         continue;
       }
-      if (mine->second != it->second) {
+      // what this check counted, for the logs and a desync's report: the other player's shows what drew differently
+      const auto draws_lines = [&] {
+        for (const std::string& line : game::CheckDraws(it->first))
+          REXLOG_INFO("mk9 net: draws at frame {} by site: {}", it->first, line);
+      };
+      if (mine->second.fight != it->second.fight) {
         // with the id the next object took at the barrier: the two players' reports show whether their loading made a
         // different number of objects before the fight (a script process's draws are told apart by its id from there)
         REXLOG_ERROR("mk9 net: DESYNC at frame {} with slot {}: {:08X} here, {:08X} there (next object id at the "
                      "barrier {:08X}, now {:08X})",
-                     it->first, p.slot, mine->second, it->second, g_barrier_id, game::NextObjectId());
-        // what this check counted, for the desync report: the other player's shows what drew differently
-        if (g_status != Status::Desynced)
-          for (const std::string& line : game::CheckDraws(it->first))
-            REXLOG_INFO("mk9 net: draws at frame {} by site: {}", it->first, line);
+                     it->first, p.slot, mine->second.fight, it->second.fight, g_barrier_id, game::NextObjectId());
+        if (g_status != Status::Desynced) {
+          if (auto d = g_check_detail.find(it->first); d != g_check_detail.end())
+            REXLOG_INFO("mk9 net: the fight here at frame {}: timer {} round {} health {:.4f} {:.4f} meter {:.4f} {:.4f}, "
+                        "draws {:08X} here, {:08X} there",
+                        it->first, d->second.timer, d->second.round, d->second.bars.health[0], d->second.bars.health[1],
+                        d->second.bars.meter[0], d->second.bars.meter[1], mine->second.draws, it->second.draws);
+          draws_lines();
+        }
         // tests may play on to see how far apart the games get
         static const bool keep_going = std::getenv("MK9_NET_DESYNC_CONTINUE") != nullptr;
         if (!keep_going) g_status = Status::Desynced;
+      } else if (mine->second.draws != it->second.draws && !g_draws_apart++) {
+        // The timer and what the fighters have left are the same but a script drew differently: nothing the players see
+        // of the fight (a script that only dresses the arena can). Until 0.5.6 this ended the match as a desync, and
+        // both of 0.5.5's desyncs in round 2 differed in nothing else that check had (one process's draws). A fight that
+        // does go differently shows in the fight's part at its next hit. Told once, with the counts; StopRolling says
+        // how many checks there were
+        REXLOG_WARN("mk9 net: scripts drew differently from slot {} at frame {}: {:08X} here, {:08X} there; the fight is "
+                    "the same (next object id at the barrier {:08X}, now {:08X})",
+                    p.slot, it->first, mine->second.draws, it->second.draws, g_barrier_id, game::NextObjectId());
+        draws_lines();
       }
       it = p.checks.erase(it);
     }
@@ -708,6 +732,7 @@ void Tentative(uint32_t f, PPCContext& ctx, uint8_t* base) {
     d.round = game::Round();
     d.won1 = game::RoundsWon(0);
     d.won2 = game::RoundsWon(1);
+    d.bars = game::FightNow();
     g_check_detail[f] = d;
     while (g_check_detail.size() > 64) g_check_detail.erase(g_check_detail.begin());
   }
@@ -717,7 +742,7 @@ void SettleChecks() {
   uint32_t settled = g_frame;
   for (const PeerState& p : g_peers) settled = std::min(settled, p.confirmed);
   while (!g_tentative.empty() && g_tentative.begin()->first <= settled) {
-    Check(g_tentative.begin()->first, g_tentative.begin()->second);
+    Check(g_tentative.begin()->first, g_tentative.begin()->second.fight, g_tentative.begin()->second.draws);
     g_tentative.erase(g_tentative.begin());
   }
 }
@@ -809,8 +834,9 @@ void StopRolling() {
   rb::Disarm();
   g_rolling = false;
   LogReplayTimes(true);
-  REXLOG_INFO("mk9 net: lockstep from frame {} of match {} ({} rollbacks so far, longest {} frames)", g_frame,
-              g_match, g_stats.rollbacks, g_stats.max_rollback);
+  REXLOG_INFO("mk9 net: lockstep from frame {} of match {} ({} rollbacks so far, longest {} frames; {} checks with the "
+              "same fight and other draws)",
+              g_frame, g_match, g_stats.rollbacks, g_stats.max_rollback, g_draws_apart);
 }
 
 void Lost(Status s) {
@@ -1208,6 +1234,7 @@ bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agree
   g_tentative.clear();
   g_check_detail.clear();
   g_pace = {};
+  g_draws_apart = 0;
   Writer w = Header(kReady);
   w.U32(my_seed);
   const uint8_t n = uint8_t(std::min<size_t>(words.size(), kMaxWords));
@@ -1336,16 +1363,18 @@ bool FrameInput(uint32_t user, input::Pad& out) {
   return true;
 }
 
-void Check(uint32_t frame, uint32_t hash) {
+void Check(uint32_t frame, uint32_t fight, uint32_t draws) {
   if (g_status != Status::InSync) return;
-  g_my_checks[frame] = hash;
+  g_my_checks[frame] = {fight, draws};
   Writer w = Header(kCheck);
   w.U32(frame);
-  w.U32(hash);
+  w.U32(fight);
+  w.U32(draws);
   if (!g_cfg.watch) SendAll(w);
   Writer fc = Header(kFeedCheck);
   fc.U32(frame);
-  fc.U32(hash);
+  fc.U32(fight);
+  fc.U32(draws);
   FeedSend(fc);
 }
 

@@ -217,8 +217,19 @@ stick axis within 25 of 127 and every trigger within 25 of 255 read as untouched
 drifts a few steps off centre changed the input every frame, and the other PC rolled back on each one (a player's
 0.5.5 opponent: up to 8 frames at almost every frame; a test pair drifting by up to 7 rolled back on 64 % of its frames,
 the same pair with the filter as often as without drift). Every 30 frames of a fight and
-of its end (phases 8 and 11) both sides compare a state hash: the round timer, the round, the rounds
-won and the draws made at every call site so far (a fight that goes differently draws differently).
+of its end (phases 8 and 11) both sides compare a state check in two parts (`game::StateCheck`). The fight's: the round
+timer, the round, the rounds won and, from a fight's 60th frame, both fighters' health and super meters on the fight's
+HUD (`[0x833CED48]`: floats at `+0x20` and `+0x24`, `+0x7C` and `+0x80`, whole bars at `+0x8C` and `+0x90`, in the
+simulation heap, frame by frame the same in test games at different frame rates). Where that differs the games no longer
+play the same fight: a desync, and the match ends. The draws made at every call site so far: a fight that goes
+differently draws differently, but so may a script that only dresses the arena. Where only those differ the log says so
+once (`mk9 net: scripts drew differently from slot ...`, with the draws by site) and the match goes on; a fight that did
+go differently shows in the fight's part at its next hit. Until 0.5.6 both were one hash and the draws of any script ended
+the match. Both of 0.5.5's desyncs in round 2 differed in nothing else that check had: the timer was the same and every
+process's count on both PCs but one (`-44` on one PC and `-42` on the other, 1 draw and 2; in the other match process
+`+0x2CB9` drew once on one PC). What those processes are is not known, nor whether those fights had gone apart (health was
+not compared then). Each arena has script processes of its own just below the fight's barrier (ids -16, -24, -25, -31, -32
+in a test with the same idle fighters on different arenas), some drawing every frame.
 Not outside them: until the next fight sets them the fight's values keep the last one's, which a game
 booted since never saw (a lobby match on 0.5.0 desynced at frame 0 between a fresh game and one that
 had played the title's demo fight); the menus' and select screen's draws go with what each PC has
@@ -243,7 +254,10 @@ A desync's log (and so its report) lists the failed check's draws by call site, 
 draws are at `8247061C ^ ((process id - next object id) << 4)`, the next object id at the fight's barrier, on its
 `match N in sync` line since 0.5.4; until 0.5.5 `8247061C ^ (process id << 4)`): the two players' reports side by
 side show what drew differently. Since 0.5.4 each check's round and rounds won are beside its timer in the net log
-(`check <hash> timer 90 round 1 won 0-0 rand <state>`): what of a check differed when the draws did not.
+(`check <hash> timer 90 round 1 won 0-0 rand <state>`), since 0.5.6 its draws' hash and what the fighters have left
+(`draws <hash> hp 1.0000 0.9700 meter 0.3333 0.7212`): `tools/netcmp.py` compares them all. A desync's line has the
+next object id at the fight's barrier and now, and the line after it the fight's values at that frame.
+`MK9_TEST_CHECK_DIFF=draws:<frame>` or `fight:<frame>` makes one game's check differ in that part from that frame on.
 
 - **Lockstep** (default): a frame runs once every player's input for it is there; input delay 2.
 - **Rollback** (`netcode=rollback`): frames of a fight run ahead on guessed inputs (up to 8) and a

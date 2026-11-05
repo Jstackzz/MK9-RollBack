@@ -45,6 +45,7 @@ set(MK9_SOURCES
     src/mk9/game.cpp
     src/mk9/guards.cpp
     src/mk9/gmalloc.cpp
+    src/mk9/gpudiag.cpp
     src/mk9/input.cpp
     src/mk9/link.cpp
     src/mk9/names.cpp

@@ -12,11 +12,13 @@
 #include <rex/ui/flags.h>
 
 #include <rex/ui/presenter.h>
+#include <rex/ui/d3d12/d3d12_provider.h>
 #include <rex/ui/window.h>
 
 #include "mk9/controls.h"
 #include "mk9/crash.h"
 #include "mk9/diag.h"
+#include "mk9/gpudiag.h"
 #include "mk9/link.h"
 #include "mk9/names.h"
 #include "mk9/net/netplay.h"
@@ -130,6 +132,7 @@ void Mk9App::OnPreSetup(rex::RuntimeConfig& config) {
     config.gpu_plugin = "xenos";
   }
   PickFastAdapter();
+  mk9::gpudiag::BeforeDevice();
 }
 
 void Mk9App::OnPostSetup() {
@@ -141,6 +144,10 @@ void Mk9App::OnPostSetup() {
   else
     REXLOG_WARN("mk9: no window yet to hide the mouse pointer over");
   mk9::crash::Install();  // again: the runtime's libraries are loaded now, and one may have put its own in
+  mk9::gpudiag::LogAdapters();
+  if (auto* graphics = runtime()->graphics_system())
+    if (auto* d3d12 = dynamic_cast<rex::ui::d3d12::D3D12Provider*>(graphics->provider()))
+      mk9::gpudiag::SetDevice(d3d12->GetDevice());
   // The GPU's occlusion queries (how much of something got drawn) answered with a fixed count, as Xenia does: the
   // answers decide what UE3 counts as seen, which decides what some of the game's effects do and draw, and two PCs'
   // graphics cards (and resolutions) answer differently: their games went out of step (docs/GAME.md, "Netplay").

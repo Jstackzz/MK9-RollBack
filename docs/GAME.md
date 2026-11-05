@@ -20,7 +20,9 @@ The SDK is ReXGlue v0.10.0 in `external\rexglue-sdk` with this project's changes
 section hook rollback uses, bounded stack walks in two crash reports, no resolve copying in what draws
 dropped while their pipelines are created left out: see "Blood and damage textures"; ImGui dialogs that
 ask for no continuous repaint: see "Names over the fight"; the frames a rollback runs again drawn only
-into small targets and waiting for no vertical blank: see "What a rollback costs"). On a fresh
+into small targets and waiting for no vertical blank: see "What a rollback costs"; relative constant reads out of
+range reading zeros, readback buffers kept until the GPU is done with them and names on textures: see "Known gaps",
+lost graphics cards). On a fresh
 checkout of the SDK: `git -C external\rexglue-sdk apply ..\..\patches\rexglue-sdk-v0.10.0.patch`; the
 patch is `git -C external\rexglue-sdk diff --ignore-submodules`. A change to the SDK's GPU code alone
 does not link `mk9.exe` again, and the GPU plugin is copied beside it only when it does: after such a
@@ -32,6 +34,7 @@ build copy `external\rexglue-sdk\out\win-amd64\rexgpu-xenos.dll` into `mk9\out\b
 |---|---|
 | `frame.cpp` | the frame boundary: the top of GuardedMain's loop (its first call, `sub_82366BF8`), before it reads the pads; top/end hooks around FEngineLoop::Tick (`sub_823621F8`), frames run again (the whole loop), the 60 frames/s cap |
 | `crash.cpp` | crash reports: `crash.txt` and `crash.dmp` in the session folder when the game crashes (see "Crash reports") |
+| `gpudiag.cpp` | a lost graphics card: DRED on from the start for Radeons, what it saw in `crash.txt`, the driver in the log (see "Crash reports") |
 | `fx.cpp`, `guards.cpp` | the game's own crashes: its pool of effects making room when full, and checks put into its code where it wrote through a null pointer (see "Crashes in the game's own code") |
 | `names.cpp` | the players' names over an online fight's health bars (see "Names over the fight") |
 | `input.cpp` | XamInputGetState / GetCapabilities / GetKeystrokeEx answered from one pad source chain: autopilot override (offline) > netplay or test scripts > the PC's controllers (remapped, `controls.cpp`) |
@@ -167,6 +170,26 @@ its stack walked once it runs again) and its guest registers and call stack, the
 frames again after n s`, and it becomes `hang-over.txt`). A look a second or more after the last one (a debugger, the
 PC asleep) starts the count again. The launcher reports a game closed with `hang.txt` there. 0.5.3's three matches
 whose game was closed minutes in (exit code 0) said nothing of why. `MK9_CRASH_TEST=<frame>:hang` stands still 15 s.
+
+A lost graphics card ends in the SDK's fatal error, so in `abort()`, and `crash.txt` gets a section from `gpudiag.cpp`:
+
+```
+graphics card lost: 0x887A0006 DEVICE_HUNG
+  the card: AMD Radeon(TM) Graphics (vendor 0x1002, device 0x13C0), driver 32.0.21030.2001
+  the GPU's state: page fault (the GPU touched memory that is not there)
+  command lists kept: 2 finished, 5 not (0 of them started)
+  [the last list finished and the first and last waiting, operation by operation]
+  page fault at GPU address 0x0000000352AFF000, flags 0x0
+  freed lately there: resource
+```
+
+The data is DRED's (D3D12's Device Removed Extended Data). It has to be on before the device is made, so
+`gpudiag::BeforeDevice` turns it on in `OnPreSetup`, for Radeons (`MK9_DRED=1`, `MK9_NO_DRED=1`). It costs nothing
+measurable on a Radeon iGPU: the same menus, just under the cap, 54.6 frames/s with it, 54.5 and 54.6 without. Reading it on
+a Radeon: its breadcrumb counts reach memory only at a command list's end, so the list that faulted stands at operation 0
+or counts as finished, and a page fault's address may be far from what caused it (see "Known gaps", lost graphics cards:
+4 GB). The log names every adapter with its driver (`mk9 gpu: adapter 0: ...`), which also reaches the report's `graphics:`
+lines. `MK9_CRASH_TEST=<frame>:gpu` removes the device (`ID3D12Device5::RemoveDevice`, which leaves DRED nothing to say).
 
 ## Crashes in the game's own code
 
@@ -530,6 +553,36 @@ rollbacks left them).
 
 ## Known gaps
 
+- **A Radeon's graphics card lost in rollback fights** (found and fixed 2026-11-05): `DXGI_ERROR_DEVICE_HUNG` in 7 reports
+  from 0.5.2 to 0.5.5, all from one PC (Ryzen 5 5500, Radeon RX 6600, Windows 11 26H2) under two names, 6 to 148 s into
+  rollback fights, three of them within 6 minutes. The only Radeon among the PCs that sent reports. A vertex shader read a
+  constant at a negative index:
+  1. Shaders with relative addressing read `c[k + a0]` from a root CBV, and root CBVs have no bounds. `a0` is clamped to -256
+     to 255, so the index can be -256 to 510. A Radeon adds it as an unsigned 32-bit offset: a negative index reads 4 GB above
+     the constants, where nothing was mapped in any fault seen, so a negative read is a page fault and the device is lost at once
+     (`0x887A0006`, 13 ms after the command in a test: not the 2 s of a TDR, whatever the SDK's message said). The fault
+     addresses show it: minus 4 GB they land on the constants (`0x43C654000` for constants at `0x33C65...`; a run that
+     listed its blocks: `constants 0x33C784900, 6400 bytes above the faulting page (4 GB down): shader
+     AC7E99A40268FEAF`). DRED knows no object at such an address, and 4 KB of mapped memory around the constants did not
+     help. No other card was reported lost like this: presumably their reads land on something harmless.
+  2. In `AC7E99A40268FEAF` (`c[27+a0]`, its index from `FMT_16_16_FLOAT` in the vertex stream, `c27` on a table of sub-image
+     rectangles: sprites, probably the blood's) the index only goes wrong around rollbacks: no loss in about 20 one-game fights
+     on the Radeon (but for Kenshi's two, when a test's small pool overwrote constants under the GPU), nor in a one-game
+     sync test with skipped draws, 340 rollbacks, which runs the same frames again. Most likely (not shown) a draw the GPU
+     thread had not got to reads vertex memory that the frames run again have written since: the thread runs frames
+     behind, and a rollback does not wait for it.
+  3. The fix (SDK patch): `DxbcShaderTranslator::LoadOperand` makes the index `umin(k + a0, 256)` as an unsigned number, so
+     negative ones are out of range too, and `UpdateBindings` keeps a register of zeros after the 256 for those. A sprite
+     garbled for a frame can stay.
+  Reproducing it (on this PC's Radeon iGPU, `--d3d12_adapter=1`, RDNA 2 like the RX 6600): the Radeon's game has to be the one
+  rolling back. The slower game only waits (0 to 55 rollbacks a fight as game A, hundreds as game B), so both capped at 27
+  frames/s and the iGPU as game B, lag 90/70, Ermac against Freddy: lost in 2 of 3 fights on stock code, 11 of 12 with test
+  plugins, mostly around the fight's frame 1460, where the script's first hits come. With the fix: 0 of 8 fights (6 of that
+  one, 2 with other seeds and arenas), 3,192 rollbacks, the games in step. Turning off `d3d12_bindless` or `d3d12_tiled_shared_memory` did not stop it, nor drawing the
+  frames run again (`MK9_RB_DRAW_ALL=1`). GPU-based validation finds nothing wrong: it does not check root CBVs. The same
+  patch fixes `EvictOldReadbackBuffers`, which released memexport readback buffers at once when over 256 whatever a copy in
+  flight was doing (no fight tried uses that cache), and names textures and shared memory for DRED. Not seen on the RX 6600
+  itself yet: the next report from it, if any, will have DRED's data.
 - **0.5.5 crashed in almost every online match** (found and fixed 2026-11-04): 12 crash notes in the server's
   journal from its first evening, 9 with full reports. 7 in the rendering thread, 5 of those in the HUD's
   rendering commands (`SetUIGeometryBufferReadPropertiesFromCacheCommand`, `sub_82A569E0`, 3 times;

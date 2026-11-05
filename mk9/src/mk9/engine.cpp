@@ -112,10 +112,10 @@ constexpr std::pair<uint32_t, uint32_t> kOtherThreadsGlobals[] = {
     // rollback is armed only other threads allocate from the engine heap (mk9/gmalloc.cpp)
     {0x83423BA8, 0x848},
     {0x8342EA60, 0x40},
-    // FMOD's table of the memory it uses, an entry a megabyte (built by sub_82EF4E78 with its pointer at 0x834BFF7C,
-    // kept only by FMOD's allocations and frees, sub_82EF1640 / sub_82EF0C90): FMOD's, as its heap is (mk9/gmalloc.cpp),
-    // which a restore over FMOD's allocations would leave as it was. They happen in a fight's first frames, where no
-    // rollback goes since (mk9/net/netplay.cpp, kQuietFrames); MK9_RB_TRACE_FMOD lists such writes
+    // A table of the memory the HUD's UI library (Scaleform GFx, taken for FMOD until 2026-11-04) uses, an entry a
+    // megabyte (built by sub_82EF4E78 with its pointer at 0x834BFF7C, kept only by its allocations and frees,
+    // sub_82EF1640 / sub_82EF0C90). They happen in a fight's first frames, where no rollback goes since
+    // (mk9/net/netplay.cpp, kQuietFrames)
     {0x834B7F78, 0x8008},
     // XAudio2's own globals, which its mixing thread (sub_832C92D0) writes on pages that hold other globals: its lock
     // and its seven objects of 0x430 bytes (from 0x833C3B60, built by sub_83367DE0 and the six after it), and its

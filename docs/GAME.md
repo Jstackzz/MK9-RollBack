@@ -32,7 +32,8 @@ build copy `external\rexglue-sdk\out\win-amd64\rexgpu-xenos.dll` into `mk9\out\b
 |---|---|
 | `frame.cpp` | the frame boundary: the top of GuardedMain's loop (its first call, `sub_82366BF8`), before it reads the pads; top/end hooks around FEngineLoop::Tick (`sub_823621F8`), frames run again (the whole loop), the 60 frames/s cap |
 | `crash.cpp` | crash reports: `crash.txt` and `crash.dmp` in the session folder when the game crashes (see "Crash reports") |
-| `fx.cpp`, `guards.cpp` | the game's own crashes: its pool of effects making room when full, and checks put into its code where it wrote through a null pointer (see "Crashes in the game's own code") |
+| `fx.cpp`, `guards.cpp` | the game's own crashes: its pool of audio components (long called effects) making room when full, and checks put into its code where it wrote through a null pointer (see "Crashes in the game's own code") |
+| `sound.cpp` | sounds across rollbacks: what a frame run again asks of FMOD (see "Sounds") |
 | `names.cpp` | the players' names over an online fight's health bars (see "Names over the fight") |
 | `input.cpp` | XamInputGetState / GetCapabilities / GetKeystrokeEx answered from one pad source chain: autopilot override (offline) > netplay or test scripts > the PC's controllers (remapped, `controls.cpp`) |
 | `game.cpp` | what netplay and the launcher read from MK9 (addresses below), the random generator agreement, per-call-site menu streams |
@@ -170,13 +171,15 @@ whose game was closed minutes in (exit code 0) said nothing of why. `MK9_CRASH_T
 
 ## Crashes in the game's own code
 
-Three of the first five player reports (0.4.0, 2026-10-28) were one crash: `sub_82A30C20`, the script command that
-spawns an effect, writing to `[r3+260]` of a spawn that returned nothing. The game's effects (sparks, blood, fire, an
-arena's ambience) come from a pool of 64 (the effect manager, vtable `0x82081C40`: in use at +640, free at +664, both
-UE3 arrays); `sub_82606510` takes one off the free list and returns 0 once it is empty, and the game's code then went
-on through the 0. Players saw it in scenes full of effects (Cyrax's air grab, Noob Saibot's teleport slam, the Church
-arena were named). A scripted fight leaves 47-48 of the 64 free and every released effect goes back (no leak under
-rollback), so the pool runs out only where the game itself spawns that much.
+Three of the first five player reports (0.4.0, 2026-10-28) were one crash: `sub_82A30C20`, the script's sound command,
+writing to `[r3+260]` of a spawn that returned nothing. What it spawns are sounds, though this page and `fx.cpp`
+called them effects until 2026-11-04 (for what they were first seen with: the pool's object is `UFmodAudioDevice`,
+vtable `0x82081C40`, what it hands out `UFmodAudioComponent`s, see "Sounds"): a pool of 64 (in use at +640, free at
++664, both UE3 arrays); `sub_82606510` takes one off the free list and returns 0 once it is empty, and the game's code
+then went on through the 0. Players saw it in scenes full of effects (Cyrax's air grab, Noob Saibot's teleport slam,
+the Church arena were named). A scripted fight leaves 47-48 of the 64 free, but that fight rolls back little: until
+0.5.6 every sound whose end a rollback took back kept its component for good ("Sounds"), 49 of the 64 in use a minute
+and a half into a lagged mashed fight against 9-12 since.
 
 - `fx.cpp`: when the pool is empty, the oldest effect in use is released through the game's own release
   (`sub_82606650`) and the spawn tries again, on the main thread only (the job workers that also spawn run beside each
@@ -350,6 +353,7 @@ the park).
 python -I tools\netcmp.py a\net.log b\net.log                  # frame logs of two games side by side
 python -I tools\randcmp.py a\rand.txt b\rand.txt               # MK9_TRACE_RAND random draw traces
 python -I tools\scriptcmp.py a\script.txt b\script.txt         # -TraceScript: scripts and pads read, frame by frame
+python -I tools\soundcount.py a\sound.txt --names              # -TraceSound: a game's sound starts, first run against run again
 python -I tools\feedreplay.py --seed <start line's seed> <session>\net-<match>.log   # a real match played again:
                                      # a linked game given the spectator's start line with feed=127.0.0.1:7302
 ```
@@ -416,7 +420,7 @@ restore is only right if the memory it puts back is the simulation's and nothing
    counter down itself, in the frame that asked (`asyncio.cpp`, 2026-11-04).
 3. **What a restore leaves alone** (volatile bytes): the rendering command ring and its control
    block, the D3D device, every critical section outside the simulation heap (a lock's state never
-   goes back), the GPU callback's frame-time globals, the engine heap's own state, FMOD's table
+   goes back), the GPU callback's frame-time globals, the engine heap's own state, the HUD's UI library's table
    of the memory it uses (`0x834B7F78`, below) and XAudio2's globals (`0x833C3AC0`, `0x834C19A4`).
    A restore writes none of them: it copies only a page's other bytes (until 2026-11-03 it copied the
    page whole and then those bytes from a copy taken just before, which undid what another thread
@@ -527,6 +531,114 @@ call site at every check; `-Sites` in `netplay-local.ps1`), `MK9_TRACE_SCRIPT` (
 process made, every script random draw and the pads read before each tick, with the frame and the
 rollbacks; `-TraceScript`, and `tools\scriptcmp.py` compares two games' frame by frame as their
 rollbacks left them).
+
+### Sounds
+
+MK9 plays its sounds with FMOD's event system through UE3's audio device (`UFmodAudioDevice`; its update, vtable slot
++44 `sub_8260CAD8`, runs in the tick on the main thread: `sub_82607028` gives finished components back, `sub_82609460`
+starts the queued ones, then `EventSystem::update`). A sound is a `UFmodAudioComponent` from the device's pool of 64:
+`+160` its event (a `UFmodEvent`), `+264` the `FMOD::Event` handle, `+88` and `+268` flags, `+168` an id the device
+counts, which is what a script keeps. A script's sound command (`sub_82A30C20`) or an actor takes one and queues it
+(Play, `sub_82604B28`), and the device's update starts it (`InternalPlay`, `sub_82607A48`): it takes an instance of the
+event from the event's list (`UFmodEvent+200`, filled as the event loads, given back when a component is done) or, for a
+complex event, from FMOD's pool (`EventGroupI::getEventByIndex`, `sub_82E55D98`; given back with `release`), sets the
+callback (`sub_82603360`, the component as its user data) and calls `FMOD::Event::start` (`sub_82E46DE8`). FMOD tells
+the callback when the sound ends (type 4, or 3 when another took its instance: `+88 |= 0x10000000`, which is all the
+component's `IsFinished` asks), and the device's next update gives the component back. All this happens in the frame; only
+the mixing is on FMOD's threads. (`sub_82A38050` and `sub_82E7D078`, long called the script's way to FMOD, call a method
+of a Flash movie of the HUD: they are Scaleform GFx, the UI library above FMOD's code, from about `0x82E79000`.)
+
+Rollback puts back all of it but FMOD, whose memory is the audio heap's and whose threads mix on, so what a frame
+started goes on playing through a rollback. Until 0.5.6:
+
+- A frame run again started its sounds again. An instance from the event's list is the one the first run took (the list
+  went back with the frame): FMOD's start does nothing while its channels are active and starts it over once it has
+  ended. One from FMOD's pool is a second instance, played beside the first.
+- That second instance's first stayed taken from FMOD's pool for good: only the component that holds a handle gives it back.
+- A frame taken back left its sounds playing when the corrected frames never started them, the callback's user data
+  a component that by then might be another sound's.
+- An end FMOD told of in a frame taken back was never told again: FMOD tells once, and the component's flag went back
+  with the frame. The component went on playing for the game. 93 ends went that way in the lagged fight below,
+  and 49 of the 64 components were in use a minute and a half in, on the PC that rolled back most, with
+  the pool's end (`fx.cpp`) in sight in a longer match.
+
+`sound.cpp` now keeps FMOD to one sound for one start, on FMOD's side and at its interface:
+
+- Every start while rollback is armed is noted: its frame, its event, how many of that event's starts came before it in
+  the frame, its handle. A restore moves the notes of the frames it took back aside and clears those sounds' callbacks.
+- A frame run again that asks for a noted start finds its sound still playing (the instance's running flag, what FMOD's
+  own start looks at): the start does nothing and answers 0, and when the game asks FMOD for an instance it gets the
+  one that plays. So the handle the game keeps is the one the first run kept, and what it then does with it (the callback,
+  volume and pitch, parameters, a stop) goes to the sound that plays.
+- One whose sound has ended meanwhile starts for real and muted (EventI's `setMute`, `+100` of its vtable, which the game
+  never calls; an instance is unmuted when it next starts for real): the component lives on as it would, and FMOD tells
+  of its end.
+- A start nothing noted (the real inputs made it, the guess had not) just plays.
+- At the end of a frame run again, the frame's noted sounds it did not start again stop, with their event's fade out;
+  an instance of FMOD's pool goes back once silent. An instance a component in use holds from before that frame is left
+  to it.
+- The ends told in frames taken back are told again as those frames run again, if the component still holds that handle.
+
+Nothing of this shows in the simulation, because all it can see of a start left out is what the first run saw: start's
+answer (0, or the note would not be there), the handle (the same), and the callback during start, of types 9 (started,
+which it ignores) and 11 (a sound definition's selection, which reads `+164` and at most clamps it; only that callback
+reads the field). A sound's end told at another moment is no new kind of thing: FMOD tells on the PC's own real time,
+so the two games of every match already differ there, and the checks and scripts have never shown it. FMOD's code was
+seen to write no tracked memory on the simulation's threads but through that callback and its memory pool's lock in
+the executable's data (`MK9_RB_TRACE_FMOD=1`), and the C runtime's `rand()` it draws from is its alone. The strongest
+test: one game of a pair on the old behaviour (`MK9_RB_SOUND_AGAIN=1`) and the other on this, so that one really
+starts what the other leaves out, stays in step: a whole match each way round (Sub-Zero and Raiden, the old behaviour
+on the game that rolled back 69 times, 1,186 on the other; Ermac and Freddy Krueger, the old behaviour on the game
+that rolled back 1,018 times with 133 duplicates and up to 59 components in use against 19) had 0 differences in
+checks, draws, health and meters, and in `scriptcmp.py` only the thread m/o lines.
+
+Measured on one lagged two-game fight (Sub-Zero and Raiden mashing, 62 ms each way, 35 of jitter, input delay 3; boot frame
+5700 to 9600; the same inputs, the same build, `MK9_RB_SOUND_AGAIN=1` for before), counted by `tools/soundcount.py` from
+`MK9_TRACE_SOUND=<file>`:
+
+| | before: game A | before: game B | after: game A | after: game B |
+|---|---|---|---|---|
+| rollbacks (frames run again) | 70 (197) | 450 (822) | 71 (188) | 441 (757) |
+| starts on frames' first runs | 683 | 615 | 696 | 635 |
+| duplicates heard: another instance beside the first | 13 | 37 | 0 | 0 |
+| duplicates heard: the same instance started over, it had ended | 1 | 23 | 0 | 0 |
+| repeats FMOD ignored: the same instance, its channels active | 17 | 51 | | |
+| repeats left out: the sound still plays, no call to FMOD | | | 27 | 100 |
+| repeats left out: it plays on another instance, this one muted | | | 0 | 1 |
+| starts only in the corrected frames, heard | 8 | 60 | 6 | 74 |
+| sounds of frames taken back no later run started | 1 played on | 6 played on | 0 | 10 stopped |
+| ends told in frames taken back | 26 lost | 93 lost | 40 told again | 102 told again |
+| FMOD instances stolen (the callback's type 3) | 8 | 29 | 0 | 0 |
+| components of the 64 in use at the end (the most) | 25-29 (37) | 47-51 (51) | 8-13 (19) | 8-12 (20) |
+
+The games ran the same inputs but not the same frames (where a rollback falls differs from run to run), so the lines
+are of a kind, not equal. No start was muted for having ended in this fight (one or none in each game of the matches
+below): at these lags a rollback is back before a sound is over. Whole matches on these sources, each to its end with
+both players mashing, all with 0 differences in checks, draws, health and meters (`tools/netcmp.py`; the last line of
+a net log, cut by stopping the game, aside), `tools/scriptcmp.py` showing only the known thread m/o effect lines, and
+0 duplicates: Ermac and Freddy Krueger on The Pit (the game that rolled back most: 1,178 rollbacks, 385 repeats left
+out, 198 sounds only in corrected frames, 36 stopped, 21 components at most in use), Raiden and Cyber Sub-Zero (969,
+294, 133, 21), Sub-Zero and Raiden (1,365, 647, 225, 22), and against a game held to 50 frames a second, 26 ms each
+way (1,431, 379, 276, 51). A launcher-link match and its rematch (50 ms, 30 of jitter; 882 rollbacks, 211 left out,
+131 corrected, 63 stopped) the same, with the same results and 0 frames of the fights' scripts different; the two
+games' components in use agreed all through (12 and 12 at the last count). The ghost sync test on the same sources
+(each rollback's frames first with an attack nobody pressed, then with the real inputs), 8 frames back every 4,
+Reptile and Sub-Zero: to frame 13,200 with no crash, 3,806 restores, 3,419 repeats left out, 87 on another instance,
+438 ended already and muted, 4,806 stopped, 14 components at most in use.
+
+The real audio, what the guest hands the audio driver dumped by a private build (a hook of
+`XAudioSubmitRenderDriverFrame`): with every start of a fight sent the muted way the level of the fight's mix fell
+from RMS 0.066 to 0.004, what was left being the ambience started before that, so the mute does silence. Under the
+sync test (4 back every 10, the same inputs, 387 duplicates on the old behaviour and none with this; 64 components at
+most in use and 14) the mix's level hardly moved against the music and ambience, RMS 0.060 either way, its transients
+(the first difference's RMS) 13.7 and 12.1 thousandths: small beside the rest, and no one has listened to it.
+
+Not done: a sound a frame taken back stopped stays stopped (the component is told of its end as that frame runs
+again), and a sound that starts a frame off from where the guessed frames started it counts as another: the first
+stops and the second plays, where before both played. In the mashed fights that was 2 of the 140 sounds stopped; in
+the launcher-link test, whose autopilot attacks on a rhythm, 57 of 63 (`snd_foley_short` a frame later every 128
+frames). The log has the counts every 600 frames of a fight that rolls back (`mk9 sound: n starts on frames' first
+runs, m asked for by frames run again: ...`). `MK9_RB_SOUND_AGAIN=1` is the old behaviour, for comparisons.
 
 ## Known gaps
 
@@ -656,9 +768,21 @@ rollbacks left them).
   rollback keeps (`input.cpp`) were all thrown away from a match's rematch on (each match numbers its frames
   from 0, the last match's kept frames stayed, and every new one was trimmed at once), and the first frame a
   fight keeps had none; both fixed.
-- Sounds started in frames a rollback takes back keep playing (FMOD is not rolled back).
+- **Sounds played twice under rollback, and a rollback's sounds played on** until 0.5.6 (see "Sounds"). Players' earlier
+  reports mention audio problems.
+- **Two games' fight scripts a frame apart from a fight's first frames**, seen once in about 70 lagged runs here, on a
+  PC with four games running (2026-11-04, a private build of the sound work, no rollback yet): every script event of
+  one game a frame after the other's from frame 1 or 2 on (`new id` lines, `mus_fight_intro_loop` starting at frame 2
+  and at frame 1), the next object ids and the frame counter agreed at the barrier, DESYNC at frame 690. Not
+  explained. It looks like what the game waits for while a fight starts on each PC's own time: frame 0 readies the
+  fighters' intro voices with FMOD's non-blocking mode (`sub_82A30498`) and scripts poll the audio device's loading
+  (native `sub_824A5268`: `sub_82A30588`, device `+612`, 28 and 32 polls in the two games of one fight's loading).
+  Players' first-check desyncs may be of this kind.
 - **A rollback into a fight's first frames crashed the game** in every release with rollback until 0.5.1 (found
-  and fixed 2026-10-29): the other player saw it stop answering, and the launcher was left at CONTINUE?.
+  and fixed 2026-10-29): the other player saw it stop answering, and the launcher was left at CONTINUE?. (What this entry
+  calls FMOD below, `sub_82E85748` and the "sound native" `sub_82A38050`, `0x834B7F78` and the pages traced, is Scaleform GFx,
+  the HUD's UI library, as 2026-11-04 found: the fight's first frame sets up the HUD. So is the crash's cause not known to be
+  gone: the HUD's memory goes back with rollbacks since 0.5.6, which may have ended it, and `kQuietFrames` stays.)
   Lagged launcher-link tests (`Start-LinkLocal -Netcode rollback ... -Extra "MK9_NET_LAG=50;MK9_NET_JITTER=30"`,
   possible since then) roll back from the fight's first frames, as players pressing through a fight's start do;
   the two-game test's fights only rolled back once the scripted attacks began, a second or more in. Every such

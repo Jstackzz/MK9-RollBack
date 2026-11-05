@@ -54,6 +54,7 @@ set(MK9_SOURCES
     src/mk9/randtrace.cpp
     src/mk9/simheap.cpp
     src/mk9/snap.cpp
+    src/mk9/sound.cpp
     src/mk9/testinput.cpp
 )
 

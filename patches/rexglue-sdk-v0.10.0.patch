@@ -383,7 +383,7 @@ index a744375..6eb72c3 100644
        if (wait >= 0x100) {
          PrepareForWait();
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
-index 19874a5..9a0a4a7 100644
+index 19874a5..5d48b23 100644
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
 @@ -1897,6 +1897,13 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
@@ -495,9 +495,11 @@ index 19874a5..9a0a4a7 100644
 +        pass_dropped_draw_textures_.push_back(base & 0x1FFFFFFF);
 +      }
 +    }
-+  }
-+}
-+
+   }
+-  return IssueCopy_ReadbackResolvePath();
+ }
+ 
+-bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
 +// The screen's targets are at least 640x320 (its own image, half-size copies, shadows); the
 +// textures Mortal Kombat 9 paints its fighters' blood and damage into are 128 to 512 square.
 +bool D3D12CommandProcessor::IsSkippedTarget() const {
@@ -509,8 +511,7 @@ index 19874a5..9a0a4a7 100644
 +bool D3D12CommandProcessor::IsResolveOfDroppedDraws() {
 +  if (!pass_draws_dropped_) {
 +    return false;
-   }
--  return IssueCopy_ReadbackResolvePath();
++  }
 +  draw_util::ResolveInfo resolve_info;
 +  bool fixed_16_truncated = render_target_cache_->IsFixed16TruncatedToMinus1To1();
 +  if (!draw_util::GetResolveInfo(*register_file_, *memory_,
@@ -537,9 +538,8 @@ index 19874a5..9a0a4a7 100644
 +      start, pass_draws_dropped_, pass_draws_done_ + pass_draws_dropped_,
 +      sampled ? ", one of them sampling that memory" : "");
 +  return true;
- }
- 
--bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
++}
++
 +bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath(bool copy) {
    uint32_t written_address, written_length;
    if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_, written_address,
@@ -548,6 +548,77 @@ index 19874a5..9a0a4a7 100644
      return false;
    }
  
+@@ -3198,7 +3308,7 @@ void D3D12CommandProcessor::LogDeviceRemovalDiagnostics(ID3D12Device* device, HR
+   const char* reason_str = "Unknown";
+   switch (reason) {
+     case DXGI_ERROR_DEVICE_HUNG:
+-      reason_str = "DEVICE_HUNG (TDR - GPU command took too long)";
++      reason_str = "DEVICE_HUNG (the GPU stopped: a command too long, or at once on a fault)";
+       break;
+     case DXGI_ERROR_DEVICE_REMOVED:
+       reason_str = "DEVICE_REMOVED (driver internal error or hot-unplug)";
+@@ -4003,6 +4113,22 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
+   cbuffer_binding_system_.up_to_date &= !dirty;
+ }
+ 
++namespace {
++// Room for a shader's float constants. After the 256 registers of a shader with dynamic addressing, one of zeros: what
++// its reads out of range read (DxbcShaderTranslator::LoadOperand).
++uint8_t* RequestFloatConstants(ui::d3d12::D3D12UploadBufferPool& pool, uint64_t frame, uint32_t count,
++                               bool dynamic_addressing, D3D12_GPU_VIRTUAL_ADDRESS& address_out) {
++  const uint32_t size = sizeof(float) * 4 * std::max(count, uint32_t(1));
++  const uint32_t zeros = dynamic_addressing ? sizeof(float) * 4 : 0;
++  uint8_t* constants = pool.Request(frame, size + zeros, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT,
++                                    nullptr, nullptr, &address_out);
++  if (constants != nullptr && zeros) {
++    std::memset(constants + size, 0, zeros);
++  }
++  return constants;
++}
++}  // namespace
++
+ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
+                                            const D3D12Shader* pixel_shader,
+                                            ID3D12RootSignature* root_signature,
+@@ -4106,10 +4232,9 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
+     // still be provided, so if the first draw in the frame with the current
+     // root signature doesn't have float constants at all, still allocate an
+     // empty buffer.
+-    uint8_t* float_constants = constant_buffer_pool_->Request(
+-        frame_current_, sizeof(float) * 4 * std::max(float_constant_count_vertex, uint32_t(1)),
+-        D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT, nullptr, nullptr,
+-        &cbuffer_binding_float_vertex_.address);
++    uint8_t* float_constants = RequestFloatConstants(
++        *constant_buffer_pool_, frame_current_, float_constant_count_vertex,
++        float_constant_map_vertex.float_dynamic_addressing, cbuffer_binding_float_vertex_.address);
+     if (float_constants == nullptr) {
+       return false;
+     }
+@@ -4129,10 +4254,10 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
+     current_graphics_root_up_to_date_ &= ~(1u << root_parameter_float_constants_vertex);
+   }
+   if (!cbuffer_binding_float_pixel_.up_to_date) {
+-    uint8_t* float_constants = constant_buffer_pool_->Request(
+-        frame_current_, sizeof(float) * 4 * std::max(float_constant_count_pixel, uint32_t(1)),
+-        D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT, nullptr, nullptr,
+-        &cbuffer_binding_float_pixel_.address);
++    uint8_t* float_constants = RequestFloatConstants(
++        *constant_buffer_pool_, frame_current_, float_constant_count_pixel,
++        pixel_shader != nullptr && pixel_shader->constant_register_map().float_dynamic_addressing,
++        cbuffer_binding_float_pixel_.address);
+     if (float_constants == nullptr) {
+       return false;
+     }
+@@ -4764,7 +4889,8 @@ void D3D12CommandProcessor::EvictOldReadbackBuffers(
+         if (readback.mapped_data[i]) {
+           readback.buffers[i]->Unmap(0, nullptr);
+         }
+-        readback.buffers[i]->Release();
++        // A copy in flight may still write to it: an entry goes by count whatever its age.
++        resources_for_deletion_.emplace_back(submission_current_, readback.buffers[i]);
+       }
+       readback.buffers[i] = nullptr;
+       readback.mapped_data[i] = nullptr;
 diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
 index dd321a5..57d0078 100644
 --- a/src/graphics/d3d12/render_target_cache.cpp
@@ -571,6 +642,41 @@ index dd321a5..57d0078 100644
      draw_util::ResolveCopyShaderConstants copy_shader_constants;
      uint32_t copy_group_count_x, copy_group_count_y;
      draw_util::ResolveCopyShaderIndex copy_shader =
+diff --git a/src/graphics/d3d12/shared_memory.cpp b/src/graphics/d3d12/shared_memory.cpp
+index a5c97a0..8b2c688 100644
+--- a/src/graphics/d3d12/shared_memory.cpp
++++ b/src/graphics/d3d12/shared_memory.cpp
+@@ -78,6 +78,7 @@ bool D3D12SharedMemory::Initialize() {
+       return false;
+     }
+   }
++  buffer_->SetName(L"Shared memory");
+   buffer_gpu_address_ = buffer_->GetGPUVirtualAddress();
+   buffer_uav_writes_commit_needed_ = false;
+ 
+diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
+index 2be0e8e..0e6b4b2 100644
+--- a/src/graphics/d3d12/texture_cache.cpp
++++ b/src/graphics/d3d12/texture_cache.cpp
+@@ -14,6 +14,7 @@
+ #include <cfloat>
+ #include <cstddef>
+ #include <cstring>
++#include <cwchar>
+ #include <memory>
+ #include <utility>
+ 
+@@ -1554,6 +1555,10 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+                                              resource_state, nullptr, IID_PPV_ARGS(&resource)))) {
+     return nullptr;
+   }
++  wchar_t name[64];
++  std::swprintf(name, sizeof(name) / sizeof(name[0]), L"Texture @ 0x%08X, %ux%u, format %u",
++                uint32_t(key.base_page) << 12, key.GetWidth(), key.GetHeight(), uint32_t(key.format));
++  resource->SetName(name);
+   return std::unique_ptr<Texture>(new D3D12Texture(*this, key, resource.Get(), resource_state));
+ }
+ 
 diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
 index 8f2fcb0..3c50529 100644
 --- a/src/graphics/graphics_system.cpp
@@ -588,6 +694,93 @@ index 8f2fcb0..3c50529 100644
  void GraphicsSystem::SetInterruptCallback(uint32_t callback, uint32_t user_data) {
    interrupt_callback_ = callback;
    interrupt_callback_data_ = user_data;
+diff --git a/src/graphics/pipeline/shader/dxbc_translator.cpp b/src/graphics/pipeline/shader/dxbc_translator.cpp
+index 2c31a0e..a8c81af 100644
+--- a/src/graphics/pipeline/shader/dxbc_translator.cpp
++++ b/src/graphics/pipeline/shader/dxbc_translator.cpp
+@@ -1344,11 +1344,37 @@ dxbc::Src DxbcShaderTranslator::LoadOperand(const InstructionOperand& operand,
+           return dxbc::Src::LF(0.0f);
+         }
+         index.index_ = float_constant_index;
++        src = dxbc::Src::CB(cbuffer_index_float_constants_,
++                            uint32_t(CbufferRegister::kFloatConstants), index);
+       } else {
+         assert_true(constant_register_map.float_dynamic_addressing);
++        // Root CBVs have no bounds. A Radeon adds the index as an unsigned 32-bit offset, so a negative one reads 4 GB past
++        // the buffer: a page fault, and the device is lost at once (DXGI_ERROR_DEVICE_HUNG, one RX 6600's seven reports, made
++        // again on a Radeon iGPU in rollback fights). As an unsigned number a negative index is out of range too: both read
++        // the register of zeros kept after the 256 (D3D12CommandProcessor::UpdateBindings).
++        uint32_t temp = PushSystemTemp();
++        temp_pushed_out = true;
++        uint32_t used_swizzle_components = 0;
++        for (uint32_t i = 0; i < uint32_t(operand.component_count); ++i) {
++          if (!(needed_components & (1 << i))) {
++            continue;
++          }
++          SwizzleSource component = operand.GetComponent(i);
++          assert_true(component >= SwizzleSource::kX && component <= SwizzleSource::kW);
++          used_swizzle_components |= 1 << (uint32_t(component) - uint32_t(SwizzleSource::kX));
++        }
++        assert_not_zero(used_swizzle_components);
++        a_.OpIAdd(dxbc::Dest::R(temp, 0b0001),
++                  operand.storage_addressing_mode == InstructionStorageAddressingMode::kLoopRelative
++                      ? dxbc::Src::R(system_temp_aL_, dxbc::Src::kXXXX)
++                      : dxbc::Src::R(system_temp_ps_pc_p0_a0_, dxbc::Src::kWWWW),
++                  dxbc::Src::LU(operand.storage_index));
++        a_.OpUMin(dxbc::Dest::R(temp, 0b0001), dxbc::Src::R(temp, dxbc::Src::kXXXX), dxbc::Src::LU(256));
++        a_.OpMov(dxbc::Dest::R(temp, used_swizzle_components),
++                 dxbc::Src::CB(cbuffer_index_float_constants_, uint32_t(CbufferRegister::kFloatConstants),
++                               dxbc::Index(temp, 0)));
++        src = dxbc::Src::R(temp);
+       }
+-      src = dxbc::Src::CB(cbuffer_index_float_constants_,
+-                          uint32_t(CbufferRegister::kFloatConstants), index);
+     } break;
+     default:
+       assert_unhandled_case(operand.storage_source);
+@@ -2036,7 +2062,9 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
+         case ShaderRdefTypeIndex::kFloat4ConstantArray:
+           // Declaring a 0-sized array may not be safe, so write something valid
+           // even if they aren't used.
+-          type.element_count = std::max(uint16_t(constant_register_map.float_count), uint16_t(1));
++          type.element_count = std::max(uint16_t(constant_register_map.float_count +
++                                                  (constant_register_map.float_dynamic_addressing ? 1 : 0)),
++                                        uint16_t(1));
+           break;
+         case ShaderRdefTypeIndex::kUint4DescriptorIndexArray:
+           type.element_count =
+@@ -2117,7 +2145,9 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
+     auto& constant_float = *reinterpret_cast<dxbc::RdefVariable*>(shader_object_.data() +
+                                                                   constant_position_dwords_float);
+     constant_float.name_ptr = constant_name_ptr_float;
+-    constant_float.size_bytes = sizeof(float) * 4 * constant_register_map.float_count;
++    constant_float.size_bytes = sizeof(float) * 4 *
++                                (constant_register_map.float_count +
++                                 (constant_register_map.float_dynamic_addressing ? 1 : 0));
+     constant_float.flags = dxbc::kRdefVariableFlagUsed;
+     constant_float.type_ptr =
+         types_ptr + sizeof(dxbc::RdefType) * uint32_t(ShaderRdefTypeIndex::kFloat4ConstantArray);
+@@ -2242,7 +2272,9 @@ void DxbcShaderTranslator::WriteResourceDefinition() {
+         cbuffer.variable_count = 1;
+         cbuffer.variables_ptr =
+             (constant_position_dwords_float - blob_position_dwords) * sizeof(uint32_t);
+-        cbuffer.size_vector_aligned_bytes = sizeof(float) * 4 * constant_register_map.float_count;
++        cbuffer.size_vector_aligned_bytes =
++            sizeof(float) * 4 *
++            (constant_register_map.float_count + (constant_register_map.float_dynamic_addressing ? 1 : 0));
+       } else if (i == cbuffer_index_bool_loop_constants_) {
+         cbuffer.name_ptr = cbuffer_name_ptr_bool_loop;
+         cbuffer.variable_count = 2;
+@@ -3128,7 +3160,8 @@ void DxbcShaderTranslator::WriteShaderCode() {
+     ao_.OpDclConstantBuffer(dxbc::Src::CB(dxbc::Src::Dcl, cbuffer_index_float_constants_,
+                                           uint32_t(CbufferRegister::kFloatConstants),
+                                           uint32_t(CbufferRegister::kFloatConstants)),
+-                            constant_register_map.float_count,
++                            constant_register_map.float_count +
++                                (constant_register_map.float_dynamic_addressing ? 1 : 0),
+                             constant_register_map.float_dynamic_addressing
+                                 ? dxbc::ConstantBufferAccessPattern::kDynamicIndexed
+                                 : dxbc::ConstantBufferAccessPattern::kImmediateIndexed);
 diff --git a/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp b/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp
 index 8b862fc..a83e3d7 100644
 --- a/src/kernel/xboxkrnl/xboxkrnl_rtl.cpp

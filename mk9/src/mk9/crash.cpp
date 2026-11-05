@@ -36,6 +36,7 @@
 #include "mk9/engine.h"
 #include "mk9/frame.h"
 #include "mk9/game.h"
+#include "mk9/gpudiag.h"
 #include "mk9/net/netplay.h"
 
 #ifndef MK9_VERSION
@@ -414,6 +415,9 @@ HANDLE CreateIn(const wchar_t* name) {
     }
     GuestPart(out, q.guest);
     GamePart(out);
+    // a lost graphics card ends in abort() (the SDK's FatalError)
+    if (q.exit_code == kAbortCode)
+      gpudiag::Report([](void* c, const char* text) { (*static_cast<Out*>(c))("%s", text); }, &out);
     Modules(out);
     FlushFileBuffers(f);
     CloseHandle(f);
@@ -679,6 +683,10 @@ void OnFrame(uint64_t frame) {
   }
   REXLOG_ERROR("mk9: crashing on purpose at frame {} (MK9_CRASH_TEST, {})", frame,
                g_test_kind[0] ? g_test_kind : "access violation");
+  if (std::strcmp(g_test_kind, "gpu") == 0) {
+    gpudiag::RemoveDeviceForTest();
+    return;
+  }
   if (std::strcmp(g_test_kind, "abort") == 0) std::abort();
   if (std::strcmp(g_test_kind, "overflow") == 0) Deeper(0);
   if (std::strcmp(g_test_kind, "throw") == 0) throw std::runtime_error("MK9_CRASH_TEST");

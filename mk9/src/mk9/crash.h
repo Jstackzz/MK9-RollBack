@@ -19,9 +19,10 @@
 // rendering thread's, the game's and netplay's state; the log says so ("mk9 watch:"). Once frames
 // go on again it is renamed hang-over.txt. The launcher reports a game closed with hang.txt there.
 //
-// MK9_CRASH_TEST=<frame>[:abort|:overflow|:throw|:hang] crashes the game on purpose at the top of that
+// MK9_CRASH_TEST=<frame>[:abort|:overflow|:throw|:hang|:gpu] crashes the game on purpose at the top of that
 // frame (tests): an access violation, abort(), a stack overflow or a C++ exception nothing catches;
-// :hang stands still there for 15 s instead.
+// :hang stands still there for 15 s instead; :gpu removes the graphics device (ID3D12Device5::RemoveDevice),
+// which the SDK then reports as a lost card.
 
 #include <cstdint>
 

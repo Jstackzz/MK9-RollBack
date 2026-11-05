@@ -36,7 +36,7 @@ build copy `external\rexglue-sdk\out\win-amd64\rexgpu-xenos.dll` into `mk9\out\b
 | `sound.cpp` | sounds across rollbacks: what a frame run again asks of FMOD (see "Sounds") |
 | `names.cpp` | the players' names over an online fight's health bars (see "Names over the fight") |
 | `input.cpp` | XamInputGetState / GetCapabilities / GetKeystrokeEx answered from one pad source chain: autopilot override (offline) > netplay or test scripts > the PC's controllers (remapped, `controls.cpp`) |
-| `game.cpp` | what netplay and the launcher read from MK9 (addresses below), the random generator agreement, per-call-site menu streams |
+| `game.cpp` | what netplay and the launcher read from MK9 (addresses below), the random generator agreement, per-call-site menu streams, what a match keeps off the PC's real time ("Netplay") |
 | `net/netplay.cpp` | UDP netplay for 2-4 slots: barriers, lockstep, rollback mode, checks, the spectator feed |
 | `net/rollback.cpp`, `net/synctest.cpp` | copy-on-write guest memory snapshots and the single-PC sync test (see "Rollback" below) |
 | `simheap.cpp`, `gmalloc.cpp` | the simulation heap and the audio heap, and GMalloc's routing to them |
@@ -57,7 +57,10 @@ build copy `external\rexglue-sdk\out\win-amd64\rexgpu-xenos.dll` into `mk9\out\b
 | `0x834161D8` | the game's random generator (UE3 LCG; `sub_826D91C0` int, `sub_826D91E8` float, `sub_826D3088` seed) |
 | `0x833CED48` | the fight's HUD (an object of 2168 bytes, 0 outside fights): +4 its top bar's offset down the frame, a float, -146 out of sight, 0 in place |
 
-The C runtime's `rand()` is used only by FMOD (sound variations) and is not part of the simulation.
+The C runtime's `rand()` is used only by FMOD (sound variations) and is not part of the simulation. Nor is UE3's `appRand`
+(`0x833ED6FC`, seeded from the clock at boot and never agreed, about 60 functions), which reaches scripts through one native
+(`sub_824705B8`, `sub_82A26668`): what an arena's dressing scripts do with it differs from PC to PC, on purpose as far as can
+be seen (the game's own generator is the one fights draw from).
 
 ## Frame rate
 
@@ -252,6 +255,31 @@ one PC, one graphics card, never did. One game answered with Xenia's fixed count
 the GPU: out of step at frame 1740 of the lagged two-game test, every script process the same frame
 for frame (the effects' draws differed, not the fighters'). The game now sets the fixed count
 (`query_occlusion_fake_sample_count`, 1000) for every query, unless the command line says otherwise.
+
+Nor on how real time falls on its PC. A streaming level goes visible in UE3's `UWorld::AddToWorld` (`sub_827D19E0`, from
+`UpdateLevelStreaming`, `sub_827D5DC0`, in the engine's tick, after the frame's scripts), which keeps to 5 ms of real time a
+call: it looks at the clock after each of its steps, and what is left goes on in the next frame's tick, with any level behind
+this one waiting its turn (`bIsVisible`, `ULevelStreaming` `+92`, comes at the end). In frame 0 of every fight the game-flow
+script makes each fighter's intro cinema (native `sub_8247E000`: a `SeqAct_Cinema` of `Subzero_CharIntro`, say, on a streaming
+level of its own, made there) and then sleeps a frame at a time until both levels are visible (`sub_8247D5A0`, `sub_82A435D0`);
+everything else of the fight's start comes after that. So the two levels normally go visible at the end of frame 0 and
+frame 1 goes on, and a PC that stood still for 5 ms inside that call (its work takes 0.04 to 1.6 ms here, whoever the fighters)
+ran every later script of the fight a frame behind the other PC, for the whole fight. The game knows: it leaves the limit
+out while its replay recorder runs (`sub_82A1C6E8`, the object at `0x8342D01C`) and under two flags of its session object
+(`sub_8239CCF8`, `sub_8239CD58`), none of which a match here sets, being the game's local versus on each PC. Since 0.5.6 a
+match answers yes to the first of those three where `AddToWorld` asks and nowhere else (`game.cpp`), so that a level goes visible
+in the frame it is asked for on every PC; the log says when one took longer than 5 ms in a fight. `MK9_TEST_SLOW_ADD=<ms>[:<times>]`
+makes a game stand still there in a fight's first 10 frames (once, or `<times>` times), `MK9_TEST_ADD_LIMIT=1` keeps the
+limit.
+
+Scripts can also ask how many frames a sound has left (native `sub_824A5610`, `sub_82A33C00`: FMOD's length less its position,
+times 60), which is real time again. The script of a round's start asks 75 frames into the announcer's "Round N" and, if the
+answer is over 90, sleeps the difference before its "Fight!". Two games read it apart (13 and 7, 56 and 48, 64 and 66 in test
+fights), so a long line, or one that started late on one PC, puts the round's start as many frames apart. Since 0.5.6 no
+sound has frames left for a match's scripts: the next line may start over the end of a long one, on every PC alike.
+`MK9_TEST_SOUND_LEFT=<frames>` answers that in this game's fights (200 in one game of a pair: the round's timer at 90 against
+the other game's 89 at frame 900, a DESYNC), and `MK9_TEST_ADD_LIMIT=1` keeps FMOD's answer too.
+
 A desync's log (and so its report) lists the failed check's draws by call site, grouped by return address
 (`mk9 net: draws at frame f by site: 82A23504: 824790DC=40 8247063C=8 ...`, 4 lines at most; a script's
 draws are at `8247061C ^ ((process id - next object id) << 4)`, the next object id at the fight's barrier, on its
@@ -784,14 +812,46 @@ for by frames run again: ...`). `MK9_RB_SOUND_AGAIN=1` is the old behaviour, for
   fight keeps had none; both fixed.
 - **Sounds played twice under rollback, and a rollback's sounds played on** until 0.5.6 (see "Sounds"). Players' earlier
   reports mention audio problems.
-- **Two games' fight scripts a frame apart from a fight's first frames**, seen once in about 70 lagged runs here, on a
-  PC with four games running (2026-11-04, a private build of the sound work, no rollback yet): every script event of
-  one game a frame after the other's from frame 1 or 2 on (`new id` lines, `mus_fight_intro_loop` starting at frame 2
-  and at frame 1), the next object ids and the frame counter agreed at the barrier, DESYNC at frame 690. Not
-  explained. It looks like what the game waits for while a fight starts on each PC's own time: frame 0 readies the
-  fighters' intro voices with FMOD's non-blocking mode (`sub_82A30498`) and scripts poll the audio device's loading
-  (native `sub_824A5268`: `sub_82A30588`, device `+612`, 28 and 32 polls in the two games of one fight's loading).
-  Players' first-check desyncs may be of this kind.
+- **Two games' fight scripts a frame apart from a fight's first frames** until 0.5.6 (found and fixed 2026-11-05, "Netplay"),
+  seen once in about 130 lagged runs here, on a PC with four games running: no rollback yet, every script event of one game a
+  frame after the other's from frame 1 or 2 on (`new id 10000998`, `mus_fight_intro_loop`; frames 313 and 314, 663 and 664),
+  the next object ids and the frame counter agreed at the barrier, DESYNC at frame 690 as the health bars fill for the round
+  (0.44 and 0.46). It was `AddToWorld`'s 5 ms. A trace of every native every script process calls (a private build: a line in the
+  VM's dispatch at `0x82A16370`) shows the game-flow process asking `sub_8247D5A0` in frame 0 and in frame 1, and all that came
+  late comes after that wait. Not FMOD, the first suspect: the audio device's loading polls (`sub_824A5268`) end some 345 frames
+  before the barrier, and nothing polls the intro voices frame 0 readies. With one stall in the fight's first `AddToWorld` on the old
+  behaviour (`MK9_TEST_SLOW_ADD=30` and `MK9_TEST_ADD_LIMIT=1`, one game of a pair) the sighting comes back to the digit: the same
+  frames (1, 2, 313, 314, 663, 664, ...), DESYNC at 690, the same two hashes (`7AE9AAE6`, `C5E4C796`); with a stall in each of the
+  two levels' adds the scripts are two frames apart. It takes a stall, not a heavy fighter: on the old behaviour all 31 fighters'
+  intro levels went visible in frame 0, 0.04 to 0.9 ms each, and none of those 17 pairs of games came apart. How often players'
+  PCs stall there is not known: 0.5.5's check has no health, so such a fight went on until a draw or a timer tick fell between its
+  two frames, and 0.5.6's log line (`a streaming level took`) will say.
+  Tested, this fix's build on the sound work. Lagged two-game tests (62 ms each way, 35 of jitter, input delay 3, both players
+  mashing, to boot frame 9600), one game standing still 30 ms once (Sub-Zero and Raiden), twice (both levels) and 80 ms (Ermac
+  and Freddy Krueger on The Pit), both games 30 ms (Raiden and Cyber Sub-Zero), and neither: the first script after the wait at
+  frame 1 in both games every time, no check different in timer, rounds, draws, health or meters, and of 4,800 to 5,000 frames
+  of the fight 5 to 11 different in `scriptcmp.py`, each only in which thread made an effect (72 to 74 rollbacks in one game, 449 to 548
+  in the other). In lockstep with the stall the same (2,528 frames, 5). A whole match with the stall, Ermac and Freddy Krueger on The
+  Pit, to its end: 14,466 frames, 21 of that kind and nothing else, 74 and 1,317 rollbacks.
+  The same trace of both games through frame 1,100 of a fight, every native's answer compared (22 to 26 processes): three
+  processes differ, none of them the fight's. `sub_824A5610` (frames a sound has left, "Netplay"); sound ids, which count starts
+  (one apart by frame 1,070, which the scripts only keep); and an arena's dressing script made while the fight loads (`10000902` on The
+  Living Forest, every 40 to 60 frames, on other frames in each game), which takes its waits from UE3's `appRand` and so goes
+  its own way on every PC. Read off the same run: the main thread reads the clock in a fight for the frame's own timing, UE3's
+  async loader and object purge (`sub_82568540`, under a time limit too), FMOD, the UI library and a HUD message's timeout
+  (`sub_82400BC8`); none of it reached a script.
+  **The server's journal does not show this as the cause of its early desyncs.** The first-check desyncs of 0.5.2 to 0.5.4
+  (frames 30 and 90) were draws told apart by absolute process ids (below), and none has come since. 0.5.5's, 9 pairs of
+  reports in 122 matches to 2026-11-05 (7 in 98 between two Ryzen 5s, 2 in 12 between one of them and an i7; frames 180, 210, 210,
+  300, 390, 780, 1260, 5970, 7650; 0 to 684 rollbacks), differ in draws alone as far as that check sees, and all but one in a process
+  made before the barrier. Three times one PC's process drew once where the other's, two ids further from the barrier's, drew
+  twice (`-0x43` and `-0x45`, `-0x13D` and `-0x13B`, `-0x2C` and `-0x2A`): by all appearances another process or the same one on
+  another stream, not a frame apart. Three times a burst of 2 draws on one PC only (`-0x18`, `-0x20`, `-0x2E`), which scripts a
+  frame apart could explain and nothing there shows. Twice the other PC's report was cut. In real matches the next object ids at the
+  barrier are 1 to 9 apart, in tests here equal in 228 fights of 228 (14 arenas), and what makes them differ is still to be found:
+  not this limit while a fight loads (with one game's level adds slowed 6 and 20 ms a batch on the old behaviour, two runs, both
+  games made the same 1,146 and 1,106 objects in the same order). Since 0.5.6 such draws no longer end a match; a fight a frame
+  apart would, as the bars fill.
 - **A rollback into a fight's first frames crashed the game** in every release with rollback until 0.5.1 (found
   and fixed 2026-10-29): the other player saw it stop answering, and the launcher was left at CONTINUE?. (What this entry
   calls FMOD below, `sub_82E85748` and the "sound native" `sub_82A38050`, `0x834B7F78` and the pages traced, is Scaleform GFx,

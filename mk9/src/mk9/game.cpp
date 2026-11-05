@@ -3,12 +3,14 @@
 #include "mk9/game.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <map>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -458,6 +460,86 @@ REX_HOOK_RAW(sub_826D91E8) {
   mk9::game::BeforeDraw(ctx);
   __imp__sub_826D91E8(ctx, base);
   mk9::randtrace::Log('F', uint32_t(site >> 32), mk9::game::GameRandState(), uint32_t(site));
+}
+
+// A streaming level goes visible in UWorld::AddToWorld (sub_827D19E0, from the tick's UpdateLevelStreaming sub_827D5DC0),
+// which keeps to 5 ms of real time a call and goes on in the next frame's; a level behind it waits. In a fight's frame 0
+// the game-flow script makes the fighters' intro cinemas (SeqAct_Cinema, Subzero_CharIntro say) and sleeps a frame at a
+// time until their levels are visible (sub_8247D5A0 -> sub_82A435D0 reads bIsVisible, ULevelStreaming +92), so a stall of
+// 5 ms on one PC in that call (0.2 ms of work here) put all the fight's scripts a frame behind the other PC's for good.
+// The game asks three things before it keeps to the limit: its replay recorder (sub_82A1C6E8) and two flags of its session
+// object (sub_8239CCF8, sub_8239CD58), none of which a match here sets, being the game's local versus on each PC. So a
+// match says yes to the first of them, there alone: what goes visible does so in the frame it asks, on every PC
+// (docs/GAME.md, "Netplay"). MK9_TEST_ADD_LIMIT=1 keeps the limit (comparisons)
+REX_EXTERN(__imp__sub_82A1C6E8);
+REX_HOOK_RAW(sub_82A1C6E8) {
+  constexpr uint32_t kFromAddToWorld = 0x827D1A1C;
+  const bool add_to_world = uint32_t(ctx.lr) == kFromAddToWorld;
+  __imp__sub_82A1C6E8(ctx, base);
+  static const bool keep_limit = [] {
+    const char* v = std::getenv("MK9_TEST_ADD_LIMIT");
+    return v && *v == '1';
+  }();
+  if (add_to_world && !keep_limit && mk9::net::InSync()) ctx.r3.u64 = 1;
+}
+
+// the log says when a fight's level took longer than that limit: what would have put this PC's scripts a frame late
+REX_EXTERN(__imp__sub_827D19E0);
+REX_HOOK_RAW(sub_827D19E0) {
+  const auto started = std::chrono::steady_clock::now();
+  __imp__sub_827D19E0(ctx, base);
+  const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+  if (ms > 5.0 && mk9::game::Phase() == mk9::game::kPhaseFight && mk9::net::InSync())
+    REXLOG_INFO("mk9 game: a streaming level took {:.1f} ms to go visible at frame {} (the game's own limit is 5 ms)", ms,
+                mk9::net::Frame());
+}
+
+// How many frames a playing sound has left (the script native sub_824A5610: sub_82A33C00, (length - position) * 60 by FMOD):
+// real time again. The round's script asks 75 frames into the announcer's "Round N" and, if that is over 90, sleeps the
+// difference before its "Fight!", so that a voice line started late on one PC (or a long one, read a few frames apart: two games
+// read 13 and 7, 56 and 48) put the fight's scripts as many frames apart from there on. In a match no sound has frames left
+// for the scripts: the next line may start over the end of a long one, on every PC alike. MK9_TEST_SOUND_LEFT=<frames> answers
+// that in this game's fights instead, MK9_TEST_ADD_LIMIT=1 keeps the game's own answer too (comparisons)
+REX_EXTERN(__imp__sub_82A33C00);
+REX_HOOK_RAW(sub_82A33C00) {
+  static const int test_left = [] {
+    const char* v = std::getenv("MK9_TEST_SOUND_LEFT");
+    return v && *v ? std::atoi(v) : -1;
+  }();
+  static const bool real = [] {
+    const char* v = std::getenv("MK9_TEST_ADD_LIMIT");
+    return v && *v == '1';
+  }();
+  if (test_left >= 0 && mk9::game::Phase() == mk9::game::kPhaseFight && mk9::net::InSync()) {
+    ctx.r3.u64 = uint32_t(test_left);
+    return;
+  }
+  if (!real && mk9::net::InSync()) {
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_82A33C00(ctx, base);
+}
+
+// tests: MK9_TEST_SLOW_ADD=<ms>[:<times>]: in a fight's first 10 frames AddToWorld's update of a level's components
+// (sub_828FD8A8) stands still that long, the first time or the first <times> times, as on a PC stalled just then
+REX_EXTERN(__imp__sub_828FD8A8);
+REX_HOOK_RAW(sub_828FD8A8) {
+  static int stall_ms = 0, stalls = 0;
+  static const bool asked = [] {
+    const char* v = std::getenv("MK9_TEST_SLOW_ADD");
+    if (!v || !*v) return false;
+    stall_ms = std::atoi(v);
+    const char* colon = std::strchr(v, ':');
+    stalls = colon ? std::atoi(colon + 1) : 1;
+    return true;
+  }();
+  if (asked && stalls > 0 && mk9::game::Phase() == mk9::game::kPhaseFight && mk9::net::InSync() && mk9::net::Frame() < 10) {
+    stalls--;
+    REXLOG_INFO("mk9 game: AddToWorld stands still {} ms at frame {} (MK9_TEST_SLOW_ADD)", stall_ms, mk9::net::Frame());
+    std::this_thread::sleep_for(std::chrono::milliseconds(stall_ms));
+  }
+  __imp__sub_828FD8A8(ctx, base);
 }
 
 // MK's counted objects (script processes among them) take their id from one counter (0x83394B44):

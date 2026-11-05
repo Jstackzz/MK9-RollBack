@@ -294,6 +294,7 @@ REX_HOOK_RAW(sub_82366BF8) {
 REX_HOOK_RAW(sub_823621F8) {
   using namespace mk9::frame;
   __imp__sub_823621F8(ctx, base);
+  mk9::sound::OnFrameEnd(ctx, base);
   const uint64_t n = g_frames.fetch_add(1, std::memory_order_relaxed) + 1;
   if (g_end) g_end(ctx, base);
   mk9::snap::OnFrame(n);

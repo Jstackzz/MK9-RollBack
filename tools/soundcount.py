@@ -9,6 +9,8 @@ else it comes "only in the corrected frames". What FMOD really did is the how wo
   kept    run again, the sound still plays: not started again (the fix)
   silent  run again, the sound ended already: started muted (the fix)
   moved   run again, another instance plays it: started muted, the sound goes on where it is (the fix)
+kept, silent and moved may come with " of <frame>": the note was a frame off, the sound started in that frame (a frame's
+first run can find one too).
 Without the fix (MK9_RB_SOUND_AGAIN=1) every start says fresh; and FMOD's start does nothing when the instance plays with its
 channels active (0x10 in the state word on the line), so those are counted apart.
 
@@ -25,7 +27,7 @@ import sys
 path = sys.argv[1]
 names = "--names" in sys.argv
 
-pat = re.compile(r"start (\S+) event (\S+) (\S*) lr (\S+) = (\S+) (\S+)(?: state (\S+))?")
+pat = re.compile(r"start (\S+) event (\S+) (\S*) lr (\S+) = (\S+) (\S+)(?: state (\S+))?(?: of (\d+))?")
 kinds = collections.Counter()
 threads = collections.Counter()
 told_back = collections.Counter()
@@ -35,7 +37,7 @@ this_run = collections.defaultdict(lambda: collections.Counter())  # frame -> st
 last_run = collections.defaultdict(set)  # frame -> (event, nth) its latest run started
 again_frames = set()
 stopped = told_again = told_not = left_to_component = 0
-first = same_instance = other_instance = no_effect = corrected = kept = silent = moved = 0
+first = same_instance = other_instance = no_effect = corrected = kept = silent = moved = near = 0
 name_of = {}
 dup_names = collections.Counter()
 new_names = collections.Counter()
@@ -99,7 +101,7 @@ for line in open(path, errors="replace"):
         m = pat.match(" ".join(p[4:]))
         if not m:
             continue
-        handle, event, name, lr, res, how, state = m.groups()
+        handle, event, name, lr, res, how, state, of = m.groups()
         state = int(state or "0", 16)
         if res != "0":
             kinds["start failed"] += 1
@@ -110,14 +112,20 @@ for line in open(path, errors="replace"):
         this_run[frame][event] += 1
         key = (event, nth)
         last_run[frame].add(key)
-        if not again:
-            first += 1
-        elif how == "kept":
+        if of is not None:
+            near += 1
+            of = int(of)
+            for k in [k for k in notes[of] if k[0] == event]:
+                del notes[of][k]
+                break
+        if how == "kept":
             kept += 1
         elif how == "silent":
             silent += 1
         elif how == "moved":
             moved += 1
+        elif not again:
+            first += 1
         elif key in notes[frame]:
             if notes[frame][key] == handle and state != 0x80000000 and state & 0x10:
                 no_effect += 1
@@ -147,7 +155,7 @@ print(f"  starts on frames' first runs: {first}")
 print(f"  in frames run again, heard: duplicates {same_instance + other_instance} ({same_instance} the same instance started "
       f"over, {other_instance} another beside the first), only in the corrected frames {corrected}")
 print(f"  in frames run again, asked of FMOD with no effect: {no_effect} (the instance plays, its channels active)")
-print(f"  in frames run again, not heard again: {kept} kept playing, {silent} ended already (muted), {moved} on another instance")
+print(f"  not heard again: {kept} kept playing, {silent} ended already (muted), {moved} on another instance; {near} of them a frame off")
 print(f"  sounds of frames taken back that no later run started: {stopped} stopped, {gone} left playing, {left_to_component} a component holds")
 print(f"  ends told in frames taken back: {dict(told_back)}; told again {told_again}, no longer the component's {told_not}")
 print(f"  threads: {dict(threads)}")

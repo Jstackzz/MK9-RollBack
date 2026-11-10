@@ -1,0 +1,29 @@
+// As in Microsoft's <cmath>: the double functions are the C library's own, the float ones call its float versions.
+#pragma once
+#include <math.h>
+namespace std {
+using ::ceil;
+using ::copysign;
+using ::floor;
+using ::fma;
+using ::log2;
+using ::rint;
+using ::round;
+using ::sqrt;
+using ::trunc;
+inline float ceil(float x) noexcept { return ::ceilf(x); }
+inline float copysign(float x, float y) noexcept { return ::copysignf(x, y); }
+inline float floor(float x) noexcept { return ::floorf(x); }
+inline float fma(float x, float y, float z) noexcept { return ::fmaf(x, y, z); }
+inline float log2(float x) noexcept { return ::log2f(x); }
+inline float rint(float x) noexcept { return ::rintf(x); }
+inline float round(float x) noexcept { return ::roundf(x); }
+inline float sqrt(float x) noexcept { return ::sqrtf(x); }
+inline float trunc(float x) noexcept { return ::truncf(x); }
+inline double abs(double x) noexcept { return __builtin_fabs(x); }
+inline float abs(float x) noexcept { return __builtin_fabsf(x); }
+template <class T = void> constexpr bool isnan(double x) noexcept { return __builtin_isnan(x); }
+template <class T = void> constexpr bool isnan(float x) noexcept { return __builtin_isnan(x); }
+template <class T = void> constexpr bool isinf(double x) noexcept { return __builtin_isinf(x); }
+template <class T = void> constexpr bool isinf(float x) noexcept { return __builtin_isinf(x); }
+}  // namespace std

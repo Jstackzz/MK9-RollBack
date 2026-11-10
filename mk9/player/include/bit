@@ -1,0 +1,8 @@
+#pragma once
+namespace std {
+enum class endian { little = 0, big = 1, native = little };
+template <class To, class From>
+[[nodiscard]] constexpr To bit_cast(const From& from) noexcept {
+  return __builtin_bit_cast(To, from);
+}
+}  // namespace std

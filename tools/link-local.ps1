@@ -9,6 +9,7 @@
 #     [-Names "P1name|P2name"]  the players' account names on the start lines, as the launcher sends them
 #     [-TraceScript]  each game's script processes and pads, frame by frame (tools\scriptcmp.py a\script.txt b\script.txt)
 #     [-Bin <folder>]  the mk9.exe to run (default mk9\out\build\win-amd64-release; a player package's games\mk9)
+#     [-BinB <folder>] player 2's, when it is another build (two builds of one release must stay in step)
 #     [-StaggerS <s>]  boot player 2's game that much after player 1's, as players' games start at different times
 #     [-Extra "MK9_NET_LAG=50;MK9_NET_JITTER=30"]  environment for every game: here a lagged network, so that a
 #                     rollback match and its rematch roll back
@@ -16,7 +17,7 @@ function Start-LinkLocal {
     param([Parameter(Mandatory = $true)][string]$Out, [string]$Mode = "versus", [string]$Netcode = "lockstep",
           [int]$Delay = 2, [string]$Picks = "cursor", [string]$Snaps = "2:300", [int]$TimeoutS = 240,
           [switch]$Spectator, [switch]$Attack, [switch]$Rematch, [switch]$Park, [switch]$TraceRand, [int]$DelayB = -1,
-          [string]$Names = "", [string]$Extra = "", [switch]$TraceScript, [string]$Bin = "", [int]$StaggerS = 0)
+          [string]$Names = "", [string]$Extra = "", [switch]$TraceScript, [string]$Bin = "", [string]$BinB = "", [int]$StaggerS = 0)
     $root = Split-Path $PSScriptRoot -Parent
     if (-not $root) { $root = "C:\Users\Owner\source\repos\mk9-rollback" }
     $bin = if ($Bin) { $Bin } else { Join-Path $root "mk9\out\build\win-amd64-release" }
@@ -42,7 +43,8 @@ function Start-LinkLocal {
         if ($TraceScript) { $envs["MK9_TRACE_SCRIPT"] = (Join-Path $d "script.txt") }
         foreach ($e in ($Extra -split ";")) { if ($e -match "^(\w+)=(.*)$") { $envs[$Matches[1]] = $Matches[2] } }
         foreach ($k in $envs.Keys) { Set-Item "Env:$k" $envs[$k] }
-        $procs += Start-Process -FilePath (Join-Path $bin "mk9.exe") -WorkingDirectory $bin -PassThru -ArgumentList `
+        $gameBin = if ($i.dir -eq "b" -and $BinB) { $BinB } else { $bin }
+        $procs += Start-Process -FilePath (Join-Path $gameBin "mk9.exe") -WorkingDirectory $gameBin -PassThru -ArgumentList `
             "--game_data_root=$disc", "--user_data_root=$(Join-Path $d 'user')", "--log_file=$(Join-Path $d 'game.log')"
         foreach ($k in $envs.Keys) { Remove-Item "Env:$k" -ErrorAction SilentlyContinue }
         if ($StaggerS -gt 0 -and $i.dir -eq "a") { Start-Sleep -Seconds $StaggerS }

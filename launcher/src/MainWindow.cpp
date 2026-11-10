@@ -6,6 +6,7 @@
 #include <QButtonGroup>
 #include <QCloseEvent>
 #include <QDesktopServices>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -182,13 +183,22 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     connect(github_, &GitHubUpdates::found, this, [this](const QJsonObject& release) { offerUpdate(release, false); });
     if (paths::isPackage()) QTimer::singleShot(4000, github_, &GitHubUpdates::check);
     QTimer::singleShot(1500, this, [this] {
-        if (!paths::isPackage() || !BuildPage::needsRebuild(gameId_)) return;
-        showNotice(tr("This update changed the game itself: it is being built again on Build game (about 15 "
-                      "minutes, once). Online matches need it."),
-                   false);
-        for (int i = 0; i < pages_.size(); i++)
-            if (pages_[i] == build_) selectPage(i);
-        build_->rebuild();
+        if (!paths::isPackage()) return;
+        const bool built = QFileInfo::exists(cfg::gameExe(gameId_));
+        // an update that changed the game, or a disc extracted while the game could not be built yet
+        const bool update = BuildPage::needsRebuild(gameId_);
+        if (update || (!built && GameProcess::hasGameFiles(cfg::gameDataRoot(gameId_)))) {
+            showNotice(update ? tr("This update changed the game itself: it is being put together again on Build game (a "
+                                   "few minutes at most, once). Online matches need it.")
+                              : tr("Your disc is already extracted: the game is being put together on Build game (a few "
+                                   "minutes, once)."),
+                       false);
+            for (int i = 0; i < pages_.size(); i++)
+                if (pages_[i] == build_) selectPage(i);
+            build_->rebuild();
+        } else if (!built) {
+            build_->findDisc();
+        }
     });
     Updater::cleanUp();  // what an update set aside, once free; the old launcher may still be closing:
     if (!opts_.updatedFrom.isEmpty())
@@ -301,6 +311,10 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     if (opts_.queue == QLatin1String("ranked")) startPage = kRanked;
     if (opts_.localTest) startPage = kSingle;
     if (!opts_.extractImage.isEmpty()) startPage = kBuild;
+    // nothing to play yet: what comes first is the one step there is
+    if (paths::isPackage() && opts_.page.isEmpty() && opts_.queue.isEmpty() && !opts_.localTest &&
+        !QFileInfo::exists(cfg::gameExe(gameId_)))
+        startPage = kBuild;
     selectPage(startPage);
     if (opts_.localTest)
         QTimer::singleShot(500, this, [this] {

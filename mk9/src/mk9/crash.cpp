@@ -36,6 +36,7 @@
 #include "mk9/engine.h"
 #include "mk9/frame.h"
 #include "mk9/game.h"
+#include "mk9/gameimage.h"
 #include "mk9/gpudiag.h"
 #include "mk9/net/netplay.h"
 
@@ -634,12 +635,12 @@ void Install() {
       g_test_frame = std::strtoull(v, &rest, 10);
       if (rest && *rest == ':') std::snprintf(g_test_kind, sizeof g_test_kind, "%s", rest + 1);
     }
-    HMODULE exe = GetModuleHandleW(nullptr);
+    HMODULE exe = GetModuleHandleW(kGameModule);
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(exe);
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(reinterpret_cast<const uint8_t*>(exe) + dos->e_lfanew);
     g_exe_lo = reinterpret_cast<uintptr_t>(exe);
     g_exe_hi = g_exe_lo + nt->OptionalHeader.SizeOfImage;
-    for (const PPCFuncMapping* m = PPCFuncMappings; m->host; m++)
+    for (const PPCFuncMapping* m = GameImage()->func_mappings; m->host; m++)
       g_funcs.push_back({reinterpret_cast<uintptr_t>(m->host), uint32_t(m->guest)});
     std::sort(g_funcs.begin(), g_funcs.end(), [](const HostFunc& a, const HostFunc& b) { return a.host < b.host; });
     g_request = CreateEventW(nullptr, FALSE, FALSE, nullptr);

@@ -59,13 +59,40 @@ set(MK9_SOURCES
     src/mk9/testinput.cpp
 )
 
+# The package's ready-made mk9.exe: everything but the game's code, which each player's PC compiles from their own disc
+# into mk9game.dll with nothing but the package (mk9/player/README.md). tools\build-player-host.cmd builds this.
+option(MK9_PLAYER_HOST "Build mk9.exe without the game's code, for the player package" OFF)
+if(MK9_PLAYER_HOST)
+    list(APPEND MK9_SOURCES src/mk9/guestlog.cpp)
+endif()
+
 if(WIN32)
     add_executable(mk9 WIN32 ${MK9_SOURCES})
 else()
     add_executable(mk9 ${MK9_SOURCES})
 endif()
 
-rexglue_setup_target(mk9 GPU_PLUGINS xenos)
+if(MK9_PLAYER_HOST)
+    target_include_directories(mk9 PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${REXGLUE_ENTRYPOINT_INCLUDE_DIR})
+    target_link_libraries(mk9 PRIVATE rex::runtime)
+    rexglue_configure_target(mk9 GPU_PLUGINS xenos)
+    target_compile_definitions(mk9 PRIVATE MK9_PLAYER_HOST=1)
+    # what mk9.exe and mk9game.dll take from each other, read from this build's objects just before it links
+    set(MK9_LINK_DIR "${CMAKE_CURRENT_BINARY_DIR}/player")
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    get_filename_component(MK9_LLVM_BIN "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    add_custom_command(TARGET mk9 PRE_LINK
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../tools/player/boundary.py"
+            --llvm "${MK9_LLVM_BIN}" --config "${CMAKE_CURRENT_SOURCE_DIR}/config/mk9_codegen.toml"
+            --out "${MK9_LINK_DIR}" "$<TARGET_OBJECTS:mk9>"
+        COMMAND_EXPAND_LISTS VERBATIM)
+    target_link_options(mk9 PRIVATE "LINKER:/DEF:${MK9_LINK_DIR}/host_exports.def" "LINKER:${MK9_LINK_DIR}/mk9game.lib")
+else()
+    rexglue_setup_target(mk9 GPU_PLUGINS xenos)
+endif()
 target_compile_definitions(mk9 PRIVATE MK9_VERSION="${MK9_VERSION}")
 
 # The SDK built in-tree (REXSDK_DIR) does not pass on ImGui's include directory; its functions

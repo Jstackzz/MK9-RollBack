@@ -1,0 +1,21 @@
+#pragma once
+extern "C" int _Mtx_lock(void* mutex);    // MSVCP140.dll: what std::recursive_mutex::lock is
+extern "C" int _Mtx_unlock(void* mutex);  // and unlock
+namespace std {
+class recursive_mutex {
+ public:
+  void lock() { _Mtx_lock(this); }
+  void unlock() { _Mtx_unlock(this); }
+};
+template <class Mutex>
+class unique_lock {
+ public:
+  explicit unique_lock(Mutex& mutex) : mutex_(mutex) { mutex_.lock(); }
+  ~unique_lock() { mutex_.unlock(); }
+  unique_lock(const unique_lock&) = delete;
+  unique_lock& operator=(const unique_lock&) = delete;
+
+ private:
+  Mutex& mutex_;
+};
+}  // namespace std

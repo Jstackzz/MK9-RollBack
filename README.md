@@ -11,19 +11,19 @@ Xbox 360 disc image, translates the game's PowerPC code to C++ with the
 
 ## Playing
 
-1. Install [Build Tools for Visual Studio](https://visualstudio.microsoft.com/downloads/) with the
-   **Desktop development with C++** workload (the compiler's libraries; free).
-2. Download `MK9Online-<version>.zip` from [Releases](../../releases) and unpack it somewhere you can
-   write to (Documents, say), in a folder whose path has no `( ) & ^ %`: the compiler's tools cannot
-   build there (a second download's `MK9Online-0.3.2 (1)` is one; rename it first).
-3. Start `MK9Launcher.exe`, open **Build game**, pick your Mortal Kombat Komplete Edition disc image
-   (`.iso`) and press **Extract and build**. The first build takes about 15 minutes.
-4. Sign in (top right) and play: **Kasual** or **Ranked** (One vs One, Two vs Two, Test Your Luck),
+There is nothing to install and nothing else to download: the zip has everything.
+
+1. Download `MK9Online-<version>.zip` from [Releases](../../releases) and unpack it somewhere you can
+   write to (Documents, say).
+2. Start `MK9Launcher.exe`. It opens on **Build game**: pick your Mortal Kombat Komplete Edition disc image
+   (`.iso`; it finds it for you if it is beside MK9 Online or in your Downloads, Desktop or Documents) and
+   press **Extract and build**. That happens once and takes a few minutes.
+3. Sign in (top right) and play: **Kasual** or **Ranked** (One vs One, Two vs Two, Test Your Luck),
    **Lobbies**, or **Single player** for the game's own modes offline.
 
 The launcher updates itself from this repository's releases; when an update changes the game, it
-builds the game again on its own. If a build fails, the Build game page says why, and everything the
-build printed is in `games\mk9\build.log`.
+puts the game together again on its own (usually in seconds). If a build fails, the Build game page
+says why, and everything the build printed is in `games\mk9\build.log`.
 
 If the game crashes, the launcher keeps a crash report in `crashes\` beside it and offers to send it to
 the MK9 Online server, so whoever runs it can see what went wrong.
@@ -98,6 +98,9 @@ the MK9 Online server, so whoever runs it can see what went wrong.
   put one game a frame behind for the whole fight (docs/GAME.md, "Known gaps").
 - Until 0.5.6 rollbacks could crash the game in the health bars, in its memory bookkeeping and as a match ended, and a
   Radeon could lose the card in rollback fights. Fixed in 0.5.6 (docs/GAME.md, "Known gaps").
+- Until 0.5.7 you had to install Visual Studio Build Tools (several GB) before the game could be built, and the folder
+  could not have `( ) & ^ %` in its name. Since 0.5.7 the zip has everything and any folder works: only the game's own
+  code is compiled on your PC, which also takes a few minutes instead of 15 (mk9/player/README.md).
 
 ## Building from source
 

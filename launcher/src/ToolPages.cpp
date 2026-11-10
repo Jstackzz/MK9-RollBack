@@ -1,6 +1,7 @@
 #include "ToolPages.h"
 
 #include <QCheckBox>
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QComboBox>
@@ -23,6 +24,7 @@
 #include <QScreen>
 #include <QScrollArea>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QStorageInfo>
 #include <QThread>
 #include <QVBoxLayout>
@@ -44,28 +46,6 @@ QString humanBytes(qint64 b) {
     return QStringLiteral("%1 KB").arg(b / 1024);
 }
 
-// cmd.exe takes ( ) & ^ % for its own, and the game's link step goes through it with the compiler's path unquoted
-// (see build-game.cmd): the first folder on the path with one in its name, for the player to rename, or empty
-QString awkwardFolder(const QString& path) {
-    static const QRegularExpression awkward(QStringLiteral("[()&^%]"));
-    for (const QString& part : QDir::fromNativeSeparators(QDir(path).absolutePath()).split(QLatin1Char('/'), Qt::SkipEmptyParts))
-        if (part.contains(awkward)) return part;
-    return {};
-}
-
-QString renameAdvice(const QString& folder) {
-    QString plain = folder;
-    plain.remove(QRegularExpression(QStringLiteral(" ?\\(\\d+\\)")));  // a second download's " (1)"
-    plain.remove(QRegularExpression(QStringLiteral("[()&^%]")));
-    plain = plain.simplified();
-    if (plain.isEmpty() || plain == folder) plain = QStringLiteral("MK9Online");
-    return BuildPage::tr("The game cannot be built in this folder: \"%1\" has ( ) & ^ or % in its name, and the "
-                         "compiler's tools cannot work with that.\n\nClose MK9 Online, rename that folder (for example "
-                         "to \"%2\") or move MK9 Online's folder to a place without them (C:\\Games, say), then open "
-                         "MK9 Online again and build. Your settings and the extracted disc go with it.")
-        .arg(folder, plain);
-}
-
 QWidget* pathRow(QLineEdit* edit, QPushButton* browse) {
     auto* w = new QWidget;
     auto* h = new QHBoxLayout(w);
@@ -83,9 +63,9 @@ BuildPage::BuildPage(QWidget* parent) : Page(parent) {
     root->setContentsMargins(28, 20, 28, 16);
     root->setSpacing(14);
     root->addWidget(ui::pageHeader(tr("Build game"),
-                                   tr("The game is built on your PC from your own disc: the disc image is extracted "
-                                      "into the game's data folder, then the build compiles the game for this PC. "
-                                      "Nothing from the game is downloaded.")));
+                                   tr("Once, the game is put together on your PC from your own disc: pick the disc image "
+                                      "and press the button. It takes a few minutes. There is nothing else to install "
+                                      "or download.")));
     auto* columns = new QHBoxLayout;
     columns->setSpacing(16);
     root->addLayout(columns);
@@ -144,6 +124,8 @@ BuildPage::BuildPage(QWidget* parent) : Page(parent) {
         if (!f.isEmpty()) {
             image_->setText(native(f));
             cfg::set(QStringLiteral("games/%1/image").arg(gameId_), f);
+            // nothing built yet: picking the disc is all there is to do
+            if (paths::isPackage() && !QFileInfo::exists(cfg::gameExe(gameId_))) startExtract();
         }
     });
     connect(extract_, &QPushButton::clicked, this, &BuildPage::startExtract);
@@ -193,21 +175,58 @@ void BuildPage::refreshInfo() {
     const QString script = cfg::buildScript(gameId_);
     const QString args = cfg::buildArgs(gameId_);
     const QString line = args.isEmpty() ? native(script) : native(script) + QLatin1Char(' ') + args;
-    QString build = QFileInfo::exists(script) ? tr("Build: %1").arg(line) : tr("Build: %1 (not there yet)").arg(line);
-    const QString awkward = awkwardFolder(cfg::gameFolder(gameId_));
-    if (!awkward.isEmpty())
-        build += QLatin1Char('\n') + tr("It cannot build in this folder: rename \"%1\" first (( ) & ^ or % in its name).").arg(awkward);
-    scriptInfo_->setText(build);
+    scriptInfo_->setText(QFileInfo::exists(script) ? tr("Build: %1").arg(line) : tr("Build: %1 (not there yet)").arg(line));
 }
 
-bool BuildPage::folderUsable() {
-    const QString awkward = awkwardFolder(cfg::gameFolder(gameId_));
-    if (awkward.isEmpty()) return true;
-    const QString text = renameAdvice(awkward);
-    log_->line(text);
-    applog::write(QStringLiteral("build %1: not in \"%2\" (( ) & ^ or % in its name)").arg(gameId_, awkward));
-    QMessageBox::warning(this, tr("Rename the folder first"), text);
-    return false;
+// the first time: the disc image, if it is where a download or a copy usually ends up (beside MK9 Online, or in the
+// player's Downloads, Desktop or Documents, or a folder directly in one of those), filled in for the one button left.
+// Only an image with the very game this build is made from counts.
+void BuildPage::findDisc() {
+    if (step_ != Step::Idle || !image_->text().trimmed().isEmpty()) return;
+    const Game* g = GameData::instance().game(gameId_);
+    if (!g || g->discSha1.isEmpty()) return;
+    const QDir app(QCoreApplication::applicationDirPath());
+    QStringList folders = {app.absolutePath(), QFileInfo(app.absolutePath()).absolutePath()};
+    for (const auto where : {QStandardPaths::DownloadLocation, QStandardPaths::DesktopLocation, QStandardPaths::DocumentsLocation})
+        folders << QStandardPaths::writableLocation(where);
+    auto found = std::make_shared<QString>();
+    step_ = Step::Reading;
+    setBusy(true);
+    runWorker(
+        [folders, sha1 = g->discSha1, found] {
+            QStringList images;
+            const auto add = [&images](const QDir& dir) {
+                for (const QFileInfo& f : dir.entryInfoList({QStringLiteral("*.iso")}, QDir::Files))
+                    if (f.size() > (qint64(4) << 30)) images << f.absoluteFilePath();
+            };
+            for (const QString& folder : folders) {
+                if (folder.isEmpty()) continue;
+                const QDir dir(folder);
+                add(dir);
+                for (const QFileInfo& sub : dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) add(QDir(sub.absoluteFilePath()));
+            }
+            images.removeDuplicates();
+            for (const QString& path : images) {
+                xiso::Image disc;
+                QString error;
+                QByteArray data;
+                if (!disc.open(path, &error)) continue;
+                const xiso::Entry* xex = disc.find(QStringLiteral("default.xex"));
+                if (!xex || !disc.read(*xex, &data, &error)) continue;
+                if (QString::fromLatin1(QCryptographicHash::hash(data, QCryptographicHash::Sha1).toHex()).compare(sha1, Qt::CaseInsensitive) == 0) {
+                    *found = path;
+                    return;
+                }
+            }
+        },
+        [this, found] {
+            finishStep();
+            if (found->isEmpty()) return;
+            image_->setText(native(*found));
+            cfg::set(QStringLiteral("games/%1/image").arg(gameId_), *found);
+            log_->line(tr("Found your disc: %1. Press EXTRACT AND BUILD.").arg(native(*found)));
+            applog::write(QStringLiteral("build %1: disc image found at %2").arg(gameId_, native(*found)));
+        });
 }
 
 bool BuildPage::needsRebuild(const QString& gameId) {
@@ -249,7 +268,7 @@ void BuildPage::finishStep() {
 }
 
 void BuildPage::startExtract() {
-    if (step_ != Step::Idle || !folderUsable()) return;
+    if (step_ != Step::Idle) return;
     imagePath_ = QDir::fromNativeSeparators(image_->text().trimmed());
     if (!QFileInfo(imagePath_).isFile()) {
         log_->line(tr("Choose your disc image first."));
@@ -316,7 +335,7 @@ void BuildPage::onDiscRead(const std::shared_ptr<xiso::Image>& disc, const WorkR
     }
     QDir().mkpath(outDir_);
     const qint64 freeBytes = QStorageInfo(outDir_).bytesAvailable();
-    const qint64 needed = totalBytes_ + (qint64(512) << 20);  // the files, and a margin for saves and caches
+    const qint64 needed = totalBytes_ + (qint64(1) << 30);  // the files, the build (half a GB), saves and caches
     if (freeBytes >= 0 && freeBytes < needed) {
         log_->line(tr("Not enough free space on that drive: %1 needed, %2 free.").arg(humanBytes(needed), humanBytes(freeBytes)));
         finishStep();
@@ -359,7 +378,7 @@ void BuildPage::updateProgress() {
 }
 
 void BuildPage::runBuild() {
-    if (builder_ || step_ != Step::Idle || !folderUsable()) return;
+    if (builder_ || step_ != Step::Idle) return;
     const QString script = cfg::buildScript(gameId_);
     const QString args = cfg::buildArgs(gameId_);
     if (!QFileInfo::exists(script)) {
@@ -407,6 +426,15 @@ void BuildPage::runBuild() {
             keep(line);
             tail->append(line);
             if (tail->size() > 8) tail->removeFirst();
+            // "[12/270] Compiling ...": how far it is (the script's own "[2/3]" steps are not a count of files)
+            static const QRegularExpression compiled(QStringLiteral("^\\[(\\d+)/(\\d+)\\] "));
+            const QRegularExpressionMatch m = compiled.match(line);
+            if (m.hasMatch() && m.captured(2).toInt() > 3) {
+                const int n = m.captured(1).toInt(), of = m.captured(2).toInt();
+                progress_->setRange(0, 1000);
+                progress_->setValue(n * 1000 / of);
+                progress_->setFormat(tr("Compiling the game  -  %1 of %2 files").arg(n).arg(of));
+            }
         }
     });
     connect(p, &QProcess::finished, this, [this, p, keep, logFile, tail](int code, QProcess::ExitStatus st) {
@@ -420,7 +448,9 @@ void BuildPage::runBuild() {
         // the script's word is not enough: the game must be there (antivirus takes a new unsigned exe away)
         const QString exe = cfg::gameExe(gameId_);
         const bool exited = st == QProcess::NormalExit && code == 0;
-        const bool ok = exited && QFileInfo::exists(exe);
+        // (a package's game is two files: mk9game.dll is the part compiled here, see mk9/player/README.md)
+        const bool ok = exited && QFileInfo::exists(exe) &&
+                        (!paths::isPackage() || QFileInfo::exists(QDir(cfg::gameFolder(gameId_)).filePath(QStringLiteral("mk9game.dll"))));
         const QString logName = logFile ? native(logFile->fileName()) : QString();
         const QString where = logName.isEmpty() ? QString() : tr(" Everything it said is in %1.").arg(logName);
         QString verdict;

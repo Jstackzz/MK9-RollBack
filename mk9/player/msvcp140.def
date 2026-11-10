@@ -1,0 +1,4 @@
+LIBRARY MSVCP140.dll
+EXPORTS
+  _Mtx_lock
+  _Mtx_unlock

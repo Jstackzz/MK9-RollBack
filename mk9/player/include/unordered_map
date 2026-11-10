@@ -1,0 +1,14 @@
+// (the translated code never uses setjmp: only unused helpers in the generated header name this)
+#pragma once
+namespace std {
+template <class Key, class Value>
+struct unordered_map {
+  struct entry {
+    Key first;
+    Value second;
+  };
+  entry* find(const Key&);
+  entry* end();
+  Value& operator[](const Key&);
+};
+}  // namespace std

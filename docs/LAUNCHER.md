@@ -19,7 +19,8 @@ server/                  python -m server; python -m server.client (scripted pla
 
 ## Build
 
-Nothing is downloaded: Qt 6.12.0 is in `external\qt\6.12.0\msvc2022_64`, SDL3 (3.5.0, for controllers) is the
+This is a developer's build; a player needs none of it ([mk9/player/README.md](../mk9/player/README.md)). Nothing is
+downloaded: Qt 6.12.0 is in `external\qt\6.12.0\msvc2022_64`, SDL3 (3.5.0, for controllers) is the
 ReXGlue SDK's copy in `external\rexglue-sdk\thirdparty\sdl3`, MSVC and CMake/Ninja come from the VS 2026 Build Tools
 through `toolssenv.cmd`.
 

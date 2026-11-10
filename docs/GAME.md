@@ -425,16 +425,18 @@ own disc. `tools\package.ps1` (`New-PlayerPackage`) assembles `dist\MK9Online`:
 | part | from |
 |---|---|
 | `MK9Launcher.exe` + Qt | `build\launcher` (`launcher\build.cmd`) |
-| `toolchain\` | clang, lld-link and clang's headers out of `external\llvm` (~230 MB) |
+| Microsoft's C++ runtime DLLs | Visual Studio's `VC\Redist`, beside the launcher and in `games\mk9\sdk\bin` |
+| `toolchain\` | clang, lld-link and clang's headers out of `external\llvm`, ninja |
+| `games\mk9\host\mk9.exe` | everything but the game's code: `tools\build-player-host.cmd` -> `dist\host` |
 | `games\mk9\sdk\` | the ReXGlue runtime and codegen tool, built standalone and installed: `cmake --build external\rexglue-sdk\out\build\win-amd64` then `cmake --install ... --prefix dist\sdk` |
-| `games\mk9\project\` | the game's CMake project, `src`, `config`, a manifest pointing at `games\mk9\game` |
-| `games\mk9\build-game.cmd` | `tools\player\build-game.cmd` |
+| `games\mk9\project\` | what codegen reads: `config`, a manifest pointing at `games\mk9\game` |
+| `games\mk9\player\` | what the game's code compiles and links with: `mk9\player`, import libraries |
+| `games\mk9\build-game.cmd`, `build.ninja` | `tools\player\build-game.cmd`, written by `tools\player\make_build_ninja.py` |
 
-On the player's PC the launcher extracts the disc into `games\mk9\game` and runs
-`build-game.cmd`: codegen on their `default.xex`, then CMake + Ninja + clang against the prebuilt
-runtime (Visual Studio Build Tools with "Desktop development with C++" must be installed for the
-MSVC libraries and the Windows SDK). Tested here: the packaged build took about 12 minutes and
-the resulting `mk9.exe` boots to the hold point.
+On the player's PC the launcher extracts the disc into `games\mk9\game` and runs `build-game.cmd`: codegen on their
+`default.xex`, then ninja + clang compile the translated code into `mk9game.dll`, which the ready-made `mk9.exe` loads.
+Nothing has to be installed for that: [mk9/player/README.md](../mk9/player/README.md) says how. Tested here with a PATH
+of Windows only and no compiler environment: 2.5 minutes on 16 threads (`games\mk9\build.log` has what it printed).
 
 ## Rollback
 

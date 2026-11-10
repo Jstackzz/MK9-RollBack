@@ -1,0 +1,5 @@
+#pragma once
+extern "C" [[noreturn]] void abort(void);
+namespace std {
+using ::abort;
+}

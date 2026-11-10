@@ -1,0 +1,33 @@
+#pragma once
+namespace std {
+enum class memory_order : int {
+  relaxed = __ATOMIC_RELAXED,
+  consume = __ATOMIC_CONSUME,
+  acquire = __ATOMIC_ACQUIRE,
+  release = __ATOMIC_RELEASE,
+  acq_rel = __ATOMIC_ACQ_REL,
+  seq_cst = __ATOMIC_SEQ_CST,
+};
+inline constexpr memory_order memory_order_relaxed = memory_order::relaxed;
+inline constexpr memory_order memory_order_consume = memory_order::consume;
+inline constexpr memory_order memory_order_acquire = memory_order::acquire;
+inline constexpr memory_order memory_order_release = memory_order::release;
+inline constexpr memory_order memory_order_acq_rel = memory_order::acq_rel;
+inline constexpr memory_order memory_order_seq_cst = memory_order::seq_cst;
+
+inline void atomic_thread_fence(memory_order order) noexcept { __atomic_thread_fence(static_cast<int>(order)); }
+
+template <class T>
+class atomic {
+ public:
+  constexpr atomic(T value) noexcept : value_(value) {}
+  atomic(const atomic&) = delete;
+  atomic& operator=(const atomic&) = delete;
+  T load() const noexcept { return __atomic_load_n(&value_, __ATOMIC_SEQ_CST); }
+  T fetch_add(T n) noexcept { return __atomic_fetch_add(&value_, n, __ATOMIC_SEQ_CST); }
+  T fetch_sub(T n) noexcept { return __atomic_fetch_sub(&value_, n, __ATOMIC_SEQ_CST); }
+
+ private:
+  T value_;
+};
+}  // namespace std

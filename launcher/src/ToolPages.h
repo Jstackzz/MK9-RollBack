@@ -35,6 +35,7 @@ public:
     // built again before it plays online (netplay refuses two different releases)
     static bool needsRebuild(const QString& gameId);
     void rebuild();  // as if Build was clicked
+    void findDisc();  // nothing built or extracted yet: looks for the disc image where one usually is
 
 signals:
     void busyChanged(bool busy);
@@ -55,7 +56,6 @@ private:
     void updateProgress();
     // the build script from Settings (a source build: mk9\build.cmd release), its output streamed into the log
     void runBuild();
-    bool folderUsable();  // false, saying why, when the game's folder is one the build cannot work in
     void setBusy(bool busy);
 
     QLabel* gameTitle_;

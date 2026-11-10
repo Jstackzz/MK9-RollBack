@@ -11,6 +11,7 @@
 #   2. build: mk9\build.cmd release (to test), launcher\build.cmd, and the runtime for players:
 #        tools\devenv.cmd ; cmake --build external\rexglue-sdk\out\build\win-amd64 --config Release
 #        cmake --install external\rexglue-sdk\out\build\win-amd64 --config Release --prefix dist\sdk
+#      then the package's ready-made mk9.exe, against that runtime: tools\build-player-host.cmd
 #   3. . tools\release.ps1; New-Release -Notes "what changed"
 #      With the GitHub CLI (gh) signed in, the release is created and both files uploaded; without it,
 #      upload them on https://github.com/<repo>/releases/new under the tag v<version>.
@@ -19,7 +20,15 @@ function New-Release {
     $root = Split-Path $PSScriptRoot -Parent
     if (-not $root) { $root = "C:\Users\Owner\source\repos\mk9-rollback" }
     $version = (Get-Content (Join-Path $root "VERSION") -TotalCount 1).Trim()
-    if (-not (Test-Path (Join-Path $root "build\launcher\MK9Launcher.exe"))) { throw "build the launcher first (launcher\build.cmd)" }
+    # what ships must be built from what is here now (the launcher also embeds VERSION)
+    function Assert-Built([string]$Built, [string[]]$Sources, [string]$How) {
+        $b = Get-Item (Join-Path $root $Built) -ErrorAction SilentlyContinue
+        if (-not $b) { throw "${Built} is not there: $How" }
+        $newest = $Sources | ForEach-Object { Get-ChildItem (Join-Path $root $_) -Recurse -File } | Sort-Object LastWriteTime | Select-Object -Last 1
+        if ($newest.LastWriteTime -gt $b.LastWriteTime) { throw "$($newest.FullName) is newer than ${Built}: $How" }
+    }
+    Assert-Built "build\launcher\MK9Launcher.exe" @("launcher\src", "launcher\data", "launcher\CMakeLists.txt", "VERSION") "launcher\build.cmd"
+    Assert-Built "dist\host\mk9.exe" @("mk9\src", "mk9\CMakeLists.txt", "mk9\config", "mk9\VERSION") "tools\build-player-host.cmd"
     # a fresh folder each time (never one holding a test's disc link)
     $stage = Join-Path $root "dist\release-$version"
     if (Test-Path $stage) { throw "$stage exists: delete it first" }

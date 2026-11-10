@@ -8,15 +8,14 @@
 #include <rex/image_info.h>
 #include <rex/rex_app.h>
 
-// the recompiled image (generated/default/mk9_init.cpp)
-extern const rex::PPCImageInfo PPCImageConfig;
+#include "mk9/gameimage.h"
 
 class Mk9App : public rex::ReXApp {
  public:
   using rex::ReXApp::ReXApp;
 
   static std::unique_ptr<rex::ui::WindowedApp> Create(rex::ui::WindowedAppContext& ctx) {
-    return std::unique_ptr<Mk9App>(new Mk9App(ctx, "mk9", PPCImageConfig));
+    return std::unique_ptr<Mk9App>(new Mk9App(ctx, "mk9", *mk9::GameImage()));
   }
 
  protected:

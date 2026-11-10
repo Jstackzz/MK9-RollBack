@@ -1,0 +1,4 @@
+// The headers in this folder stand in for the C++ library's, and for some of the SDK's, while the game's translated
+// code compiles on a player's PC (mk9/player/README.md): only what that code uses, so nothing has to be installed for it.
+#pragma once
+#include <stdint.h>

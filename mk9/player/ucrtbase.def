@@ -1,0 +1,27 @@
+LIBRARY ucrtbase.dll
+EXPORTS
+  ceil
+  ceilf
+  copysign
+  copysignf
+  fma
+  fmaf
+  floor
+  floorf
+  fmod
+  fmodf
+  log2
+  log2f
+  nearbyint
+  nearbyintf
+  pow
+  powf
+  rint
+  rintf
+  round
+  roundf
+  sqrt
+  sqrtf
+  strlen
+  trunc
+  truncf

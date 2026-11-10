@@ -178,8 +178,8 @@ vtable `0x82081C40`, what it hands out `UFmodAudioComponent`s, see "Sounds"): a 
 +664, both UE3 arrays); `sub_82606510` takes one off the free list and returns 0 once it is empty, and the game's code
 then went on through the 0. Players saw it in scenes full of effects (Cyrax's air grab, Noob Saibot's teleport slam,
 the Church arena were named). A scripted fight leaves 47-48 of the 64 free, but that fight rolls back little: until
-0.5.6 every sound whose end a rollback took back kept its component for good ("Sounds"), 53-56 of the 64 in use a
-minute and a half into a lagged mashed fight against 8-13 since.
+0.5.6 every sound whose end a rollback took back kept its component for good ("Sounds"), 49-57 of the 64 in use a
+minute and a half into a lagged mashed fight against 9-13 since.
 
 - `fx.cpp`: when the pool is empty, the oldest effect in use is released through the game's own release
   (`sub_82606650`) and the spawn tries again, on the main thread only (the job workers that also spawn run beside each
@@ -558,8 +558,8 @@ started goes on playing through a rollback. Until 0.5.6:
 - A frame taken back left its sounds playing when the corrected frames never started them, the callback's user data
   a component that by then might be another sound's.
 - An end FMOD told of in a frame taken back was never told again: FMOD tells once, and the component's flag went back
-  with the frame. The component went on playing for the game. 108 ends went that way in the lagged fight below, and
-  53-56 of the 64 components were in use a minute and a half in, on the PC that rolled back most, with the pool's end
+  with the frame. The component went on playing for the game. 96 ends went that way in the lagged fight below, and 49-57
+  of the 64 components were in use a minute and a half in, on the PC that rolled back most, with the pool's end
   (`fx.cpp`) in sight in a longer match.
 
 `sound.cpp` now keeps FMOD to one sound for one start, on FMOD's side and at its interface:
@@ -573,12 +573,19 @@ started goes on playing through a rollback. Until 0.5.6:
 - One whose sound has ended meanwhile starts for real and muted (EventI's `setMute`, `+100` of its vtable, which the game
   never calls; an instance is unmuted when it next starts for real): the component lives on as it would, and FMOD tells
   of its end.
-- A start a frame away from a noted one of its event counts as that one (`kNearFrames`), on a frame's first run too: a
-  corrected input often moves a sound by a frame, and cut and started over it would be heard twice.
+- A start within 8 frames (`kNearFrames`, 133 ms) of a noted one of its event counts as that one, on a frame's first
+  run too (the note of the instance the game starts first, then of the very frame, then the oldest): a corrected input
+  moves a sound by a few frames, and cut and started over, or started beside the first, it would be heard twice. An
+  instance that already plays goes on as it is: FMOD's start does nothing to it. A note whose instance has gone on to
+  another sound stays, so that a start of its event does not play it again.
 - A start nothing noted (the real inputs made it, the guess had not) just plays.
-- A noted sound the corrected frames did not start again stops once they are a frame past it, with its event's fade
-  out; an instance of FMOD's pool goes back once silent. An instance a component in use holds from before that frame is
-  left to it.
+- A noted sound the corrected frames did not start again stops only when every frame up to 8 past it has run and can
+  no longer change (`net::Settled`: every player's real inputs have reached them), so a sound a later rollback's frames
+  would start is never cut first. It stops with its event's fade out; an instance of FMOD's pool goes back once silent.
+  An instance a component in use holds from before that frame is left to it. While a sound waits, a stop or release of
+  its instance by a component that held it from before is left out: no component that started it in the corrected frames
+  holds it, that start would have found the note. A sound only in a wrong guess so rings 9 to 12 frames (150-200 ms)
+  before its fade, of the 36 (600 ms) the game's sounds last at the median.
 - The ends told in frames taken back are told again as those frames run again, if the component still holds that handle.
 
 Nothing of this shows in the simulation, because all it can see of a start left out is what the first run saw: start's
@@ -590,9 +597,9 @@ seen to write no tracked memory on the simulation's threads but through that cal
 the executable's data (`MK9_RB_TRACE_FMOD=1`), and the C runtime's `rand()` it draws from is its alone. The strongest
 test: one game of a pair on the old behaviour (`MK9_RB_SOUND_AGAIN=1`) and the other on this, so that one really
 starts what the other leaves out, stays in step: a whole match each way round (Sub-Zero and Raiden, the old behaviour
-on the game that rolled back 72 times, 1,360 on the other; Ermac and Freddy Krueger, the old behaviour on the game
-that rolled back 959 times with 131 duplicates and up to 59 components in use against 25) had 0 differences in checks,
-draws, health and meters, and in `scriptcmp.py` only the thread m/o lines.
+on the game that rolled back 74 times, 1,484 on the other; Ermac and Freddy Krueger, the old behaviour on the game
+that rolled back 1,049 times with 176 duplicates and up to 58 components in use against 25) had 0 differences in
+checks, draws, health and meters, and in `scriptcmp.py` only the thread m/o lines.
 
 Measured on one lagged two-game fight (Sub-Zero and Raiden mashing, 62 ms each way, 35 of jitter, input delay 3; boot frame
 5700 to 9600; the same inputs, the same build, `MK9_RB_SOUND_AGAIN=1` for before), counted by `tools/soundcount.py` from
@@ -600,45 +607,47 @@ Measured on one lagged two-game fight (Sub-Zero and Raiden mashing, 62 ms each w
 
 | | before: game A | before: game B | after: game A | after: game B |
 |---|---|---|---|---|
-| rollbacks (frames run again) | 71 (207) | 527 (1,003) | 71 (191) | 505 (930) |
-| starts on frames' first runs | 682 | 593 | 695 | 628 |
-| duplicates heard: another instance beside the first | 13 | 38 | 0 | 0 |
-| duplicates heard: the same instance started over, it had ended | 1 | 26 | 0 | 0 |
-| repeats FMOD ignored: the same instance, its channels active | 23 | 64 | | |
-| repeats left out: the sound still plays, no call to FMOD | | | 36 | 129 |
-| repeats left out: it plays on another instance, this one muted | | | 0 | 1 |
-| starts only in the corrected frames, heard | 7 | 57 | 6 | 80 |
-| sounds of frames taken back no later run started | 0 | 12 played on | 0 | 9 stopped |
-| ends told in frames taken back | 41 lost | 108 lost | 39 told again | 137 told again |
-| FMOD instances stolen (the callback's type 3) | 6 | 29 | 0 | 0 |
-| components of the 64 in use at the end (the most) | 30-36 (41) | 53-56 (56) | 8-13 (20) | 8-13 (19) |
+| rollbacks (frames run again) | 74 (209) | 556 (1,110) | 71 (193) | 532 (1,018) |
+| starts on frames' first runs | 688 | 612 | 697 | 642 |
+| duplicates heard: another instance beside the first | 16 | 47 | 0 | 0 |
+| duplicates heard: the same instance started over, it had ended | 5 | 29 | 0 | 0 |
+| repeats FMOD ignored: the same instance, its channels active | 19 | 72 | | |
+| repeats left out: the sound still plays, no call to FMOD | | | 37 | 133 |
+| repeats left out: it plays on another instance, this one muted | | | 0 | 2 |
+| starts only in the corrected frames, heard | 8 | 75 | 6 | 74 |
+| sounds of frames taken back no later run started | 0 | 14 played on | 0 | 12 stopped |
+| ends told in frames taken back | 36 lost | 96 lost | 33 told again | 127 told again |
+| FMOD instances stolen (the callback's type 3) | 7 | 38 | 0 | 0 |
+| components of the 64 in use at the end (the most) | 31-36 (43) | 49-57 (57) | 8-13 (19) | 9-13 (20) |
 
 The games ran the same inputs but not the same frames (where a rollback falls differs from run to run), so the lines
-are of a kind, not equal. No start was muted for having ended in this fight or the matches below: at these lags a
-rollback is back before a sound is over. Whole matches on these sources, each to its end with both players mashing,
-all with 0 differences in checks, draws, health and meters (`tools/netcmp.py`; the last line of a net log, cut by
-stopping the game, aside), `tools/scriptcmp.py` showing only the known thread m/o effect lines, and 0 duplicates:
-Ermac and Freddy Krueger on The Pit (the game that rolled back most: 1,250 rollbacks, 425 repeats left out, 219 sounds
-only in corrected frames, 44 stopped, 21 components at most in use), Raiden and Cyber Sub-Zero (872, 309, 122, 15),
-Sub-Zero and Raiden (1,484, 679, 249, 36), and against a game held to 50 frames a second, 26 ms each way (1,484, 450,
-320, 60). A launcher-link match and its rematch (50 ms, 30 of jitter; 893 rollbacks, 307 left out, 136 corrected, 23
-stopped) the same, with the same results and 0 frames of the fights' scripts different; the two games' components in
-use stayed within 2 of each other (12 and 12 at the last count). The ghost sync test on the same sources (each
-rollback's frames first with an attack nobody pressed, then with the real inputs), 8 frames back every 4, Reptile and
-Sub-Zero: to frame 13,200 with no crash, 3,803 restores, 4,451 repeats left out (276 a frame off), 110 on another
-instance, 553 ended already and muted, 4,424 stopped, 12 components at most in use. 7 of its starts were heard again,
-each where a run of those frames with other inputs had given up on the sound before the run that started it.
+are of a kind, not equal. A start was muted for having ended twice in the matches below: at these lags a rollback is
+back before a sound is over. Whole matches on these sources, each to its end with both players mashing, all with 0
+differences in checks, draws, health and meters (`tools/netcmp.py`; the last line of a net log, cut by stopping the
+game, aside), `tools/scriptcmp.py` showing only the known thread m/o effect lines, and 0 duplicates: Ermac and Freddy
+Krueger on The Pit (the game that rolled back most: 1,179 rollbacks, 469 repeats left out, 198 sounds only in
+corrected frames, 24 stopped, 25 components at most in use), Raiden and Cyber Sub-Zero (1,209, 419, 179, 20), Sub-Zero
+and Raiden (1,547, 748, 272, 31), and against a game held to 50 frames a second, 26 ms each way (1,491, 472, 328, 61).
+A launcher-link match and its rematch (50 ms, 30 of jitter; 893 rollbacks, 316 left out, 161 corrected, 27 stopped)
+the same, with the same results and 0 frames of the fights' scripts different; the two games' components in use stayed
+within 1 of each other (12 and 12 at the last count). The ghost sync test on the same sources (each rollback's frames
+first with an attack nobody pressed, then with the real inputs), 8 frames back every 4, Reptile and Sub-Zero: to frame
+13,200 with no crash, 3,802 restores, 5,826 repeats left out (1,811 off their frame), 146 on another instance, 1,363
+ended already and muted, 1,576 stopped, 10 components at most in use, and 0 duplicates.
 
-How far off the sounds that stopped came back, over the traces of the game that rolled back most in the fight, the
-three matches, the one against 50 frames a second and the link test (a start of the event heard anew near a stopped
-sound; a trace cannot tell if it is the same sound). Before `kNearFrames`, 65 of 203 stopped sounds came back a frame
-off, stopped and played again (52 a frame later, 13 earlier; 62 of them `snd_foley_short`): 59 of the 63 of the link
-test, whose autopilot attacks on a rhythm, so that a sound moved by a frame every 128 frames, and 6 of the 140 of the
-rest. With it 54 sounds went on from a frame off (46 of them in the link test), and 2 of 187 stopped sounds came back
-a frame off, both after a second rollback, the first having stopped them by then. None of the link test's 23 stopped
-came back within 8 frames: the guess started `snd_foley_short` at frames 1798 and 1800, say, and the real inputs at
-1799 alone, so the first goes on and the second, rightly, stops. A corrected start further ahead of its note on the
-instance that plays it was never cut: FMOD's start does nothing, and the note goes.
+How far off the sounds that stopped came back (`soundcount.py`'s `came back` line: a start of the event heard anew
+near a stopped sound; a trace cannot tell if it is the same sound), over the game that rolled back most in the fight,
+the three matches, the one against 50 frames a second and the link test. Before any window 65 of 203 stopped sounds
+came back a frame off and 24 more within 8, stopped and played again: 59 of the 63 of the link test, whose autopilot
+attacks on a rhythm, so that a sound moved by a frame every 128 frames. In the fights a stopped sound came back within
+3 frames three times as often as a sound of its event just follows another (13.6% against 4.5%), and from 4 frames on
+no more often: a corrected input moves a sound by that much. `kNearFrames` is 8 so that any two of an event that
+close, one of them a wrong guess's, are one sound too, which would be heard as a repeat. With it none of the 175
+stopped came back within 8 frames, and 82 sounds went on from off their frame (46 of them in the link test). 16 came
+back 9 to 16 frames later, as often as a sound of the event comes anyway (9% against 11%): `snd_foley_short` every 9
+to 11 frames is the rhythm of attacks. 30 came back 17 to 32 frames later (17% against 8%): a quarter to half a second
+apart, two sounds to the ear. A corrected start further ahead of its note on the instance that plays it was never cut:
+FMOD's start does nothing, and the note goes.
 
 The real audio, what the guest hands the audio driver dumped by a private build (a hook of
 `XAudioSubmitRenderDriverFrame`): with every start of a fight sent the muted way the level of the fight's mix fell
@@ -648,11 +657,10 @@ most in use and 14) the mix's level hardly moved against the music and ambience,
 (the first difference's RMS) 13.7 and 12.1 thousandths: small beside the rest, and no one has listened to it.
 
 Not done: a sound a frame taken back stopped stays stopped (the component is told of its end as that frame runs
-again). A sound that comes back further off counts as another: of those 187 stopped, 18 came back two to four frames
-later (12 in the same rollback, 6 with a second) and 5 six to eight frames later, the first stopped and the second
-heard. A wider `kNearFrames` would keep more of them and let a wrong guess's sound ring longer before it stops. The
-log has the counts every 600 frames of a fight that rolls back (`mk9 sound: n starts on frames' first runs, m asked
-for by frames run again: ...`). `MK9_RB_SOUND_AGAIN=1` is the old behaviour, for comparisons.
+again). A sound only in a wrong guess is heard from its start until its fade: nothing can know sooner that it was
+wrong. Two starts of an event further than 8 frames apart count as two sounds. The log has the counts every 600 frames
+of a fight that rolls back (`mk9 sound: n starts on frames' first runs, m asked for by frames run again: ...`).
+`MK9_RB_SOUND_AGAIN=1` is the old behaviour, for comparisons.
 
 ## Known gaps
 

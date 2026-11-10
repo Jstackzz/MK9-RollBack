@@ -1234,6 +1234,13 @@ bool InSync() { return g_status == Status::InSync; }
 bool Waiting() { return g_waiting.load(); }
 uint32_t Frame() { return g_frame; }
 
+uint32_t Settled() {
+  if (!g_rolling) return rb::Armed() ? rb::OldestFrame() : UINT32_MAX;
+  uint32_t settled = g_frame;
+  for (const PeerState& p : g_peers) settled = std::min(settled, p.confirmed);
+  return settled;
+}
+
 bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agreed) {
   ApplyPending();
   if (g_status == Status::Off || (g_sock == INVALID_SOCKET && !g_cfg.watch)) return false;

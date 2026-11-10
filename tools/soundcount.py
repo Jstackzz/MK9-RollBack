@@ -9,7 +9,7 @@ else it comes "only in the corrected frames". What FMOD really did is the how wo
   kept    run again, the sound still plays: not started again (the fix)
   silent  run again, the sound ended already: started muted (the fix)
   moved   run again, another instance plays it: started muted, the sound goes on where it is (the fix)
-kept, silent and moved may come with " of <frame>": the note was a frame off, the sound started in that frame (a frame's
+kept, silent and moved may come with " of <frame>": the note was off its frame, the sound started in that frame (a frame's
 first run can find one too).
 Without the fix (MK9_RB_SOUND_AGAIN=1) every start says fresh; and FMOD's start does nothing when the instance plays with its
 channels active (0x10 in the state word on the line), so those are counted apart.
@@ -150,13 +150,48 @@ for line in open(path, errors="replace"):
 
 count_gone()
 
+
+def came_back(path):
+    """For each sound a rollback stopped: the nearest start of its event heard anew (how word first or fresh) after the restore
+    that took it back, by frames off its frame: what is heard as one sound cut and started over. A trace cannot tell if it is
+    the same sound: a sound of an event is often followed by another."""
+    start = re.compile(r"^(\d+) \d \d+ \S start \S+ event (\S+) \S* lr \S+ = \S+ (\S+)")
+    stop = re.compile(r"^\d+ \d \d+ \S stopped \S+ event (\S+) of frame (\d+)")
+    restore = re.compile(r"^\d+ \d \d+ \S restore (\d+)")
+    lines = open(path, errors="replace").read().splitlines()
+    heard = collections.defaultdict(list)
+    restores = []
+    for i, line in enumerate(lines):
+        if m := start.match(line):
+            if m.group(3) in ("first", "fresh"):
+                heard[m.group(2)].append((i, int(m.group(1))))
+        elif m := restore.match(line):
+            restores.append((i, int(m.group(1))))
+    bands = [(1, 3), (4, 8), (9, 16), (17, 32)]
+    counts = collections.Counter()
+    total = 0
+    for i, line in enumerate(lines):
+        m = stop.match(line)
+        if not m:
+            continue
+        total += 1
+        event, of = m.group(1), int(m.group(2))
+        back = next((r[0] for r in reversed(restores) if r[0] < i and r[1] <= of), None)
+        near = [abs(f - of) for j, f in heard[event] if back is not None and back < j < back + 1500 and 0 < abs(f - of) <= 32]
+        off = min(near, default=None)
+        counts[next((b for b in bands if off is not None and b[0] <= off <= b[1]), None)] += 1
+    text = ", ".join(f"{a}-{b} off {counts[(a, b)]}" for a, b in bands)
+    return f"{total} sounds stopped, came back: {text}; not within 32 frames {counts[None]}"
+
+
 print(path)
 print(f"  starts on frames' first runs: {first}")
 print(f"  in frames run again, heard: duplicates {same_instance + other_instance} ({same_instance} the same instance started "
       f"over, {other_instance} another beside the first), only in the corrected frames {corrected}")
 print(f"  in frames run again, asked of FMOD with no effect: {no_effect} (the instance plays, its channels active)")
-print(f"  not heard again: {kept} kept playing, {silent} ended already (muted), {moved} on another instance; {near} of them a frame off")
+print(f"  not heard again: {kept} kept playing, {silent} ended already (muted), {moved} on another instance; {near} of them off their frame")
 print(f"  sounds of frames taken back that no later run started: {stopped} stopped, {gone} left playing, {left_to_component} a component holds")
+print(f"  {came_back(path)}")
 print(f"  ends told in frames taken back: {dict(told_back)}; told again {told_again}, no longer the component's {told_not}")
 print(f"  threads: {dict(threads)}")
 print(f"  kinds: {dict(sorted(kinds.items()))}")

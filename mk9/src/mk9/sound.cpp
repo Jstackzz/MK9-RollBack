@@ -27,11 +27,13 @@
 //  - One whose sound has ended meanwhile starts for real, muted (EventI's setMute): the game's component then lives on
 //    as it would, and FMOD tells of its end. An instance is unmuted when it next starts for real. So does one that holds
 //    another instance than the one that plays (the event's list came out otherwise), and a stop of it stops the sound too.
-//  - A start a frame away from a noted one of its event counts as that one (kNearFrames): a corrected input often moves a
-//    sound by a frame, and cut and started over it would be heard twice.
+//  - A start within kNearFrames of a noted one of its event counts as that one, on a frame's first run too (the note of the
+//    instance the game starts first, then of the very frame, then the oldest): a corrected input moves a sound by a few
+//    frames, and cut and started over, or started beside the first, it would be heard twice.
 //  - A start nothing noted (the real inputs made it) just plays.
-//  - What the corrected frames did not start again stops once they are past it (kNearFrames later), with its event's fade
-//    out, and an instance of FMOD's pool goes back to it once silent.
+//  - What the corrected frames did not start again stops only when every frame up to kNearFrames past it has run and can no
+//    longer change (net::Settled), so a sound a later rollback's frames would start is never cut first. It stops with its
+//    event's fade out, and an instance of FMOD's pool goes back to it once silent.
 //  - The ends FMOD told of in frames taken back are told again as those frames run again, if the component still holds
 //    that handle.
 // What the simulation could see of a start left out is the first run's: start's answer (0, as when it was noted), the
@@ -63,6 +65,7 @@
 
 #include "mk9/frame.h"
 #include "mk9/game.h"
+#include "mk9/net/netplay.h"
 #include "mk9/net/rollback.h"
 
 REX_EXTERN(__imp__sub_82E46DE8);  // FMOD::Event::start(handle)
@@ -95,10 +98,11 @@ constexpr uint32_t kDeviceFree = 664;       // and those free
 constexpr uint32_t kNames = 0x834161DC;     // UE3's table of names
 constexpr uint32_t kCallback = 0x82603360;  // the audio component's event callback
 constexpr uint32_t kEventFinished = 4;      // FMOD_EVENT_CALLBACKTYPE_EVENTFINISHED
-// How far from a noted start of its event a start still counts as that sound. Of 203 sounds of frames taken back in lagged
-// fights and a link test with rhythmic attacks, 65 came back a frame off (52 a frame later, 13 earlier; 62 snd_foley_short):
-// without this they were stopped and played again. 15 came back two to four frames later, and those still are
-constexpr uint32_t kNearFrames = 1;
+// How far from a noted start of its event a start still counts as that sound. In lagged fights and a link test with rhythmic
+// attacks a sound a rollback stopped came back 1 to 3 frames off far more often than a sound of its event follows any other;
+// from 4 on no more often. 8 frames (133 ms) also takes as one what would be heard as one sound twice: any two of an event
+// that close, one of them a wrong guess's
+constexpr uint32_t kNearFrames = 8;
 
 const bool g_on = [] {
   const char* v = std::getenv("MK9_RB_SOUND_AGAIN");
@@ -193,12 +197,14 @@ uint32_t ParentOf(uint32_t event) {
 
 // the instance a note's handle means now is still that sound's event's
 bool StillIts(PPCContext& ctx, uint8_t* base, const Start& s) {
+  if (!s.handle) return false;
   const uint32_t event = EventOf(ctx, base, s.handle);
   return event && ParentOf(event) == s.parent;
 }
 
 // a note's sound still plays: the instance has been started and has not ended, what FMOD's own start looks at
 bool StillPlaying(PPCContext& ctx, uint8_t* base, const Start& s) {
+  if (!s.handle) return false;
   const uint32_t event = EventOf(ctx, base, s.handle);
   return event && ParentOf(event) == s.parent && (game::ReadU32(event + kEventFlags) & kEventRunning) != 0;
 }
@@ -284,21 +290,22 @@ uint32_t& NthOf(uint32_t event) {
   return g_nth.back().second;
 }
 
-// what g_back holds of a start in this frame: the note of the very frame, event and place among the event's starts; else
-// another of the event in this frame; else the nearest within kNearFrames, one behind this frame first (it ends otherwise)
-bool TakenBack(uint32_t frame, uint32_t event, uint32_t nth, Start* out) {
-  const Start* best = nullptr;
-  const auto rank = [&](const Start& s) { return s.frame == frame ? 0 : s.frame < frame ? 1 : 2; };
+// what g_back holds of a start in this frame on `handle` (0: not known yet), of its event within kNearFrames: the note of that
+// instance (an instance plays one sound: this start is that sound); else the very frame and place among the event's starts;
+// else the oldest, the first that would stop if nothing took it
+bool TakenBack(uint32_t frame, uint32_t event, uint32_t nth, uint32_t handle, Start* out) {
+  const Start* same = nullptr;
+  const Start* exact = nullptr;
+  const Start* oldest = nullptr;
   for (const Start& s : g_back) {
     if (s.event != event) continue;
-    if (s.frame == frame && s.nth == nth) {
-      *out = s;
-      return true;
-    }
     const uint32_t off = s.frame > frame ? s.frame - frame : frame - s.frame;
     if (off > kNearFrames) continue;
-    if (!best || rank(s) < rank(*best)) best = &s;
+    if (handle && s.handle == handle && (!same || s.frame < same->frame)) same = &s;
+    if (s.frame == frame && s.nth == nth) exact = &s;
+    if (!oldest || s.frame < oldest->frame) oldest = &s;
   }
+  const Start* best = same ? same : exact ? exact : oldest;
   if (best) *out = *best;
   return best != nullptr;
 }
@@ -424,18 +431,20 @@ void OnRunAgain(PPCContext& ctx, uint8_t* base) {
     back = g_back;
   }
   // nothing the simulation holds answers for these sounds now: the components they tell of went back with the frames
-  for (const Start& s : back) ClearCallback(ctx, base, s.handle);
+  for (const Start& s : back)
+    if (s.handle) ClearCallback(ctx, base, s.handle);
 }
 
 void OnFrameEnd(PPCContext& ctx, uint8_t* base) {
   if (!g_on || !rb::Armed()) return;
-  const uint32_t now = rb::CurrentFrame();
+  const uint32_t now = rb::CurrentFrame(), settled = net::Settled();
   std::vector<Start> gone;
   std::vector<Told> tell;
   {
     std::lock_guard lock(g_lock);
     if (g_back.empty() && g_tell.empty()) return;
-    const auto past = [&](const Start& s) { return s.frame + kNearFrames <= now; };
+    // the frames that could start it again have run and no later rollback will run them otherwise
+    const auto past = [&](const Start& s) { return s.frame + kNearFrames <= now && s.frame + kNearFrames < settled; };
     for (const Start& s : g_back)
       if (past(s)) gone.push_back(s);
     std::erase_if(g_back, past);
@@ -494,7 +503,7 @@ void OnFrameTop(PPCContext& ctx, uint8_t* base) {
   if (g_on && now - last_logged >= 600 && g_stats.again != 0) {
     last_logged = now;
     REXLOG_INFO("mk9 sound: {} starts on frames' first runs, {} asked for by frames run again: {} still playing, {} on another "
-                "instance, {} ended already (muted), {} new; {} of those a frame off; {} sounds of frames taken back stopped, {} "
+                "instance, {} ended already (muted), {} new; {} of those off their frame; {} sounds of frames taken back stopped, {} "
                 "ends told again",
                 g_stats.first, g_stats.again, g_stats.kept, g_stats.moved, g_stats.silent, g_stats.fresh, g_stats.near,
                 g_stats.stopped, g_stats.told);
@@ -523,7 +532,7 @@ REX_HOOK_RAW(sub_82A30498) {
   __imp__sub_82A30498(ctx, base);
 }
 
-// Asked for an instance: when a frame taken back started this event (this frame, or kNearFrames off), the one that still
+// Asked for an instance: when a frame taken back started this event (this frame, or up to kNearFrames off), the one that still
 // plays. It never gets one nobody asked for in place of it: the instance would play beside it, or steal it
 REX_HOOK_RAW(sub_82E55D98) {
   const uint32_t group = ctx.r3.u32, index = ctx.r4.u32, mode = ctx.r5.u32, out = ctx.r6.u32, lr = uint32_t(ctx.lr);
@@ -532,7 +541,7 @@ REX_HOOK_RAW(sub_82E55D98) {
     bool found;
     {
       std::lock_guard lock(g_lock);
-      found = TakenBack(rb::CurrentFrame(), t_event, NthOf(t_event), &was);
+      found = TakenBack(rb::CurrentFrame(), t_event, NthOf(t_event), 0, &was);
     }
     if (found && StillPlaying(ctx, base, was)) {
       game::WriteU32(out, was.handle);
@@ -560,7 +569,7 @@ REX_HOOK_RAW(sub_82E46DE8) {
     {
       std::lock_guard lock(g_lock);
       nth = NthOf(event);
-      found = TakenBack(now, event, nth, &was);
+      found = TakenBack(now, event, nth, handle, &was);
     }
     char of[32] = "";
     if (found && was.frame != now) std::snprintf(of, sizeof(of), " of %u", was.frame);
@@ -595,17 +604,26 @@ REX_HOOK_RAW(sub_82E46DE8) {
     }
     const uint32_t before = Trace() ? StateOf(ctx, base, handle) : 0;
     const uint32_t instance = EventOf(ctx, base, handle);
-    if (muted) g_muted_any = true;
-    if (instance && (muted || (game::ReadU32(instance + kEventFlags) & kEventMuted))) SetMute(ctx, base, instance, muted);
+    // an instance that plays already goes on as it is: FMOD's start does nothing to it, and muted it would cut that sound
+    const bool running = instance && (game::ReadU32(instance + kEventFlags) & kEventRunning) != 0;
+    const bool mute = muted && !running;
+    if (mute) g_muted_any = true;
+    if (instance && !running && (mute || (game::ReadU32(instance + kEventFlags) & kEventMuted))) SetMute(ctx, base, instance, mute);
     __imp__sub_82E46DE8(ctx, base);
     const uint32_t result = ctx.r3.u32;
     if (result == 0) {
-      if (muted && instance) SetMute(ctx, base, instance, true);  // its channel group is there now
+      if (mute && instance) SetMute(ctx, base, instance, true);  // its channel group is there now
       const uint32_t parent = instance ? ParentOf(instance) : 0;
       std::lock_guard lock(g_lock);
       if (found) Forget(was);
-      // a start of this instance ends what it played before: no later frame's stop for that, no end to tell of it
-      std::erase_if(g_back, [&](const Start& s) { return s.handle == handle; });
+      // A start of this instance ends what it played before: no later frame's stop for that, no end to tell of it. It takes
+      // over a sound that plays; a note of a sound that is over stays without its instance, for a start of its event in the
+      // frames to come not to play that again
+      if (running)
+        std::erase_if(g_back, [&](const Start& s) { return s.handle == handle; });
+      else
+        for (Start& s : g_back)
+          if (s.handle == handle) s.handle = 0;
       std::erase_if(g_tell, [&](const Told& t) { return t.handle == handle; });
       std::erase_if(g_stands, [&](const Stand& s) { return s.held == handle; });
       if (stand_for) g_stands.push_back({handle, stand_for});
@@ -637,20 +655,20 @@ REX_HOOK_RAW(sub_82E46DE8) {
   }
 }
 
-// A frame run again stops or releases what its component held then. When a later frame's sound has that instance by now
-// (a handle's value comes back with the instance, and an instance of an event's list goes on to the next sound), that
-// would stop the later sound, which the frames run again have yet to come to
-bool LaterSoundsNow(uint32_t handle) {
-  if (!Active() || !frame::Replaying()) return false;
-  const uint32_t now = rb::CurrentFrame();
+// A frame stops or releases what its component held then. When a sound of a frame taken back has that instance by now and
+// waits to see if a frame starts it (a handle's value comes back with the instance, and an instance of an event's list goes
+// on to the next sound), that would cut the sound, which the corrected frames may yet come to. No component that started
+// it in those frames holds it: that start would have found the note
+bool WaitingSoundHas(uint32_t handle) {
+  if (!Active() || !handle) return false;
   std::lock_guard lock(g_lock);
-  return std::any_of(g_back.begin(), g_back.end(), [&](const Start& s) { return s.handle == handle && s.frame >= now; });
+  return std::any_of(g_back.begin(), g_back.end(), [&](const Start& s) { return s.handle == handle; });
 }
 
 REX_HOOK_RAW(sub_82E46E28) {
   const uint32_t handle = ctx.r3.u32, immediate = ctx.r4.u32, lr = uint32_t(ctx.lr);
-  if (LaterSoundsNow(handle)) {
-    Line("stop %08X now %u lr %08X left to a later frame's sound", handle, immediate, lr);
+  if (WaitingSoundHas(handle)) {
+    Line("stop %08X now %u lr %08X left to a sound that waits", handle, immediate, lr);
     ctx.r3.u64 = 0;
     return;
   }
@@ -667,8 +685,8 @@ REX_HOOK_RAW(sub_82E46E28) {
 
 REX_HOOK_RAW(sub_82E46D90) {
   const uint32_t handle = ctx.r3.u32, lr = uint32_t(ctx.lr);
-  if (LaterSoundsNow(handle)) {
-    Line("release %08X lr %08X left to a later frame's sound", handle, lr);
+  if (WaitingSoundHas(handle)) {
+    Line("release %08X lr %08X left to a sound that waits", handle, lr);
     ctx.r3.u64 = 0;
     return;
   }

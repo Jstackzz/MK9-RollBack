@@ -68,6 +68,9 @@ const char* StatusName(Status s);
 
 // the frame numbers of the match in sync: the frame running now (0 at the barrier)
 uint32_t Frame();
+// frames below this will not change any more: every player's real inputs have reached them, or (rollback without a match,
+// the sync test) rollback no longer keeps them. No limit when rollback is off. Main thread
+uint32_t Settled();
 
 // The barrier: the game layer calls this on the main thread at the match's setup point with
 // what it must agree on (words). It returns once every player arrived (true) or on timeout or a

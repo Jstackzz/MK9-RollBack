@@ -9,6 +9,7 @@
 #include "mk9/link.h"
 #include "mk9/names.h"
 #include "mk9/snap.h"
+#include "mk9/sound.h"
 
 namespace mk9::fibers {
 uint64_t Switches();
@@ -262,6 +263,7 @@ void Top(PPCContext& ctx, uint8_t* base) {
   Cap();
   g_pacing.Top();
   gmalloc::OnFrameTop(ctx, base);
+  sound::OnFrameTop(ctx, base);
   if (g_top) g_top(ctx, base);
 }
 
@@ -269,9 +271,11 @@ void Top(PPCContext& ctx, uint8_t* base) {
 
 void RunAgain(PPCContext& ctx, uint8_t* base) {
   g_replaying.store(true, std::memory_order_relaxed);
+  sound::OnRunAgain(ctx, base);
   BeforeTick(ctx, base);
   ctx.lr = 0x823668D8;  // the tick's return address, as GuardedMain calls it (0x823668D4)
   __imp__sub_823621F8(ctx, base);
+  sound::OnFrameEnd(ctx, base);
   g_frames.fetch_add(1, std::memory_order_relaxed);
   if (g_end) g_end(ctx, base);
   AfterTick(ctx, base);
@@ -290,6 +294,7 @@ REX_HOOK_RAW(sub_82366BF8) {
 REX_HOOK_RAW(sub_823621F8) {
   using namespace mk9::frame;
   __imp__sub_823621F8(ctx, base);
+  mk9::sound::OnFrameEnd(ctx, base);
   const uint64_t n = g_frames.fetch_add(1, std::memory_order_relaxed) + 1;
   if (g_end) g_end(ctx, base);
   mk9::snap::OnFrame(n);

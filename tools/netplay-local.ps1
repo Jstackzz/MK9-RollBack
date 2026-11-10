@@ -8,10 +8,11 @@
 # -Sites: each game logs its random draws per call site at every check (sites.txt)
 # -TraceScript: each game logs the script processes it makes, their random draws and its rollbacks
 #   (script.txt; tools\scriptcmp.py compares two)
+# -TraceSound: each game logs what it asks of FMOD (sound.txt; tools\soundcount.py counts a game's sound starts)
 function Start-NetplayLocal {
     param([Parameter(Mandatory = $true)][string]$Out, [string]$Mode = "lockstep", [int]$Delay = 2,
           [int]$Lag = 0, [int]$Jitter = 0, [string]$Snaps = "2200,3400,4600,5400,5900,6400",
-          [int]$MeetFrame = 2100, [switch]$ContinueOnDesync, [switch]$TraceRand, [switch]$AttackB, [switch]$Sites, [switch]$TraceScript, [string]$Extra = "")
+          [int]$MeetFrame = 2100, [switch]$ContinueOnDesync, [switch]$TraceRand, [switch]$AttackB, [switch]$Sites, [switch]$TraceScript, [switch]$TraceSound, [string]$Extra = "")
     $root = Split-Path $PSScriptRoot -Parent
     if (-not $root) { $root = "C:\Users\Owner\source\repos\mk9-rollback" }
     $bin = Join-Path $root "mk9\out\build\win-amd64-release"
@@ -43,6 +44,7 @@ function Start-NetplayLocal {
         if ($TraceRand) { $envs["MK9_TRACE_RAND"] = (Join-Path $d "rand.txt") }
         if ($Sites) { $envs["MK9_NET_SITES_LOG"] = (Join-Path $d "sites.txt") }
         if ($TraceScript) { $envs["MK9_TRACE_SCRIPT"] = (Join-Path $d "script.txt") }
+        if ($TraceSound) { $envs["MK9_TRACE_SOUND"] = (Join-Path $d "sound.txt") }
         foreach ($k in $envs.Keys) { Set-Item "Env:$k" $envs[$k] }
         $procs += Start-Process -FilePath (Join-Path $bin "mk9.exe") -WorkingDirectory $bin -PassThru -ArgumentList `
             "--game_data_root=$disc", "--user_data_root=$(Join-Path $d 'user')", "--log_file=$(Join-Path $d 'game.log')"

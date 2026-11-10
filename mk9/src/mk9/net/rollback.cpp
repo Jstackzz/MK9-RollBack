@@ -57,7 +57,8 @@ const bool g_trace_foreign = [] {
   return v && *v == '1';
 }();
 // MK9_RB_TRACE_FMOD=1 (diagnostics): the tracked pages a simulation thread first writes from FMOD's code (0x82DC0000 to
-// 0x82F00000, with its memory module), with the guest's stack: FMOD's state a restore would put back without its heap
+// 0x82E79000; what lies above it is the HUD's UI library, Scaleform GFx, which this took for FMOD until 2026-11-04), with
+// the guest's stack: FMOD's state a restore would put back without its heap
 const bool g_trace_fmod = [] {
   const char* v = std::getenv("MK9_RB_TRACE_FMOD");
   return v && *v == '1';
@@ -279,7 +280,7 @@ void Take(uint32_t page, uint32_t va) {
       returns[0] = uint32_t(ts->context()->lr);
       const int n = 1 + game::StackReturns(*ts->context(), returns + 1, 9);
       static std::vector<uint32_t> told;
-      if (std::any_of(returns, returns + n, [](uint32_t a) { return a >= 0x82DC0000 && a < 0x82F00000; }) &&
+      if (std::any_of(returns, returns + n, [](uint32_t a) { return a >= 0x82DC0000 && a < 0x82E79000; }) &&
           told.size() < 400 && std::find(told.begin(), told.end(), page) == told.end()) {
         told.push_back(page);
         std::string chain;

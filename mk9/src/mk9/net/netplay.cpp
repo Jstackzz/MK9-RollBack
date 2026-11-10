@@ -76,8 +76,9 @@ constexpr auto kBarrierTimeout = std::chrono::seconds(60);
 // keeps, rb::kKeepFrames)
 constexpr uint32_t kMaxPredict = 8;
 // rollback: the first frames of a fight take no input on any PC, so no rollback goes back into them. There the game
-// sets the fight's sounds up through FMOD, which rollback does not put back, and every rollback to the fight's first
-// frame crashed in FMOD (docs/GAME.md, "Known gaps"). Half a second, inside the fight's intro
+// sets the fight's HUD up in its UI library (Scaleform GFx, long taken for FMOD) and readies its sounds, and every
+// rollback to the fight's first frame crashed in that library (docs/GAME.md, "Known gaps"). Half a second, inside the
+// fight's intro
 constexpr uint32_t kQuietFrames = 30;
 // rollback: how much longer a restore waits for a hold that timed out (engine::WaitHeld) before the guesses wait for a
 // later frame's top; after such a wait in vain, how much the next one waits
@@ -1232,6 +1233,13 @@ Status GetStatus() { return g_status.load(); }
 bool InSync() { return g_status == Status::InSync; }
 bool Waiting() { return g_waiting.load(); }
 uint32_t Frame() { return g_frame; }
+
+uint32_t Settled() {
+  if (!g_rolling) return rb::Armed() ? rb::OldestFrame() : UINT32_MAX;
+  uint32_t settled = g_frame;
+  for (const PeerState& p : g_peers) settled = std::min(settled, p.confirmed);
+  return settled;
+}
 
 bool Meet(const std::vector<uint32_t>& words, uint32_t my_seed, Agreement& agreed) {
   ApplyPending();

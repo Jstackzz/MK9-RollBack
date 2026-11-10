@@ -461,7 +461,10 @@ restore is only right if the memory it puts back is the simulation's and nothing
    once the hold is complete: a hold that timed out (200 ms; the rendering thread waiting for the
    GPU) is waited for up to 1.5 s more (`engine::WaitHeld`), and if it still is not complete the
    wrong guess is put right at a later frame's top, and a fight's end waits for that before lockstep.
-   Until 2026-11-04 the restore went on under the threads still running ("Known gaps").
+   Until 2026-11-04 the restore went on under the threads still running ("Known gaps"). A frame's
+   undo log closes only once the hold is complete too (`CloseHold` in `net/netplay.cpp`, the same wait, since 2026-11-10):
+   what a thread still running writes after the close is in no frame's log unless a kept frame also wrote the page, and
+   a restore leaves the rest as that thread wrote it ("Known gaps").
 2. **Whose memory.** `GMalloc` (the MemoryManager at `0x83423BA8`) is routed from boot on
    (`gmalloc.cpp`): the simulation's threads allocate from the simulation heap (a TLSF heap in a
    region of its own, its bookkeeping inside it), FMOD (its allocator, called from its code, UE3's
@@ -724,6 +727,45 @@ of a fight that rolls back (`mk9 sound: n starts on frames' first runs, m asked 
 `MK9_RB_SOUND_AGAIN=1` is the old behaviour, for comparisons.
 
 ## Known gaps
+
+- **A frame closed with the rendering thread still running: blocks with two owners, the level list's crash** (found and fixed
+  2026-11-10): an access violation on the main thread at `sub_82875618+0x18C`, called from `sub_828FCDE0+0x343`, in a frame run
+  again a few seconds into a fight. Seen twice: a player's report (0.5.2, frame 420, 30 rollbacks) and 1 of 11 lagged test
+  matches (0.5.6, a rematch's frame 107, 5 rollbacks). `sub_828FCDE0` is `UWorld::ProcessLevelStreamingVolumes`, which goes
+  through the world's level list (`GWorld+452` data, `+456` count: a `TArray<ULevelStreaming*>`, its 132-byte block made again
+  by `sub_82A5C1B8`); `sub_82875618` is the cast it gives each entry, and the list held a small number (`1` at index 1 in the
+  report, `0x30D` at index 0 in the test).
+  1. The fault: a frame's undo log closed at the frame's top even when the hold had timed out (200 ms: the rendering thread
+     that far behind the main thread). Since 2026-11-04 a restore waits for a complete hold, but the frames before it were
+     already closed. What the rendering thread did after the close went to the pending log, and a restore puts back only
+     pages some kept frame also wrote: the heap's lists (on pages every frame writes) went back, and what that thread had
+     taken or freed since stayed taken or freed. A block it took is then free for the heap and still its own; a block it freed
+     has a free flag and is on no list, so the frame run again frees it once more ("freed twice", on the rendering thread).
+  2. What the tests show (`MK9_TEST_RENDER_STALL=<every>:<ms>:<from>` stops the rendering thread that long in a scene command, so
+     holds time out; `MK9_SYNCTEST_ON_STALL=1` makes the sync test go back at every such stall; these are private test patches):
+     on the old code the sync test, 4 frames back after every stall, crashed in all 5 runs (between the 6th and the 203rd
+     rollback, in the rendering thread's commands and frees, `freed twice`, pointers of `0x7C` and 0) with the heap's lists
+     failing a consistency check right after a restore; lagged matches with stalls, 5 runs: 4 with blocks freed twice (7 to 9),
+     one of them with the heap check failing 40 times, 3 crashed. A ledger of who owns each simulation block (kept beside the
+     heap, a frame's changes undone with the frame, what a thread did with no frame open left alone) found, per stall, 109 to 206 blocks
+     (22 on average of 100 to 160 bytes, the size of the list's block) taken by the rendering thread and about 213 freed by it
+     with no frame open, and from the first restore on blocks with two owners: at each restore blocks went back to the main
+     thread that the rendering thread held, and were given out again. One of them is the level list: 64 rebuilds in one run
+     gave the list a block with, inside it, a 32-byte block the rendering thread had taken after a stall 1,200 frames
+     before and (by the ledger) still held: at the 21st slot, past the 12 in use there, so no crash that time. With the fix the
+     same tests show none of it: all 3 sync test runs reached their last frame (257 rollbacks after stalls each), heap
+     checks pass, no block is taken or freed with no frame open, the ledger finds no block with two owners; 4 lagged matches
+     with stalls, no block freed twice.
+     The ledger stays silent without a stall: 3 plain lagged matches with rematches on the old code, no hold timed out, 2,516
+     rollbacks, no block with two owners, every heap check passed. The exact crash (the cast given a small number from the
+     list's first slots) was not reproduced in the tests: what is shown is every step up to it. A hold timing out by itself
+     is not rare: 3 times in 26 games of the plain lagged matches.
+  3. The fix: `CloseHold` in `net/netplay.cpp` and the sync test wait for a timed-out hold before the frame closes (1.5 s, 100 ms
+     when the last such wait was in vain, as a restore's wait). What is left: a hold still not complete after that wait
+     closes the frame as before, and a frame-top hitch as long as the rendering thread's delay replaces the 200 ms one.
+     Tested on the final code: 4 lagged matches with rematches (12 matches), no crash, every check equal, the script traces
+     equal in the rematches (the first match's opening object ids differ, as before); the ghost sync test 8 back every 4 to
+     frame 12000 (1,598 rollbacks), no crash.
 
 - **A Radeon's graphics card lost in rollback fights** (found and fixed 2026-11-05): `DXGI_ERROR_DEVICE_HUNG` in 7 reports
   from 0.5.2 to 0.5.5, all from one PC (Ryzen 5 5500, Radeon RX 6600, Windows 11 26H2) under two names, 6 to 148 s into

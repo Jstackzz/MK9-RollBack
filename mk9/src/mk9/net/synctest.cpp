@@ -50,7 +50,8 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
   if (!rb::Armed()) return;
   // the rendering thread done with what the frame queued and the job workers in their idle waits:
   // nothing of theirs runs while memory is kept or goes back
-  if (!engine::Hold()) REXLOG_WARN("mk9 synctest: the other simulation threads were not all idle at frame {}", n);
+  if (!engine::Hold() && !engine::WaitHeld(1500))
+    REXLOG_WARN("mk9 synctest: the other simulation threads were not all idle at frame {}", n);
   rb::CloseFrame();
   g_hash[n - 1] = rb::LastFrameHash();
   g_pages[n - 1] = rb::LastFramePageList();
@@ -79,7 +80,7 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
         rb::OpenFrame(uint32_t(f), ctx);
         engine::Release();
         frame::RunAgain(ctx, base);
-        engine::Hold();
+        if (!engine::Hold()) engine::WaitHeld(1500);
         rb::CloseFrame();
         const uint64_t again = rb::LastFrameHash();
         g_checked++;

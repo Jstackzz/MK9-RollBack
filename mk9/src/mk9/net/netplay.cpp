@@ -855,6 +855,16 @@ void Lost(Status s) {
   input::SetSource(nullptr);
 }
 
+// A frame's undo log is closed with every simulation thread stopped. What a thread still running writes after the close
+// goes to the pending log, and a restore that comes next puts back only pages some kept frame also wrote: the rest stays
+// as that thread wrote it, half of the frames taken back (the heap's lists back and a block's free flag not: blocks then
+// freed twice or handed out twice). So a hold that timed out (the rendering thread behind, a pipeline compiling) is waited
+// for before the frame closes, briefly when the last such wait was in vain
+void CloseHold() {
+  if (engine::Hold() || engine::WaitHeld(g_hold_fails ? kRestoreHoldShortMs : kRestoreHoldMs)) g_hold_fails = 0;
+  else g_hold_fails++;
+}
+
 // Inputs that came in for frames that ran on a guess: when a guess was wrong, put the game back to
 // the top of that frame and run the frames since again with what is known now. False when the game
 // cannot go back that far (it then no longer runs what the others run).
@@ -916,7 +926,7 @@ bool CorrectGuesses(PPCContext& ctx, uint8_t* base) {
     const auto b = Clock::now();
     frame::RunAgain(ctx, base);  // its end hook moves g_frame on
     const auto c = Clock::now();
-    engine::Hold();
+    CloseHold();
     const auto d = Clock::now();
     rb::CloseFrame();
     g_replay.logs_ms += Ms(b - a) + Ms(Clock::now() - d);
@@ -1077,7 +1087,7 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
   if (g_status != Status::InSync) return;
   bool sent = false;
   if (g_rolling) {
-    if (engine::Hold()) g_hold_fails = 0;
+    CloseHold();
     rb::CloseFrame();  // the frame that just ran
     // this frame's input goes before any frame runs again: a rollback 3 frames back takes 25 ms or more, and all
     // that time the others would guess it, and roll back themselves once it came (until 0.5.5 it went after)

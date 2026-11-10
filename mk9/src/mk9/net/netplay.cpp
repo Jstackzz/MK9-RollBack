@@ -674,6 +674,9 @@ void CompareChecks() {
       const auto draws_lines = [&] {
         for (const std::string& line : game::CheckDraws(it->first))
           REXLOG_INFO("mk9 net: draws at frame {} by site: {}", it->first, line);
+        // what this game's loading made before the fight: with the other player's report, where two PCs' object lists part
+        if (const std::string objects = game::LastBarrierObjects(); !objects.empty())
+          REXLOG_INFO("mk9 net: {}", objects);
       };
       if (mine->second.fight != it->second.fight) {
         // with the id the next object took at the barrier: the two players' reports show whether their loading made a

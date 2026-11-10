@@ -209,11 +209,14 @@ set from the agreed seed; outside fights each call site draws from its own strea
 site, count), so loading-time differences between PCs cannot change menu picks (the arena
 variant, Test Your Luck's slots; in fights every MK script process has a stream of its own, so a
 script drawing more often, an arena's ambience reacting to a sound ending, say, leaves the
-fighters' numbers alone). A process is told apart by its object id counted from the id the next
-object took at the last barrier: two PCs' menus and loading do not make the same number of objects
-before a fight (0.5.3 and 0.5.4: the same fighter script was process `10000BB7` in one game and
-`10000BBA` in the other, `100008AB` and `100008A2` in another match whose next object ids were 9
-apart), and the ones one PC made more came before the fight's scripts. At a fight's barrier every PC also takes
+fighters' numbers alone). A process made after a fight's barrier is told apart by its object id counted from the id the next
+object took at that barrier. One already alive at a barrier, or made during the menus and the loading (since the launcher's start), is told apart by what it runs, which is the same on every PC:
+its script function's hash (`process +48`, the function's record, holds it at `+4`) and its place: at a barrier in the order of ids
+among the processes of that function alive then (`ProcessesAtBarrier`, `game.cpp`, in `Agree`), during the menus and loading in the order that function's processes first drew in (`ProcessStream`). One made before a fight's barrier but on no run list then (a process asleep until a move or event wakes it) draws by its script function alone, shared among that function's sleepers. Two PCs' menus and loading do not make the same
+number of objects before a fight (0.5.3 and 0.5.4: the same fighter script was process `10000BB7` in one game and
+`10000BBA` in the other, `100008AB` and `100008A2` in another match whose next object ids were 9 apart), and counting from
+the barrier only helps while the ones one PC made more come before those scripts; in 0.5.5 they did not always
+(the same process `-0x13D` from the barrier in one report and `-0x13B` in the other, "Known gaps"). At a fight's barrier every PC also takes
 slot 0's frame counter of the game state (`0x833C6C54 + 112`, `game.cpp`), which counts from when the fight began
 loading: bit 0 of it decides each frame whether P1's or P2's script processes run first. The other globals two PCs
 come to a fight with apart (the game state's frame count from boot at `+108` and its copies, GCurrentTime at
@@ -282,13 +285,17 @@ the other game's 89 at frame 900, a DESYNC), and `MK9_TEST_ADD_LIMIT=1` keeps FM
 
 A desync's log (and so its report) lists the failed check's draws by call site, grouped by return address
 (`mk9 net: draws at frame f by site: 82A23504: 824790DC=40 8247063C=8 ...`, 4 lines at most; a script's
-draws are at `8247061C ^ ((process id - next object id) << 4)`, the next object id at the fight's barrier, on its
-`match N in sync` line since 0.5.4; until 0.5.5 `8247061C ^ (process id << 4)`): the two players' reports side by
+draws are at `8247061C ^ (stream << 4)`: the process's id counted from the next object id at the fight's barrier (on its
+`match N in sync` line since 0.5.4) if it was made after the barrier, its script's hash and place (above) if it was alive then, until 0.5.5
+`8247061C ^ (process id << 4)`): the two players' reports side by
 side show what drew differently. Since 0.5.4 each check's round and rounds won are beside its timer in the net log
 (`check <hash> timer 90 round 1 won 0-0 rand <state>`), since 0.5.6 its draws' hash and what the fighters have left
 (`draws <hash> hp 1.0000 0.9700 meter 0.3333 0.7212`): `tools/netcmp.py` compares them all. A desync's line has the
-next object id at the fight's barrier and now, and the line after it the fight's values at that frame.
+next object id at the fight's barrier and now, the line after it the fight's values at that frame, and with the draws the line that says what this game made since the barrier before the last (`objects made since the last barrier: N, order hash H, by <caller>=<count> ...`): two players' reports side by side show where their menus and loading made other objects.
 `MK9_TEST_CHECK_DIFF=draws:<frame>` or `fight:<frame>` makes one game's check differ in that part from that frame on.
+`MK9_TEST_BURN_IDS=<n>[:<frames>]` moves one game's next object id ahead by `n`, at the barrier (no `<frames>`) or that many frames
+after a fight starts loading; `MK9_TEST_ID_STREAMS=1` keeps a process's stream the old way, by its id; `MK9_TEST_SLOW_READ=<ms>` holds each
+of one game's file loader requests back that long while a match is in sync before the fight.
 
 - **Lockstep** (default): a frame runs once every player's input for it is there; input delay 2.
 - **Rollback** (`netcode=rollback`): frames of a fight run ahead on guessed inputs (up to 8) and a
@@ -381,6 +388,7 @@ the park).
 python -I tools\netcmp.py a\net.log b\net.log                  # frame logs of two games side by side
 python -I tools\randcmp.py a\rand.txt b\rand.txt               # MK9_TRACE_RAND random draw traces
 python -I tools\scriptcmp.py a\script.txt b\script.txt         # -TraceScript: scripts and pads read, frame by frame
+python -I tools\noidcmp.py <dir with a\ and b\>                  # the same with object ids blanked (a pair whose ids differ on purpose, MK9_TEST_BURN_IDS)
 python -I tools\soundcount.py a\sound.txt --names              # -TraceSound: a game's sound starts, first run against run again
 python -I tools\feedreplay.py --seed <start line's seed> <session>\net-<match>.log   # a real match played again:
                                      # a linked game given the spectator's start line with feed=127.0.0.1:7302
@@ -851,7 +859,29 @@ for by frames run again: ...`). `MK9_RB_SOUND_AGAIN=1` is the old behaviour, for
   barrier are 1 to 9 apart, in tests here equal in 228 fights of 228 (14 arenas), and what makes them differ is still to be found:
   not this limit while a fight loads (with one game's level adds slowed 6 and 20 ms a batch on the old behaviour, two runs, both
   games made the same 1,146 and 1,106 objects in the same order). Since 0.5.6 such draws no longer end a match; a fight a frame
-  apart would, as the bars fill.
+  apart would, as the bars fill. **Later (2026-11-09, branch `fix-object-ids`): what makes two PCs' ids differ is still not found;
+  draws no longer depend on it.** Ruled out: the save (every online match already boots on an empty save of its own, the
+  launcher's `netMode`, all 31 of the user's sessions); how long a game sat at the hold point (the first barrier's next id is
+  `10000104` in every real session; a test with game B meeting 600 frames later, same objects, same order); slow file reads
+  (`MK9_TEST_SLOW_READ=<ms>`, each request of one game's file loader held back that long before a fight: at 30, 50, 70, 100 ms
+  that game came to the barrier 10 to 654 frames after the other with the same objects in the same order; at 150 ms the select
+  screen was not built when the test script's Y fell on it, which real matches cannot do); the launcher's own flow (autopilot,
+  no arena select) plain, under 60 ms of lag and 30 of jitter, with both cursors walking the roster, and walking with slowed
+  reads, with both players' other buttons pressed (X, Y, the bumpers) as well, and with one game's frame counter a frame ahead through the fight's loading (so the two fighters' scripts ran in the opposite order while it loaded). In all of those both games' object lists were identical. The objects themselves are made in bursts when a fight's fighters and
+  level have loaded, and those bursts move by hundreds of frames with loading, but none of those tests moved one past another.
+  A trace of every native call with its answer through the pre-fight flow found, between a pair with one game's reads held back,
+  only values derived from those and a value the select screen's script reads that goes with the loading (`sub_824A5670`), no object made differently. So real PCs have something more: the
+  log now says at each barrier what each game made since the last one (`mk9 game: objects made since the last barrier: N, order hash H, by <caller>=<count> ...`, and which
+  processes were alive at the barrier), and a desync's report quotes the first of those lines: two players' reports show where their lists part.
+  The fix (branch `fix-object-ids`): a script process alive at a barrier is told apart by its script function's hash and its place among that function's
+  processes in id order (`ProcessesAtBarrier`, in `Agree`), one made during the menus and loading by that hash and the order that function's processes first drew in, one asleep at the barrier (on no run list until a move or event wakes it) by that hash alone, and only
+  one made after a fight's barrier by its id from the base as before ("Netplay"). A process made during loading drew by its id already before the barrier, so a
+  PC whose lists parted there handed it other numbers, and it went on differently into the fight: with one game's next object id moved two ahead 400 frames into the loading of a lagged fight (`MK9_TEST_BURN_IDS=2:400`, 62 ms each way, 35 of jitter, input delay 3, both players mashing, Ermac and
+  Freddy Krueger on The Pit, to boot frame 9600), counting by id made The Pit's dressing script (`-31`) draw on other frames (2,020 in one game, 3,047 and 4,074 in the other, a difference in 59 to 68 of 161 checks' draws, not in the fight's values); with the new streams
+  no check differs. With the id moved two ahead right at the barrier (`MK9_TEST_BURN_IDS=2`: every process made before then two further from the base than on the other game, the worst case of the reports) the old streams
+  make all 161 checks of the fight's 4,841 frames differ in their draws (and the generator's state beside them) from frame 30 on, and the new ones none of 4,783's; timers, rounds, health and meters equal at every check in all of them,
+  and both games' scripts the same frame for frame with ids blanked (`tools/noidcmp.py`; `scriptcmp` compares ids too and flags every frame that makes an object once ids differ), 0 of 4,858, 4,925 and 4,811 frames
+  with 71 and 419, 72 and 489, 74 and 550 rollbacks. So what a difference in ids changes is which numbers the processes that draw before and around the barrier get: in those fights The Pit's dressing scripts (`-25` every frame, `-31` a few times), while no fighter's script drew at all (in an idle fight on another arena the two fighters' main scripts, one function, drew a few times); none of the fights changed for it. `MK9_TEST_ID_STREAMS=1` keeps the old streams, for such comparisons. On the final code: ids moved two at the barrier (Sub-Zero and Raiden, seed 21; Raiden and Cyber Sub-Zero on another arena, seed 13) or mid-loading (Ermac and Freddy Krueger on The Pit), and plain: no check different in 4,796 to 4,879 frames of lagged fight, 468 to 560 rollbacks on the side that rolled back more, both games' scripts the same with ids blanked (4,868 to 4,927 frames); and a whole lagged launcher match and its rematch (50 ms, 30 of jitter, input delay 3) played to the same result on both games, every check equal, 0 of 5,993 and 0 of 5,373 frames different with ids blanked.
 - **A rollback into a fight's first frames crashed the game** in every release with rollback until 0.5.1 (found
   and fixed 2026-10-29): the other player saw it stop answering, and the launcher was left at CONTINUE?. (What this entry
   calls FMOD below, `sub_82E85748` and the "sound native" `sub_82A38050`, `0x834B7F78` and the pages traced, is Scaleform GFx,

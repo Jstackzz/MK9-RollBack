@@ -92,6 +92,12 @@ the MK9 Online server, so whoever runs it can see what went wrong.
   of the frames it took back, run on while a helper thread worked, or undo what another thread had just written.
   Fixed in 0.5.5 (docs/GAME.md, "Known gaps"). Since 0.5.5, as in MK3D Online, the launcher also tells the server in
   a few lines where the game crashed or stood still in a match; SEND REPORT still sends the whole report.
+- Until 0.5.6 a rollback could play a sound again, or cut it and start it over; since 0.5.6 what you already heard is left
+  alone (docs/GAME.md, "Sounds"). A match now stops as out of step only when the fight itself differs (timer, round,
+  health or meters), and fights start on the same frame on both PCs: a few milliseconds' stall while a fight began could
+  put one game a frame behind for the whole fight (docs/GAME.md, "Known gaps").
+- Until 0.5.6 rollbacks could crash the game in the health bars, in its memory bookkeeping and as a match ended, and a
+  Radeon could lose the card in rollback fights. Fixed in 0.5.6 (docs/GAME.md, "Known gaps").
 
 ## Building from source
 

@@ -98,6 +98,10 @@ void LastCheckDetail(uint32_t& timer, uint32_t& rand_state);
 // return address ("82A23504: 824790DC=40 8247063C=8"), 4 lines at most; both players' for the same frame show what
 // drew differently
 std::vector<std::string> CheckDraws(uint32_t frame);
+// what this game's menus and loading made since the barrier before the last, as the last barrier's log line says it (how many objects
+// each caller of the id-giving constructor made, and a hash of their order): a desync's report has it, so that two players' reports
+// side by side show where their object lists part
+std::string LastBarrierObjects();
 
 // at the top of a frame in sync: true once when every PC must meet again before going on (a fight
 // begins: the phase turned to kPhaseFight)

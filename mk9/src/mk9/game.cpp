@@ -3,12 +3,14 @@
 #include "mk9/game.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <map>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -187,19 +189,111 @@ namespace {
 // (0.5.3: the same script drew on frames 0-29 in both games as process 10000BB7 in one and 10000BBA
 // in the other, its stream and the checks then apart by frame 30), so a process counts from the id
 // the next object took at the last barrier (g_id_base, Agree): the same on every PC for the objects
-// made after it, and for those made before it as long as what one PC made more came first. The site
-// shows it as 8247061C ^ ((id - base) << 4) (82A23504/824790DC: a fighter's own script 0x96C after
-// the base). Netplay's "match N in sync" line names the base (next object id)
+// made after it, but not for those made before it (0.5.5: the same fighter script process -0x13D from the
+// barrier on one PC and -0x13B on the other, one draw and two by the same check), whatever the PCs' loading made
+// around them. So a process that was already alive at the barrier is told apart by what it runs, not by its id: its script
+// function's hash (the function's record, process +48, holds it at +4: the same on every PC) and its place, in the order
+// of ids, among the processes of that function alive then (ProcessesAtBarrier, Agree). Its draws show at 8247061C ^ (stream << 4);
+// one asleep at a fight's barrier (on no run list until a move or event wakes it) draws by its script alone, one stream for all its function's sleepers;
+// a process made after a fight's barrier as ever counts from the base (`id - base`), the same on every PC, and one made during the
+// menus and loading, since the barrier at the launcher's start, is told apart by its script function and the order that function's processes
+// first drew in (its ids, again, differ by what each PC's loading made). Netplay's "match N in sync" line names the base (next object id)
 constexpr uint32_t kScriptRandomCaller = 0x8247061C;
 constexpr uint32_t kScriptContext = 0x8342CDF0;
+// the VM's 21 run lists (sub_82A164C8 runs them in order), 20 bytes each: +4 the first node; a node: +4 the process,
+// +8 its object id (the node of a process that went away is left until the VM comes by), +12 the next node
+constexpr uint32_t kScriptRunLists = 0x8342CDFC;
 uint32_t g_id_base = 0;
+// the processes on the run lists at the last barrier: their object ids and the stream each draws from
+std::unordered_map<uint32_t, uint32_t> g_barrier_streams;
+// whether the last barrier was a fight's (not the launcher's start, where menus and loading follow), and, since a barrier that wasn't,
+// the processes that have drawn by id, their streams, and per script function hash how many have
+bool g_fight_barrier = false;
+std::unordered_map<uint32_t, uint32_t> g_loading_streams, g_loading_counts;
+
+// What each PC made since the last barrier, for reports (the two players' lines side by side say where their loading went apart):
+// how many objects each caller of the one id-giving constructor made, and a hash of their order. Only the main thread, only a match in sync
+uint32_t g_objects_made = 0, g_objects_order = 2166136261u;
+std::map<uint32_t, uint32_t> g_objects_by_maker;
+std::string g_last_barrier_objects;
+
+void NoteObjectMade(uint32_t caller) {
+  g_objects_made++;
+  g_objects_order = (g_objects_order ^ caller) * 16777619u;
+  g_objects_by_maker[caller]++;
+}
+
+void LogObjectsMade() {
+  std::vector<std::pair<uint32_t, uint32_t>> makers(g_objects_by_maker.begin(), g_objects_by_maker.end());
+  std::sort(makers.begin(), makers.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+  std::string line;
+  for (size_t i = 0; i < makers.size() && line.size() < 96; i++) line += fmt::format(" {:08X}={}", makers[i].first, makers[i].second);
+  g_last_barrier_objects = fmt::format("objects made since the last barrier: {}, order hash {:08X}, by{}", g_objects_made, g_objects_order, line);
+  REXLOG_INFO("mk9 game: {}", g_last_barrier_objects);
+  g_objects_made = 0;
+  g_objects_order = 2166136261u;
+  g_objects_by_maker.clear();
+}
+
+// the stream a script process draws from (see above): a process made after a fight's barrier by its place after it, one
+// alive at the last barrier by its script and its place among that script's processes, one made before the barrier and woken in the
+// fight by its script alone, one made during the menus and loading by its script and the order that script's processes first drew in
+uint32_t ProcessStream(uint32_t context) {
+  const uint32_t id = ReadU32(context + 4);
+  static const bool old = [] {  // comparisons: MK9_TEST_ID_STREAMS=1 counts every process from the base, as until 0.5.6
+    const char* v = std::getenv("MK9_TEST_ID_STREAMS");
+    return v && *v == '1';
+  }();
+  if (old) return id - g_id_base;
+  if (const auto it = g_barrier_streams.find(id); it != g_barrier_streams.end()) return it->second;
+  const uint32_t function = ReadU32(context + 48);
+  const uint32_t hash = function ? ReadU32(function + 4) : 0;
+  if (g_fight_barrier && Phase() == kPhaseFight) {
+    // made before the barrier and not running at it (on no run list: a process that sleeps until a move or an event wakes it):
+    // its script's stream, shared with that script's other sleepers in the order the VM runs them, the same on every PC, and rollbacks take its draws back
+    // with the rest. Made after the barrier: a fight's objects are made alike on every PC from its barrier on, so as ever by its place after it
+    return id < g_id_base ? Mix(hash, 0x7FFFFFFFu) : id - g_id_base;
+  }
+  // made since a barrier in the menus, the select screen or a fight's loading (also after a fight, towards the next one): each PC makes other
+  // objects, so not its id either: its script function's hash and the order its function's processes first drew in. Taken back by no rollback
+  if (const auto it = g_loading_streams.find(id); it != g_loading_streams.end()) return it->second;
+  const uint32_t stream = Mix(hash ^ 0x4C4F4144u, g_loading_counts[hash]++);
+  g_loading_streams[id] = stream;
+  return stream;
+}
+
+void ProcessesAtBarrier() {
+  g_barrier_streams.clear();
+  std::map<uint32_t, std::vector<uint32_t>> by_function;
+  for (uint32_t list = 0; list < 21; list++) {
+    uint32_t seen = 0;  // a broken list can't hang the game
+    for (uint32_t node = ReadU32(kScriptRunLists + 20 * list + 4); node && seen < 8192; node = ReadU32(node + 12), seen++) {
+      const uint32_t process = ReadU32(node + 4);
+      if (!process || ReadU32(process + 4) != ReadU32(node + 8)) continue;
+      const uint32_t function = ReadU32(process + 48);
+      if (function) by_function[ReadU32(function + 4)].push_back(ReadU32(process + 4));
+    }
+  }
+  std::string line;
+  for (auto& [hash, ids] : by_function) {
+    // a process moved between lists has a node in each until the VM comes by
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    for (size_t place = 0; place < ids.size(); place++) {
+      g_barrier_streams[ids[place]] = Mix(hash, uint32_t(place));
+      if (line.size() < 140) line += fmt::format(" {:X}:{:08X}/{}", ids[place], hash, place);
+    }
+  }
+  // read with a report's draws (8247061C ^ (stream << 4)): which process each stream belonged to, by id, script and place
+  REXLOG_INFO("mk9 game: script processes at the barrier ({}):{}", g_barrier_streams.size(), line);
+}
 
 uint64_t DrawSite(const PPCContext& ctx) {
   uint32_t up = 0;
   StackReturns(ctx, &up, 1);
   if (up == kScriptRandomCaller) {
     const uint32_t context = ReadU32(kScriptContext);
-    if (context) up ^= (ReadU32(context + 4) - g_id_base) << 4;
+    if (context) up ^= ProcessStream(context) << 4;
   }
   return (uint64_t(uint32_t(ctx.lr)) << 32) | up;
 }
@@ -268,10 +362,40 @@ void RolledBack(uint32_t frame) {
   }
 }
 
+// tests: MK9_TEST_BURN_IDS=<n>[:<frames>]: this game's next object id goes n ahead, right at the barrier if no <frames> is said, else
+// that many frames after a fight starts loading: objects made before then are n further from the barrier's next id than
+// on a game that doesn't, as in 0.5.5's reports (the same process -0x13D from the barrier on one PC and -0x13B on the other)
+void BurnIds(bool at_barrier, int32_t phase) {
+  static const auto burn = []() -> std::pair<uint32_t, int> {
+    const char* v = std::getenv("MK9_TEST_BURN_IDS");
+    if (!v || !*v) return {0, 0};
+    const char* colon = std::strchr(v, ':');
+    return {uint32_t(std::atoi(v)), colon ? std::atoi(colon + 1) : 0};
+  }();
+  if (!burn.first || !net::InSync()) return;
+  static int loading_frames = -1;
+  bool now = false;
+  if (at_barrier) {
+    now = burn.second == 0 && phase == kPhaseFight;
+  } else if (burn.second > 0) {
+    if (phase != kPhaseLoading) loading_frames = -1;
+    else now = ++loading_frames == burn.second;
+  }
+  if (!now) return;
+  REXLOG_INFO("mk9 game: the next object id goes {} ahead ({:X}) at frame {} (MK9_TEST_BURN_IDS)", burn.first, NextObjectId(), net::Frame());
+  WriteU32(0x83394B44, NextObjectId() + burn.first);
+}
+
 void Agree(PPCContext& ctx, uint8_t* base, const mk9::net::Agreement& agreed) {
   const uint32_t before = GameRandState(), crt_before = MainRandState(ctx, base);
   g_agreed_seed = agreed.seed;
+  BurnIds(true, Phase());
+  g_fight_barrier = Phase() == kPhaseFight;
+  g_loading_streams.clear();
+  g_loading_counts.clear();
   g_id_base = NextObjectId();  // script processes count from here (DrawSite)
+  ProcessesAtBarrier();
+  LogObjectsMade();
   g_site_draws.clear();
   g_site_journal.clear();
   // each match numbers its frames from 0: the menus' checks, at higher frames, kept a fight's first ones out
@@ -294,6 +418,7 @@ void Agree(PPCContext& ctx, uint8_t* base, const mk9::net::Agreement& agreed) {
 bool SyncPoint() {
   static int32_t last = -1;
   const int32_t now = Phase();
+  BurnIds(false, now);
   const bool begins = now == kPhaseFight && last != kPhaseFight && last != -1;
   last = now;
   if (begins) REXLOG_INFO("mk9 game: a fight begins (round timer {})", RoundTimer());
@@ -400,6 +525,8 @@ void LastCheckDetail(uint32_t& timer, uint32_t& rand_state) {
   rand_state = g_last_rand;
 }
 
+std::string LastBarrierObjects() { return g_last_barrier_objects; }
+
 std::vector<std::string> CheckDraws(uint32_t frame) {
   std::vector<std::string> lines;
   const auto it = g_check_draws.find(frame);
@@ -460,12 +587,109 @@ REX_HOOK_RAW(sub_826D91E8) {
   mk9::randtrace::Log('F', uint32_t(site >> 32), mk9::game::GameRandState(), uint32_t(site));
 }
 
+// A streaming level goes visible in UWorld::AddToWorld (sub_827D19E0, from the tick's UpdateLevelStreaming sub_827D5DC0),
+// which keeps to 5 ms of real time a call and goes on in the next frame's; a level behind it waits. In a fight's frame 0
+// the game-flow script makes the fighters' intro cinemas (SeqAct_Cinema, Subzero_CharIntro say) and sleeps a frame at a
+// time until their levels are visible (sub_8247D5A0 -> sub_82A435D0 reads bIsVisible, ULevelStreaming +92), so a stall of
+// 5 ms on one PC in that call (0.2 ms of work here) put all the fight's scripts a frame behind the other PC's for good.
+// The game asks three things before it keeps to the limit: its replay recorder (sub_82A1C6E8) and two flags of its session
+// object (sub_8239CCF8, sub_8239CD58), none of which a match here sets, being the game's local versus on each PC. So a
+// match says yes to the first of them, there alone: what goes visible does so in the frame it asks, on every PC
+// (docs/GAME.md, "Netplay"). MK9_TEST_ADD_LIMIT=1 keeps the limit (comparisons)
+REX_EXTERN(__imp__sub_82A1C6E8);
+REX_HOOK_RAW(sub_82A1C6E8) {
+  constexpr uint32_t kFromAddToWorld = 0x827D1A1C;
+  const bool add_to_world = uint32_t(ctx.lr) == kFromAddToWorld;
+  __imp__sub_82A1C6E8(ctx, base);
+  static const bool keep_limit = [] {
+    const char* v = std::getenv("MK9_TEST_ADD_LIMIT");
+    return v && *v == '1';
+  }();
+  if (add_to_world && !keep_limit && mk9::net::InSync()) ctx.r3.u64 = 1;
+}
+
+// the log says when a fight's level took longer than that limit: what would have put this PC's scripts a frame late
+REX_EXTERN(__imp__sub_827D19E0);
+REX_HOOK_RAW(sub_827D19E0) {
+  const auto started = std::chrono::steady_clock::now();
+  __imp__sub_827D19E0(ctx, base);
+  const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+  if (ms > 5.0 && mk9::game::Phase() == mk9::game::kPhaseFight && mk9::net::InSync())
+    REXLOG_INFO("mk9 game: a streaming level took {:.1f} ms to go visible at frame {} (the game's own limit is 5 ms)", ms,
+                mk9::net::Frame());
+}
+
+// How many frames a playing sound has left (the script native sub_824A5610: sub_82A33C00, (length - position) * 60 by FMOD):
+// real time again. The round's script asks 75 frames into the announcer's "Round N" and, if that is over 90, sleeps the
+// difference before its "Fight!", so that a voice line started late on one PC (or a long one, read a few frames apart: two games
+// read 13 and 7, 56 and 48) put the fight's scripts as many frames apart from there on. In a match no sound has frames left
+// for the scripts: the next line may start over the end of a long one, on every PC alike. MK9_TEST_SOUND_LEFT=<frames> answers
+// that in this game's fights instead, MK9_TEST_ADD_LIMIT=1 keeps the game's own answer too (comparisons)
+REX_EXTERN(__imp__sub_82A33C00);
+REX_HOOK_RAW(sub_82A33C00) {
+  static const int test_left = [] {
+    const char* v = std::getenv("MK9_TEST_SOUND_LEFT");
+    return v && *v ? std::atoi(v) : -1;
+  }();
+  static const bool real = [] {
+    const char* v = std::getenv("MK9_TEST_ADD_LIMIT");
+    return v && *v == '1';
+  }();
+  if (test_left >= 0 && mk9::game::Phase() == mk9::game::kPhaseFight && mk9::net::InSync()) {
+    ctx.r3.u64 = uint32_t(test_left);
+    return;
+  }
+  if (!real && mk9::net::InSync()) {
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_82A33C00(ctx, base);
+}
+
+// tests: MK9_TEST_SLOW_ADD=<ms>[:<times>]: in a fight's first 10 frames AddToWorld's update of a level's components
+// (sub_828FD8A8) stands still that long, the first time or the first <times> times, as on a PC stalled just then
+REX_EXTERN(__imp__sub_828FD8A8);
+REX_HOOK_RAW(sub_828FD8A8) {
+  static int stall_ms = 0, stalls = 0;
+  static const bool asked = [] {
+    const char* v = std::getenv("MK9_TEST_SLOW_ADD");
+    if (!v || !*v) return false;
+    stall_ms = std::atoi(v);
+    const char* colon = std::strchr(v, ':');
+    stalls = colon ? std::atoi(colon + 1) : 1;
+    return true;
+  }();
+  if (asked && stalls > 0 && mk9::game::Phase() == mk9::game::kPhaseFight && mk9::net::InSync() && mk9::net::Frame() < 10) {
+    stalls--;
+    REXLOG_INFO("mk9 game: AddToWorld stands still {} ms at frame {} (MK9_TEST_SLOW_ADD)", stall_ms, mk9::net::Frame());
+    std::this_thread::sleep_for(std::chrono::milliseconds(stall_ms));
+  }
+  __imp__sub_828FD8A8(ctx, base);
+}
+
+// tests: MK9_TEST_SLOW_READ=<ms>: once a match is in sync the file loader's thread stands still that long before every
+// request it takes (sub_827325A0, the file handle looked up in its loop before the read), as on a PC with a slow disc
+REX_EXTERN(__imp__sub_827325A0);
+REX_HOOK_RAW(sub_827325A0) {
+  static const int stall_ms = [] {
+    const char* v = std::getenv("MK9_TEST_SLOW_READ");
+    return v && *v ? std::atoi(v) : 0;
+  }();
+  static int held = 0;
+  if (stall_ms > 0 && mk9::net::InSync() && mk9::game::Phase() != mk9::game::kPhaseFight) {
+    if (++held % 64 == 1) REXLOG_INFO("mk9 game: the file loader stands still {} ms a request (MK9_TEST_SLOW_READ), {} so far", stall_ms, held);
+    std::this_thread::sleep_for(std::chrono::milliseconds(stall_ms));
+  }
+  __imp__sub_827325A0(ctx, base);
+}
+
 // MK's counted objects (script processes among them) take their id from one counter (0x83394B44):
 // the "new" lines of MK9_TRACE_SCRIPT
 REX_EXTERN(__imp__sub_829DBEF0);
 REX_HOOK_RAW(sub_829DBEF0) {
   const uint32_t obj = ctx.r3.u32, caller = uint32_t(ctx.lr);
   __imp__sub_829DBEF0(ctx, base);
+  if (mk9::net::InSync() && mk9::frame::OnMainThread()) mk9::game::NoteObjectMade(caller);
   FILE* f = mk9::game::ScriptTrace();
   if (!f || !mk9::net::InSync()) return;
   uint32_t returns[4] = {};

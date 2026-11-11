@@ -73,7 +73,8 @@ constexpr int kWatchFeedCheckMs = 10000;  // a spectator's game connects to its 
 // How a game that ended during a match ended, for the server's log (result "exit", printable, 40 characters at most):
 // "crash C0000005" (an exception: the game wrote crash.txt in its session, mk9/src/mk9/crash.h, and ended with its
 // code), "abort", "closed" (it ended cleanly: its window was closed, Alt+F4), "closed standing still" (closed while it
-// stood still: its hang.txt), else "exit code N" (ended from outside: Task Manager, a kill)
+// stood still: its hang.txt; "standing still, exit code N" when it had to be killed), else "exit code N" (ended from
+// outside: Task Manager, a kill)
 QString exitReason(const GameProcess* g) {
     const quint32 code = quint32(g->exitCode());
     const bool crashFile = QFileInfo::exists(QDir(g->sessionDir()).filePath(QStringLiteral("crash.txt")));
@@ -81,8 +82,9 @@ QString exitReason(const GameProcess* g) {
         return QStringLiteral("crash %1").arg(QString::number(code, 16).toUpper());
     if (code == 3) return QStringLiteral("abort");
     if (crashFile) return QStringLiteral("crash, exit code %1").arg(qint64(qint32(code)));
-    if (code == 0 && QFileInfo::exists(QDir(g->sessionDir()).filePath(QStringLiteral("hang.txt"))))
-        return QStringLiteral("closed standing still");
+    if (QFileInfo::exists(QDir(g->sessionDir()).filePath(QStringLiteral("hang.txt"))))
+        return code == 0 ? QStringLiteral("closed standing still")
+                         : QStringLiteral("standing still, exit code %1").arg(qint64(qint32(code)));
     if (code == 0) return QStringLiteral("closed");
     return QStringLiteral("exit code %1").arg(qint64(qint32(code)));
 }
@@ -457,6 +459,7 @@ GameProcess* MatchController::ensureGame(const QString& gameId, QString* error) 
 // window's close, 5 s at most); the start line waits for the game at its hold point anyway.
 bool MatchController::bootGame(const QString& gameId, QString* error) {
     if ((game_ && game_->isRunning()) || !pendingBoot_.isEmpty()) return true;
+    if (!prepareGame(gameId, error)) return false;  // not over single player: it stays
     if (solo_) {
         closeSolo(tr("A match is on its way: single player closes, the match's game starts after it"));
         if (phase_ == Phase::Solo) setPhase(Phase::Idle, tr("Single player closed for the match"));
@@ -497,9 +500,14 @@ bool MatchController::wantsGame() const {
            atContinue_ || lobbyComing_ || !pendingStart_.isEmpty() || !watch_.isEmpty();
 }
 
-// A lobby's Ready: no game starts for it (the game boots when the lobby's match is on its way, lobbyMatchComing), only
-// whether this PC can play it: the game built and its disc extracted
+// A lobby's Ready or a search: no game starts for it (the game boots when the match is on its way), only whether this
+// PC can play it. A game left from before an update would start and meet the other player's new one, and the match
+// would end at once ("another release"): it is built again first
 bool MatchController::prepareGame(const QString& gameId, QString* error) {
+    if (building_) {
+        if (error) *error = tr("The game is being built (Build game): you can play once it is done.");
+        return false;
+    }
     const QString exe = cfg::gameExe(gameId);
     const QFileInfo fi(exe);
     if (exe.isEmpty() || !fi.exists()) {
@@ -509,6 +517,12 @@ bool MatchController::prepareGame(const QString& gameId, QString* error) {
     if (fi.suffix().compare(QLatin1String("py"), Qt::CaseInsensitive) != 0 &&
         !GameProcess::hasGameFiles(cfg::gameDataRoot(gameId))) {
         if (error) *error = tr("The game's files are not there yet: open Build game and extract your disc first.");
+        return false;
+    }
+    if (GameProcess::needsRebuild(gameId)) {
+        if (error)
+            *error = tr("The last update changed the game, and yours is not built again yet: press \"Build the game\" on "
+                        "Build game (a few minutes, once). Until then it would not match your opponent's.");
         return false;
     }
     return true;
@@ -537,6 +551,7 @@ bool MatchController::findMatch(const QueueRequest& req, QString* error) {
         if (error) *error = tr("Busy: %1").arg(phaseText_);
         return false;
     }
+    if (!prepareGame(req.game, error)) return false;
     // No match's game during a search: it boots once a match is accepted. Standby: single player is the one game the
     // search waits in (cfg::soloWhileWaiting, or open already, which is the search's from now on): a match accepted
     // or CANCEL SEARCH closes it. A match's game left from before (at its CONTINUE? menu: a new search leaves the
@@ -642,6 +657,7 @@ void MatchController::accept() {
     QString err;
     if (!bootGame(str(found_, "game"), &err)) {
         log(err);
+        emit notice(err);
         decline();
         return;
     }
@@ -709,6 +725,7 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
             freezeSolo();
         } else if (!bootGame(str(msg, "game"), &err)) {
             log(err);
+            emit notice(err);
             phase_ = Phase::Found;
             decline();
             return;
@@ -1366,6 +1383,10 @@ bool MatchController::startSolo(const QString& gameId, QString* error, bool whil
     }
     if (phase_ != Phase::Idle && phase_ != Phase::Searching) {
         if (error) *error = tr("Busy: %1").arg(phaseText_);
+        return false;
+    }
+    if (building_) {  // the build puts the game's files in place at its end: not while one runs
+        if (error) *error = tr("The game is being built (Build game): you can play once it is done.");
         return false;
     }
     const bool searching = phase_ == Phase::Searching;

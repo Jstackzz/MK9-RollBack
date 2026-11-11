@@ -38,6 +38,7 @@ build copy `external\rexglue-sdk\out\win-amd64\rexgpu-xenos.dll` into `mk9\out\b
 | `fx.cpp`, `guards.cpp` | the game's own crashes: its pool of audio components (long called effects) making room when full, and checks put into its code where it wrote through a null pointer (see "Crashes in the game's own code") |
 | `sound.cpp` | sounds across rollbacks: what a frame run again asks of FMOD (see "Sounds") |
 | `names.cpp` | the players' names over an online fight's health bars (see "Names over the fight") |
+| `report.cpp` | F3: what is on the screen and the next 20 frames' pictures, saved for the launcher to send (PROTOCOL.md, "F3 reports"; `MK9_TEST_F3_AT=<frame>,...` presses it in a test) |
 | `input.cpp` | XamInputGetState / GetCapabilities / GetKeystrokeEx answered from one pad source chain: autopilot override (offline) > netplay or test scripts > the PC's controllers (remapped, `controls.cpp`) |
 | `game.cpp` | what netplay and the launcher read from MK9 (addresses below), the random generator agreement, per-call-site menu streams, what a match keeps off the PC's real time ("Netplay") |
 | `net/netplay.cpp` | UDP netplay for 2-4 slots: barriers, lockstep, rollback mode, checks, the spectator feed |
@@ -373,6 +374,19 @@ moving the cursor), a game that leaves the main menu all the same goes back to i
 out of a demo fight now reaches the game: it never did) and says `booting` meanwhile, and a `start`
 that comes while the game is not at its hold point waits for it instead of failing.
 
+The boot's movies (the legal screen, the WB and NetherRealm logos, the middleware logos) took about
+23 s before the title, and the hold point came at frame 1815, 30 s in. The movie player skips one on A
+(Coalesced.ini, `[MwyMoviePlayer] ControllerSkipKey=XboxTypeS_A`), so since 0.5.8 the autopilot taps A
+(4 frames in 40) until the title first comes up, then presses START there: the hold point at frame
+521, about 9 s. No A once the title was up: on its way to the main menu the front end shows 0x198 (a
+submenu's id) for a moment. Single player (no link) gets the same way to the main menu, where the
+player's controller takes over (`autopilot::Phase::Skip`, frame 430 instead of about 1724), unless
+scripted test controllers run (their frames count from a boot with the movies) or `MK9_SHOW_INTRO=1`.
+Tests: `MK9_AUTOPILOT_ATTACK=1` has player 1 jab through every fight so matches end, `=2` player 2
+(player 1 then loses and steers the CONTINUE? menu); `tools\link-local.ps1 -Attack|-AttackB -Rematch
+-Select` plays a match and then SELECT A NEW FIGHTER, as a Kasual series' "both pick again";
+`-ExtraB "MK9_FRAME_CAP=30"` gives player 2's game its own environment, here a slower PC (Pace).
+
 ## Names over the fight
 
 In an online match, and one watched, each player's account name stands just above their health
@@ -581,9 +595,36 @@ rollbacks every 10 s of the fight's busiest stretch):
   on average. The two-game test with one game held to 50 frames a second (26 ms each way, 15 of
   jitter, delay 2, both mashing; 0.5.5 against this): the faster game held back 7-8 frames a second
   and stayed 0.9 frames ahead; 1,408 frames run again in the fight instead of 2,092, rollbacks 2.5
-  frames long on average instead of 3.7, none longer than 5 frames instead of 81 of 6-8. The log has
-  it every 10 s (`frames ahead of the others on average`, the frames held back and the frames that
-  waited at the 8-frame limit); `MK9_TRACE_PACE=<file>` writes every frame's numbers.
+  frames long on average instead of 3.7, none longer than 5 frames instead of 81 of 6-8.
+  Against a PC that runs fewer than 40 frames a second that was not enough (0.5.6 and 0.5.7): one
+  frame held back every other frame still runs 40, and the lead lags by the 8 frames of the average
+  and a round trip, with the frames held back meanwhile counted as already taken off (true only
+  against a PC at 60). The faster PC ran to the 8-frame limit and stayed there, waiting at every frame
+  for the other's next input and rolling back 8 frames at every change of it, 40-60 ms each: its
+  screen went in fits and starts while the slower one's ran evenly. A player's stream (2026-11-10,
+  against an opponent whose PC had held another player's 9800X3D to 50 frames a second in 0.5.4)
+  showed just that: 56 % of the frames repeated in a 60 Hz capture, in freezes of 4-19 frames between
+  bursts. Since 0.5.8 a PC more than 0.6 of a frame ahead of one that runs fewer than 54 frames a
+  second, and itself clearly faster (by 5 frames a second, not counting the periods it held back or
+  waited at the limit), also runs at the other's pace: it holds back as many frames as the other runs
+  fewer than 60 a second (measured from the frame the other says it runs, over the last 30 frames;
+  `frame::HoldNext` takes a count), for as long as it is not behind, and the lead is corrected on top
+  as before. The two-game test with one game held to 30 frames a second (30 ms each way, 10 of jitter,
+  delay 2, both mashing; 0.5.7's pacing against this): the faster game waited at the limit 0.2 s of
+  162 instead of 41 s of 164, its 575 rollbacks of 5-8 frames (mostly 8) became 457 of 1 to 4 frames
+  (369 of 1), 3,928 frames run again became 606, and the freezes of three frames or more in a 60 Hz
+  capture of it 90 instead of 638 (the slower game's own: 5). Against one held to 40 a second:
+  rollbacks of 3-4 frames became 1-frame ones (478 of 553), 2,107 frames run again 658, freezes of
+  three frames or more 27 instead of 144.
+  Two even games (45 ms each way, 20 of jitter) ran as before or better: 56.7 frames a second, 5.7 a
+  second shown again in a 60 Hz capture (two seeds of the mashing; with one of them 0.5.7's pacing fell
+  into long rollbacks and frequent holds three times out of three, 47-51 frames a second, 13-17 shown
+  again). Without the clearly-faster condition two games slowed alike (one GPU between them) took
+  turns keeping pace with each other. A model of the controller that tries a change in seconds:
+  pacesim.py in the side session's notes. The log has it every 10 s (`frames ahead of the others on
+  average`, the others' frames a second and this PC's, the frames held back and the frames that waited
+  at the 8-frame limit); `MK9_TRACE_PACE=<file>` writes every frame's numbers (the others' pace, this
+  PC's and the frames held back in its last three columns).
 
 Diagnostics: `MK9_RB_TRACE_FOREIGN=1` (who writes which pages first, stacks of foreign writers,
 each page a simulation thread writes after another thread wrote it first), `MK9_RB_TRACE_SHARED=1`

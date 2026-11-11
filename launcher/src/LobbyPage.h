@@ -31,6 +31,8 @@ public:
     // readies up for the next one
     void pressReady();
     void focusReady();
+    // no longer ready (Build game started: this PC cannot play until it is done)
+    void dropReady();
 
 protected:
     void showEvent(QShowEvent* event) override;

@@ -141,6 +141,21 @@ void OnFrame(uint64_t frame) {
   std::thread([frame] { Snap("snap-" + std::to_string(frame)); }).detach();
 }
 
+bool CaptureNow(Image& out) {
+  Capture capture;
+  {
+    std::lock_guard<std::mutex> lock(g_lock);
+    capture = g_capture;
+  }
+  return capture && capture(out) && out.width && out.height;
+}
+
+bool Save(const std::filesystem::path& path, const Image& image, uint32_t max_width) {
+  uint32_t h = 0;
+  const auto rgb = Scale(image, max_width, h);
+  return WritePng(path, std::min(max_width, image.width), h, rgb);
+}
+
 bool Snap(const std::string& name) {
   Capture capture;
   fs::path dir;

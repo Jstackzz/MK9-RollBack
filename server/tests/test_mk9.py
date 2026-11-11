@@ -289,6 +289,8 @@ async def test_series_rematch_from_the_continue_menu(server, connect, udp_peers)
 
 async def test_ranked_set_goes_on_from_the_continue_menu(server, connect, udp_peers):
     (a, b), _, gos = await queue_pair(server, connect, udp_peers, ["Reptile", "Ermac"], ranked=True)
+    if gos[0]["side"] != 1:  # the server draws the sides: a is the one on side 1, who wins every match
+        (a, b), gos = (b, a), gos[::-1]
     await agree((a, b), gos[0]["match"])
     sa = await a.expect("series", state="between")
     assert sa["ranked"] and sa["need"] == 3

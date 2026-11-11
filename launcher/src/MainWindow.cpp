@@ -30,6 +30,7 @@
 #include "LobbyPage.h"
 #include "MatchController.h"
 #include "PlayPages.h"
+#include "ReportSender.h"
 #include "ServerClient.h"
 #include "Style.h"
 #include "ToolPages.h"
@@ -71,6 +72,12 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     notice_->setWordWrap(true);
     notice_->hide();
     v->addWidget(notice_);
+    // F3 in a game: what it drew goes to the server for the developers
+    auto* reports = new ReportSender(server_, [this] { return controller_->runningGames(); }, this);
+    connect(reports, &ReportSender::logLine, this, [this](const QString& text) {
+        applog::write(QStringLiteral("report: ") + text);
+        showNotice(text, false);
+    });
 
     stack_ = new QStackedWidget;
     ranked_ = new QueuePage(true, server_, controller_);
@@ -178,6 +185,12 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
     connect(controller_, &MatchController::phaseChanged, this, whenFree);
     connect(controller_, &MatchController::gameStatusChanged, this, whenFree);
     connect(build_, &BuildPage::busyChanged, this, whenFree);
+    // no match's game while the game is built (its files change at the end), and a lobby's Ready taken back for it
+    connect(build_, &BuildPage::busyChanged, this, [this](bool busy) {
+        controller_->setBuilding(busy);
+        if (!busy) return;
+        if (auto* lobby = qobject_cast<LobbyPage*>(pages_[kLobby])) lobby->dropReady();
+    });
     // releases on GitHub (a player package): offered like the server's, the game built again when one changed it
     github_ = new GitHubUpdates(this);
     connect(github_, &GitHubUpdates::found, this, [this](const QJsonObject& release) { offerUpdate(release, false); });
@@ -186,7 +199,7 @@ MainWindow::MainWindow(const LaunchOptions& opts, QWidget* parent)
         if (!paths::isPackage()) return;
         const bool built = QFileInfo::exists(cfg::gameExe(gameId_));
         // an update that changed the game, or a disc extracted while the game could not be built yet
-        const bool update = BuildPage::needsRebuild(gameId_);
+        const bool update = GameProcess::needsRebuild(gameId_);
         if (update || (!built && GameProcess::hasGameFiles(cfg::gameDataRoot(gameId_)))) {
             showNotice(update ? tr("This update changed the game itself: it is being put together again on Build game (a "
                                    "few minutes at most, once). Online matches need it.")
@@ -993,6 +1006,11 @@ void MainWindow::cliLobbyMessage(const QJsonObject& msg) {
         if (m.value(QStringLiteral("name")).toString() == server_->accountName()) me_ready = ready;
     }
     if (!me_ready && cliLobbyReadyFor_ != cliLobbyDone_) {
+        QString err;
+        if (!controller_->prepareGame(lobby.value(QStringLiteral("game")).toString(), &err)) {
+            applog::write(QStringLiteral("cli: not ready in lobby %1: %2").arg(lobby.value(QStringLiteral("id")).toString(), err));
+            return;  // again with the lobby's next message
+        }
         cliLobbyReadyFor_ = cliLobbyDone_;
         applog::write(QStringLiteral("cli: ready in lobby %1").arg(lobby.value(QStringLiteral("id")).toString()));
         QJsonObject ready{{QStringLiteral("type"), QStringLiteral("lobby_ready")}, {QStringLiteral("ready"), true},

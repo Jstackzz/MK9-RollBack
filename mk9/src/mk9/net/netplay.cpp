@@ -188,6 +188,17 @@ struct Pacing {
   std::deque<int> samples;     // the last frames' mine - theirs (Pace), twice the frames ahead
   double round_trip = -1;      // mine + theirs, slowly smoothed: the round trip in this PC's frames
   std::deque<uint32_t> holds;  // the frames held back lately, for as long as they have not all shown
+  // at our last frame tops: when, the other's frame as heard and the periods this PC had stood still so far (held
+  // back or waiting at the prediction limit); from them the frames the other ran a 60 Hz period lately and the frames
+  // this PC ran a period it did not stand still (Pace), and the part of a frame still to hold back for the other
+  struct Top {
+    std::chrono::steady_clock::time_point when;
+    uint32_t theirs;
+    double paused;
+  };
+  std::deque<Top> tops;
+  double paused = 0, their_rate = 1.0, my_rate = 1.0, owed = 0;
+  bool keeping = false;  // holding back to the other's pace, until no longer ahead
   // for the log every 10 s: frames held back, the sum and count of the averages, the frames that waited at the
   // prediction limit (kMaxPredict) and how long
   uint32_t held = 0, ahead_n = 0, limit_waits = 0;
@@ -766,6 +777,9 @@ bool StartRolling(PPCContext& ctx) {
   // lockstep kept the sides even until now: what Pace saw before it is past
   g_pace.samples.clear();
   g_pace.holds.clear();
+  g_pace.tops.clear();
+  g_pace.owed = 0;
+  g_pace.keeping = false;
   for (PeerState& p : g_peers) p.confirmed = g_frame;
   REXLOG_INFO("mk9 net: rollback from frame {} of match {}", g_frame, g_match);
   return true;
@@ -812,10 +826,11 @@ void LogReplayTimes(bool now) {
     REXLOG_INFO("mk9 net: the rendering thread while frames run again waited for it: {}", where);
   // how even the sides were (Pace)
   if (g_pace.ahead_n)
-    REXLOG_INFO("mk9 net: {:.2f} frames ahead of the others on average (a round trip {:.1f} frames), {} frames held back, "
-                "{} waited for their inputs at the {}-frame limit ({:.0f} ms)",
-                g_pace.ahead_sum / g_pace.ahead_n / 2.0, g_pace.round_trip, g_pace.held, g_pace.limit_waits,
-                kMaxPredict, g_pace.limit_ms);
+    REXLOG_INFO("mk9 net: {:.2f} frames ahead of the others on average (a round trip {:.1f} frames, the others at {:.0f} "
+                "frames a second, this PC at {:.0f} when not held back), {} frames held back, {} waited for their "
+                "inputs at the {}-frame limit ({:.0f} ms)",
+                g_pace.ahead_sum / g_pace.ahead_n / 2.0, g_pace.round_trip, g_pace.their_rate * 60.0,
+                g_pace.my_rate * 60.0, g_pace.held, g_pace.limit_waits, kMaxPredict, g_pace.limit_ms);
   g_pace.held = g_pace.ahead_n = g_pace.limit_waits = 0;
   g_pace.ahead_sum = g_pace.limit_ms = 0;
   // what keeping the frames costs every frame, rolled back or not: the pages first written (each a fault)
@@ -953,6 +968,16 @@ bool CorrectGuesses(PPCContext& ctx, uint8_t* base) {
 // rollbacks) has the other hold back the frames it falls behind by. Until 0.5.6 a PC held back one frame in 20 at most,
 // by sleeping in the frame, which the frame cap mostly made up for (frame.cpp): a player's 0.5.5 game ran ahead of one
 // at 49 a second until it guessed 8 frames ahead, its rollbacks 4.5 frames long on average.
+// The lead alone could not keep up with a PC that ran fewer than 40 frames a second (one frame held back every other
+// frame still runs 40), nor follow one that ran slower for a while, as what it measures lags by the 8 frames of the
+// average and a round trip: the faster PC ran to the prediction limit (kMaxPredict) and stayed there, waiting at every
+// frame for the other's next input and rolling back 8 frames at every change of it, 40-60 ms each, its screen in fits
+// and starts while the slower one's ran evenly (until 0.5.8; two-game test, one game held to 30 a second: the other
+// 41 s of 164 waiting at the limit, 575 rollbacks of 5-8 frames, a 60 Hz capture of it 31 frames a second shown again
+// in runs of up to 8). So a PC ahead of one that runs fewer than 54 frames a second, and itself clearly faster (not
+// counting the frames it held back), also runs at the other's pace: it holds back as many frames as the other runs fewer
+// than 60 a second (measured from the frame the other says it runs, over the last kPaceRateFrames frames of ours; a frame
+// in two against 30 a second, one in four against 48), and the lead is corrected on top as before.
 // How far ahead: mine - theirs is twice the frames (mine: our frame less theirs as we heard it; theirs: theirs less
 // ours as they heard it; the trip each way counted in both, once with each sign). Averaged over kPaceWindow frames,
 // as a packet's way varies by a frame or more. A frame held back shows in it in two halves: mine is one less from the
@@ -961,10 +986,16 @@ bool CorrectGuesses(PPCContext& ctx, uint8_t* base) {
 constexpr int kPaceWindow = 8;
 constexpr double kPaceAhead = 2.5;
 constexpr uint32_t kPaceGap = 2;
+// the other's pace: measured over this many of our frames; 54 a second and up is left to the lead alone (which keeps
+// up with 40 and more), and so is a PC that runs no faster itself: two PCs both slowed down (both rolling back a lot,
+// one GPU between two test games) must not take turns holding back, each slowing the other down in turn
+constexpr int kPaceRateFrames = 30;
+constexpr double kPaceRateFull = 0.9, kPaceRateMargin = 0.08;
 
 void Pace() {
   Pacing& s = g_pace;
   int sample = std::numeric_limits<int>::min(), trip = 0;
+  uint32_t their_frame = 0;
   for (const PeerState& p : g_peers) {
     if (!p.now) continue;  // not heard in this match yet
     const int mine = int(g_frame) - int(p.now);
@@ -972,6 +1003,7 @@ void Pace() {
     if (mine - theirs > sample) {
       sample = mine - theirs;
       trip = mine + theirs;
+      their_frame = p.now;
     }
   }
   if (sample == std::numeric_limits<int>::min()) return;
@@ -1000,21 +1032,49 @@ void Pace() {
   }();
   const bool hold =
       at_least > 0 && ahead >= at_least && (s.holds.empty() || g_frame - s.holds.back() >= kPaceGap);
-  // MK9_TRACE_PACE=<file> (diagnostics): every frame's sample, round trip, average, unseen part, hold, and the time
+  // the other's pace: the frames it ran a 60 Hz period over our last kPaceRateFrames frames, and ours not counting the
+  // periods we stood still. Held back to only by a PC that runs clearly faster than the other, which runs clearly slower
+  // than 60 a second; when more than half the threshold ahead (the one behind, or both near even, running slower too
+  // would slow the other down in turn), and then for as long as it is not behind: stopped and started again at every
+  // dip of the lead under the half (each correction of the lead makes one), the faster PC ran bursts at 60 a second
+  // between frames shown three times
+  s.tops.push_back({Clock::now(), their_frame, s.paused});
+  while (s.tops.size() > size_t(kPaceRateFrames)) s.tops.pop_front();
+  double rate = 1.0, mine = 1.0;
+  if (s.tops.size() == size_t(kPaceRateFrames)) {
+    const double span = Ms(s.tops.back().when - s.tops.front().when) * 60.0 / 1000.0;
+    const double ran = double(int(s.tops.back().theirs - s.tops.front().theirs));
+    const double ran_here = span - (s.tops.back().paused - s.tops.front().paused);
+    if (span > 1.0) rate = std::clamp(ran / span, 0.25, 1.0);
+    if (ran_here > 1.0) mine = std::clamp(double(kPaceRateFrames - 1) / ran_here, 0.25, 1.0);
+  }
+  s.their_rate = rate;
+  s.my_rate = mine;
+  s.keeping = at_least > 0 && rate < kPaceRateFull && rate < mine - kPaceRateMargin &&
+              (ahead >= at_least / 2 || (s.keeping && ahead >= 0));
+  if (s.keeping) s.owed += 1.0 / rate - 1.0;
+  else s.owed = 0;
+  const int keep_pace = int(s.owed);
+  s.owed -= keep_pace;
+  const int periods = std::min(3, keep_pace + (hold ? 1 : 0));
+  // MK9_TRACE_PACE=<file> (diagnostics): every frame's sample, round trip, average, unseen part, hold, the time, the
+  // other's pace, this PC's and the frames held back
   static FILE* trace = [] {
     const char* v = std::getenv("MK9_TRACE_PACE");
     return v && *v ? std::fopen(v, "w") : nullptr;
   }();
   if (trace) {
     static const auto t0 = Clock::now();
-    std::fprintf(trace, "%u %d %d %.2f %.2f %.2f %d %.1f\n", g_frame, sample, trip, average, unseen, ahead, hold ? 1 : 0,
-                 Ms(Clock::now() - t0));
+    std::fprintf(trace, "%u %d %d %.2f %.2f %.2f %d %.1f %.2f %.2f %d\n", g_frame, sample, trip, average, unseen,
+                 ahead, hold ? 1 : 0, Ms(Clock::now() - t0), rate, mine, periods);
     std::fflush(trace);
   }
-  if (hold) {
-    s.holds.push_back(g_frame);
-    s.held++;
-    frame::HoldNext();
+  // the lead's own correction shows in the average (unseen above); what keeps pace with the other does not move it
+  if (hold) s.holds.push_back(g_frame);
+  if (periods) {
+    s.held += uint32_t(periods);
+    s.paused += periods;
+    frame::HoldNext(periods);
   }
 }
 
@@ -1121,6 +1181,7 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
       if (g_stats.waits != waits) {
         g_pace.limit_waits++;
         g_pace.limit_ms += Ms(Clock::now() - t);
+        g_pace.paused += Ms(Clock::now() - t) * 60.0 / 1000.0;  // standing still, as a frame held back (Pace)
       }
     }
     if (!CorrectGuesses(ctx, base)) return Lost(Status::Desynced);

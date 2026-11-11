@@ -47,6 +47,9 @@ public:
     static QHash<QString, QString> parseKeys(const QString& line);  // key=value tokens after the verb
     // the game's files where the game looks for them: default.xex in the game data folder
     static bool hasGameFiles(const QString& dataRoot);
+    // the game was built from another release than the package's project now holds (an update came): it must be
+    // built again before it plays online (netplay refuses two different releases)
+    static bool needsRebuild(const QString& gameId);
 
     // what to tell a player whose Windows blocks the game (`blocked`: it just did): Smart App Control and how to
     // switch it off

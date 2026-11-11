@@ -64,6 +64,13 @@ public:
     static QString pingText(const QJsonObject& found);
     QString gameStatus() const;
     GameProcess* game() const { return game_; }
+    // the games this launcher has running (F3 reports look in their sessions)
+    QList<GameProcess*> runningGames() const {
+        QList<GameProcess*> games;
+        for (GameProcess* g : {game_, solo_, localA_, localB_})
+            if (g) games.append(g);
+        return games;
+    }
 
     bool findMatch(const QueueRequest& req, QString* error);
     void cancelSearch();
@@ -85,8 +92,12 @@ public:
     // counted). Casual, the choice: "rematch" (the same fighters, when both choose it) or "select" (both pick again on
     // the select screen); a ranked set ignores it.
     void seriesReady(bool ready, const QString& choice = QStringLiteral("rematch"));
-    // a lobby's Ready: whether this PC can play its match (the game built, the disc extracted); nothing starts yet
+    // whether this PC can play a match: the game built, and for the release the launcher has (an update that changed
+    // the game builds it again first, Build game), no build running, the disc extracted. A lobby's Ready and a search
+    // ask it first; every match's game asks it before it boots. Nothing starts here
     bool prepareGame(const QString& gameId, QString* error);
+    // Build game extracts or builds: no match's game starts meanwhile (prepareGame)
+    void setBuilding(bool building) { building_ = building; }
     // the lobby's countdown for this player's match began: its game boots now, on both PCs at once; called off (a
     // player no longer ready), a game started for it closes
     void lobbyMatchComing(const QString& gameId);
@@ -197,6 +208,7 @@ private:
     QList<quintptr> soloHidden_;  // the windows freezing hid, shown again by thawing
     bool showWhenReady_ = false;  // the match's game started for a match on its way: to the front once it is up
     bool lobbyComing_ = false;    // the lobby's countdown for this player's match: its game boots meanwhile
+    bool building_ = false;       // Build game is busy (setBuilding)
     QString pendingBoot_;         // a match's game to start once the games closing first have gone (bootGame)
     QPointer<GameProcess> closingSolo_, closingGame_;  // the last single player and match's game closed, while they exit
     GameProcess* localA_ = nullptr;

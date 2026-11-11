@@ -229,15 +229,6 @@ void BuildPage::findDisc() {
         });
 }
 
-bool BuildPage::needsRebuild(const QString& gameId) {
-    const QDir folder(cfg::gameFolder(gameId));
-    QFile want(folder.filePath(QStringLiteral("project/VERSION")));
-    if (!QFileInfo::exists(cfg::gameExe(gameId)) || !want.open(QIODevice::ReadOnly)) return false;
-    QFile built(folder.filePath(QStringLiteral("built.txt")));
-    const QByteArray w = want.readAll().trimmed();
-    return !built.open(QIODevice::ReadOnly) || built.readAll().trimmed() != w;
-}
-
 void BuildPage::rebuild() {
     if (step_ == Step::Idle) runBuild();
 }

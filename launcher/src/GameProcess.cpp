@@ -54,6 +54,16 @@ bool GameProcess::hasGameFiles(const QString& dataRoot) {
     return !dataRoot.isEmpty() && QFileInfo::exists(QDir(dataRoot).filePath(QStringLiteral("default.xex")));
 }
 
+// build-game.cmd copies project\VERSION to built.txt once the game it built is in place
+bool GameProcess::needsRebuild(const QString& gameId) {
+    const QDir folder(cfg::gameFolder(gameId));
+    QFile want(folder.filePath(QStringLiteral("project/VERSION")));
+    if (!QFileInfo::exists(cfg::gameExe(gameId)) || !want.open(QIODevice::ReadOnly)) return false;
+    QFile built(folder.filePath(QStringLiteral("built.txt")));
+    const QByteArray w = want.readAll().trimmed();
+    return !built.open(QIODevice::ReadOnly) || built.readAll().trimmed() != w;
+}
+
 QString GameProcess::smartAppControlHelp(bool blocked) {
     return (blocked ? tr("Windows' Smart App Control blocked the game.")
                     : tr("Windows' Smart App Control is on, and it will block the game.")) +
@@ -111,6 +121,8 @@ bool GameProcess::start(const QString& exe, QString* error, bool netMode) {
             env.insert(QStringLiteral("MK9_NET_LOG"), native(QDir(sessionDir_).filePath(QStringLiteral("net-{match}.log"))));
     }
     env.insert(QStringLiteral("MK9_SESSION_DIR"), native(sessionDir_));
+    // F3 in the game saves what is on the screen there, and ReportSender sends it (mk9/src/mk9/report.h)
+    env.insert(QStringLiteral("MK9_CAPTURE_DIR"), native(QDir(sessionDir_).filePath(QStringLiteral("captures"))));
     env.insert(QStringLiteral("MK9_INSTANCE"), QString::number(instance_));
     env.insert(QStringLiteral("MK9_CONTROLS"), native(controls::file()));  // read again when it changes
     for (auto it = extraEnv_.cbegin(); it != extraEnv_.cend(); ++it) env.insert(it.key(), it.value());
@@ -170,10 +182,12 @@ bool GameProcess::start(const QString& exe, QString* error, bool netMode) {
         poll_.stop();
         applog::write(QStringLiteral("game %1/%2: exited with code %3%4")
                           .arg(gameId_).arg(instance_).arg(code).arg(st == QProcess::CrashExit ? " (crash)" : ""));
-        // ended by itself with an error (not asked to quit, not killed), or closed while it stood still in a match (its
-        // hang.txt, mk9/src/mk9/crash.h): a crash report
-        const bool stoodStill = code == 0 && QFileInfo::exists(QDir(sessionDir_).filePath(QStringLiteral("hang.txt")));
-        if (!quitting_ && (code != 0 || stoodStill) && !standIn_)
+        // ended by itself with an error (not asked to quit, not killed), or ended while it stood still in a match (its
+        // hang.txt, mk9/src/mk9/crash.h), also when this launcher closed it then: a player who gave up on a frozen
+        // match ended it here (the match's game was closed for it, killed when it did not answer), and the report is
+        // all that says where that game stood
+        const bool stoodStill = QFileInfo::exists(QDir(sessionDir_).filePath(QStringLiteral("hang.txt")));
+        if (!standIn_ && (stoodStill || (!quitting_ && code != 0)))
             CrashReports::instance().gameEnded(gameId_, sessionDir_, code, ran_.elapsed());
         const QString last = quitting_ ? QStringLiteral("exited") : QStringLiteral("error exited");
         exitCode_ = code;

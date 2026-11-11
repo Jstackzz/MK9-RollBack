@@ -53,7 +53,7 @@ QString keyName(int vk);  // as the file writes it, in the game's names: "K", "S
 int keyFromName(const QString& name);
 QString keyLabel(int vk);  // for people: "K", "Left Shift", the sign this keyboard's layout puts on the key
 // the virtual key of a press, left and right Shift and Ctrl apart; 0 for a key the game cannot use (Alt and F10 open
-// the window menu, the Windows keys and Esc belong to Windows and to leaving)
+// the window menu, the Windows keys and Esc belong to Windows and to leaving, F3 saves a report of what is on screen)
 int keyFromEvent(const QKeyEvent* event);
 
 }  // namespace controls

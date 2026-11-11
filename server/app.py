@@ -39,7 +39,7 @@ NEEDS_LOGIN = {
     "logout", "queue_join", "queue_leave", "match_accept", "match_decline", "ping_report", "match_state",
     "result", "lobby_create", "lobby_list", "lobby_join", "lobby_leave", "lobby_chat", "lobby_character",
     "lobby_ready", "lobby_start", "admin_notice", "series_ready", "lobby_role", "feed", "tunnel", "desync_report",
-    "crash_note",
+    "crash_note", "report_file", "report_done",
 }
 # a tunnel (docs/PROTOCOL.md): a tun message carries at most this many datagrams, each at most this much base64
 TUNNEL_BATCH = 64
@@ -56,6 +56,14 @@ DESYNC_LINES = 40  # 200 characters each at most
 CRASH_NOTES_PER_SESSION = 10
 CRASH_NOTE_LINES = 16  # 200 characters each at most
 PLAIN_TEXT = re.compile(r"[\x20-\x7E]*")  # printable ASCII only: it goes into the log as is
+# F3 reports (what a player saw drawn wrong: the game's pictures, its log), docs/PROTOCOL.md
+REPORTS_PER_SESSION = 3
+REPORT_MAX_BYTES = 12 << 20      # a report's files together, as written
+REPORT_MAX_FILES = 40
+REPORT_PART_CHARS = 16000        # base64 a report_file message carries at most (P.MAX_LINE is the whole line's)
+REPORTS_DIR_MAX_BYTES = 4 << 30  # every report kept: past this, new ones are turned down
+REPORT_ID = re.compile(r"[0-9a-f]{16}")
+REPORT_FILE = re.compile(r"[A-Za-z0-9_-]{1,40}\.(jpg|png|txt|log)")
 # the spectator feed's packets (mk9/src/mk9/net/netplay.cpp): u32 magic "MK9N", u8 type, u8 slot (the sender's), u16
 # match; types 6 MEET (its READY at a barrier), 7 OWN (its own inputs), 8 CHECK, 9 END
 FEED_MAGIC = b"MK9N"
@@ -129,6 +137,7 @@ class ServerConfig:
     crash_dir: str | None = None  # crash reports launchers send (default: crashes beside the database)
     crash_keep: int = 500         # the newest kept
     crash_rate: int = 6           # reports one address may send an hour
+    reports_dir: str | None = None  # where F3 reports are kept (None: this server takes none)
     max_spectators: int = 8       # a lobby's spectators, besides its players
     koth_max_players: int = 8     # a King of the Hill lobby's players (in line for the hill)
     feed_max_bytes: int = 8 << 20  # a lobby match's spectator feed, at most
@@ -138,6 +147,19 @@ class ServerConfig:
     upnp_renew: float = 1200.0
     scrypt_n: int = auth.SCRYPT_N
     mm: MatchmakingConfig = field(default_factory=MatchmakingConfig)
+
+
+@dataclass
+class Report:
+    """An F3 report coming in (report_file messages, then report_done): its folder and what was written to it."""
+
+    folder: str
+    game: str
+    bytes: int = 0
+    files: set[str] = field(default_factory=set)
+    parts: dict[str, int] = field(default_factory=dict)  # a file still coming in: the next part expected
+    pending: dict[str, list[bytes]] = field(default_factory=dict)  # its parts so far
+    done: bool = False
 
 
 class Session:
@@ -165,6 +187,7 @@ class Session:
         self.tunnel: RelayRoute | None = None  # where what it sends through this connection (tun) goes
         self.tunnel_out: list[str] = []  # datagrams for it (base64), sent together at the end of the loop's pass
         self.crash_parts: dict[str, list[str | None]] = {}  # crash reports coming in, by id
+        self.reports: dict[str, Report] = {}  # F3 reports coming in, and the ones saved (by id)
         self.desync_reports = 0
         self.crash_notes = 0
         self.queue: QueueEntry | None = None
@@ -586,6 +609,8 @@ class Server:
             "crash_report": self.on_crash_report,
             "desync_report": self.on_desync_report,
             "crash_note": self.on_crash_note,
+            "report_file": self.on_report_file,
+            "report_done": self.on_report_done,
         }
 
     # --- lifecycle --------------------------------------------------------------------------------
@@ -2685,6 +2710,83 @@ class Server:
         for line in lines:
             log.info("DESYNC_REPORT %s | %s", s.name, line)
         self._reply(s, msg, {"type": "desync_ack"})
+
+    # --- F3 reports --------------------------------------------------------------------------------
+
+    def _reports_bytes(self) -> int:
+        total = 0
+        for root, _dirs, files in os.walk(self.cfg.reports_dir or ""):
+            for f in files:
+                with suppress(OSError):
+                    total += os.path.getsize(os.path.join(root, f))
+        return total
+
+    def on_report_file(self, s: Session, msg: dict[str, Any]) -> None:
+        """A part of a file of an F3 report, what a player saw drawn wrong: the game's pictures of that frame and of the
+        next ones, the end of its log (docs/PROTOCOL.md). A file's parts come in order, base64; once its last one is in
+        it is written (inflated first when `zlib`, as Qt's qCompress makes it) into the report's folder,
+        <reports_dir>/<day>/<time>-<player>-<game>-<report>. Limits: REPORTS_PER_SESSION reports, REPORT_MAX_BYTES and
+        REPORT_MAX_FILES each, REPORTS_DIR_MAX_BYTES on disk."""
+        if not self.cfg.reports_dir:
+            raise P.ProtocolError("unavailable", "This server keeps no reports.")
+        rid = P.get_str(msg, "report", max_len=16)
+        game = P.get_str(msg, "game", max_len=8)
+        name = P.get_str(msg, "name", max_len=44)
+        data = P.get_str(msg, "data", max_len=REPORT_PART_CHARS, default="")
+        part, parts = msg.get("part"), msg.get("parts")
+        if (not REPORT_ID.fullmatch(rid) or game not in P.GAMES or not REPORT_FILE.fullmatch(name)
+                or not isinstance(part, int) or isinstance(part, bool) or not isinstance(parts, int)
+                or isinstance(parts, bool) or not 0 <= part < parts <= 4096):
+            raise P.ProtocolError("bad_request", "Bad report part.")
+        r = s.reports.get(rid)
+        if r is None:
+            if len(s.reports) >= REPORTS_PER_SESSION:
+                raise P.ProtocolError("too_many", "No more reports from this connection.")
+            if self._reports_bytes() > REPORTS_DIR_MAX_BYTES:
+                raise P.ProtocolError("unavailable", "The server takes no more reports for now.")
+            day, clock = time.strftime("%Y-%m-%d"), time.strftime("%H%M%S")
+            r = Report(folder=os.path.join(self.cfg.reports_dir, day, f"{clock}-{s.name}-{game}-{rid}"), game=game)
+            s.reports[rid] = r
+        if r.done or name in r.files or r.parts.get(name, 0) != part:
+            raise P.ProtocolError("bad_request", "A report's parts come once each, in order.")
+        try:
+            chunk = base64.b64decode(data, validate=True)
+        except ValueError as e:
+            raise P.ProtocolError("bad_request", "Report parts are base64.") from e
+        if r.bytes + sum(map(len, r.pending.get(name, []))) + len(chunk) > REPORT_MAX_BYTES:
+            raise P.ProtocolError("too_large", "The report is too large.")
+        r.pending.setdefault(name, []).append(chunk)
+        r.parts[name] = part + 1
+        if part + 1 < parts:
+            return
+        content = b"".join(r.pending.pop(name))
+        del r.parts[name]
+        if msg.get("zlib") is True:
+            inflate = zlib.decompressobj()
+            try:
+                content = inflate.decompress(content[4:], REPORT_MAX_BYTES - r.bytes + 1)
+            except zlib.error as e:
+                raise P.ProtocolError("bad_request", "A compressed report file did not inflate.") from e
+            if inflate.unconsumed_tail:
+                raise P.ProtocolError("too_large", "The report is too large.")
+        if r.bytes + len(content) > REPORT_MAX_BYTES or len(r.files) >= REPORT_MAX_FILES:
+            raise P.ProtocolError("too_large", "The report is too large.")
+        os.makedirs(r.folder, exist_ok=True)
+        with open(os.path.join(r.folder, name), "wb") as f:
+            f.write(content)
+        r.bytes += len(content)
+        r.files.add(name)
+
+    def on_report_done(self, s: Session, msg: dict[str, Any]) -> None:
+        """The report's files are all in: logged with the player, where they are kept."""
+        rid = P.get_str(msg, "report", max_len=16)
+        r = s.reports.get(rid)
+        if r is None or r.done or r.parts or not r.files:
+            raise P.ProtocolError("bad_request", "No such report coming in.")
+        r.done = True
+        log.info("REPORT %s %s (launcher %s): %d files, %d KB, in %s", s.name, r.game, s.client_version or "?",
+                 len(r.files), r.bytes // 1024, r.folder)
+        self._reply(s, msg, {"type": "report_saved", "report": rid, "files": len(r.files)})
 
     def on_crash_note(self, s: Session, msg: dict[str, Any]) -> None:
         """A launcher's game crashed or stood still: where, in a few lines its launcher sends by itself (what the game

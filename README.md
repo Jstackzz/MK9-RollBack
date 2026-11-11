@@ -22,11 +22,19 @@ There is nothing to install and nothing else to download: the zip has everything
    **Lobbies**, or **Single player** for the game's own modes offline.
 
 The launcher updates itself from this repository's releases; when an update changes the game, it
-puts the game together again on its own (usually in seconds). If a build fails, the Build game page
-says why, and everything the build printed is in `games\mk9\build.log`.
+puts the game together again on its own (usually in seconds). Until that is done it does not search
+for matches or ready up in a lobby, so nobody gets matched with a game from another release. If a
+build fails, the Build game page says why, and everything the build printed is in `games\mk9\build.log`.
+
+The game skips its intro movies and title screen: it starts at the main menu in a few seconds.
 
 If the game crashes, the launcher keeps a crash report in `crashes\` beside it and offers to send it to
 the MK9 Online server, so whoever runs it can see what went wrong.
+
+If something is drawn wrong (flickering textures, a fighter or floor in the wrong colours, missing health
+bars), press **F3** while it is on the screen. The game saves a picture of it and of the next 20 frames and
+says so at the top of the screen; the launcher then sends them to the developers by itself, with the end of
+the game's log (no IP addresses, no folder names), as long as you are signed in.
 
 ## What works and what does not (yet)
 

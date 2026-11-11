@@ -8,6 +8,7 @@
 #include "mk9/gmalloc.h"
 #include "mk9/link.h"
 #include "mk9/names.h"
+#include "mk9/report.h"
 #include "mk9/snap.h"
 #include "mk9/sound.h"
 
@@ -127,21 +128,21 @@ void WaitUntil(Steady::time_point t) {
   }
 }
 
-// a frame held back (HoldNext): the next frame starts a period later than it would. Not a sleep in the frame: the cap
-// starts a late frame's next one as if it had been on time, so a sleep only took away what the frame waited here
-// anyway (a frame of 6 ms of work slept 16.7 and lost 5: a game held back every other frame still ran 52 a second)
-bool g_hold = false;
+// frames held back (HoldNext): the next frame starts that many periods later than it would. Not a sleep in the frame:
+// the cap starts a late frame's next one as if it had been on time, so a sleep only took away what the frame waited
+// here anyway (a frame of 6 ms of work slept 16.7 and lost 5: a game held back every other frame still ran 52 a second)
+int g_hold = 0;
 
 void Cap() {
   if (g_cap_period == Steady::duration::zero()) {
-    if (g_hold) std::this_thread::sleep_for(std::chrono::microseconds(16667));
-    g_hold = false;
+    if (g_hold) std::this_thread::sleep_for(std::chrono::microseconds(16667) * g_hold);
+    g_hold = 0;
     return;
   }
   auto now = Steady::now();
   if (g_hold) {
-    g_cap_next = std::max(g_cap_next, now - kCapSlack) + g_cap_period;
-    g_hold = false;
+    g_cap_next = std::max(g_cap_next, now - kCapSlack) + g_cap_period * g_hold;
+    g_hold = 0;
   }
   if (now < g_cap_next) {
     WaitUntil(g_cap_next);
@@ -179,7 +180,7 @@ bool OnMainThread() { return CurrentTid() == MainThreadId(); }
 void SetTopHook(Hook hook) { g_top = hook; }
 void SetEndHook(Hook hook) { g_end = hook; }
 bool Replaying() { return g_replaying.load(std::memory_order_relaxed); }
-void HoldNext() { g_hold = true; }
+void HoldNext(int periods) { g_hold = std::max(g_hold, periods); }
 
 namespace {
 
@@ -301,6 +302,7 @@ REX_HOOK_RAW(sub_823621F8) {
   mk9::diag::OnFrame(n);
   mk9::link::OnFrame(n);
   mk9::names::OnFrame(n);
+  mk9::report::OnFrame(n);
 
   // the frame rate, every ten seconds of frames, and how often the window was presented meanwhile (what a
   // frame counter overlay shows: once a frame unless something repaints the window on its own)

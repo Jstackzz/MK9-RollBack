@@ -13,11 +13,16 @@
 #     [-StaggerS <s>]  boot player 2's game that much after player 1's, as players' games start at different times
 #     [-Extra "MK9_NET_LAG=50;MK9_NET_JITTER=30"]  environment for every game: here a lagged network, so that a
 #                     rollback match and its rematch roll back
+#     [-ExtraB "MK9_FRAME_CAP=30"]  environment for player 2's game only, after -Extra: here a slower PC
+#     [-Select]       the -Rematch through SELECT A NEW FIGHTER (select=1, as a Kasual series' "both pick again"):
+#                     both games back to the select screen, where the autopilots pick (-Picks) again
+#     [-AttackB]      as -Attack, but player 2 jabs: player 1 loses and steers the CONTINUE? menu
 function Start-LinkLocal {
     param([Parameter(Mandatory = $true)][string]$Out, [string]$Mode = "versus", [string]$Netcode = "lockstep",
           [int]$Delay = 2, [string]$Picks = "cursor", [string]$Snaps = "2:300", [int]$TimeoutS = 240,
-          [switch]$Spectator, [switch]$Attack, [switch]$Rematch, [switch]$Park, [switch]$TraceRand, [int]$DelayB = -1,
-          [string]$Names = "", [string]$Extra = "", [switch]$TraceScript, [string]$Bin = "", [string]$BinB = "", [int]$StaggerS = 0)
+          [switch]$Spectator, [switch]$Attack, [switch]$AttackB, [switch]$Rematch, [switch]$Select, [switch]$Park, [switch]$TraceRand, [int]$DelayB = -1,
+          [string]$Names = "", [string]$Extra = "", [string]$ExtraB = "", [switch]$TraceScript, [string]$Bin = "", [string]$BinB = "",
+          [int]$StaggerS = 0)
     $root = Split-Path $PSScriptRoot -Parent
     if (-not $root) { $root = "C:\Users\Owner\source\repos\mk9-rollback" }
     $bin = if ($Bin) { $Bin } else { Join-Path $root "mk9\out\build\win-amd64-release" }
@@ -39,9 +44,11 @@ function Start-LinkLocal {
                    MK9_NET_LOG = (Join-Path $d "net-{match}.log"); MK9_NET_SNAPS = $Snaps;
                    MK9_SNAP_DIR = $d; MK9_SNAP_WIDTH = "480" }
         if ($Attack) { $envs["MK9_AUTOPILOT_ATTACK"] = "1" }
+        if ($AttackB) { $envs["MK9_AUTOPILOT_ATTACK"] = "2" }
         if ($TraceRand) { $envs["MK9_TRACE_RAND"] = (Join-Path $d "rand.txt") }
         if ($TraceScript) { $envs["MK9_TRACE_SCRIPT"] = (Join-Path $d "script.txt") }
         foreach ($e in ($Extra -split ";")) { if ($e -match "^(\w+)=(.*)$") { $envs[$Matches[1]] = $Matches[2] } }
+        if ($i.dir -eq "b") { foreach ($e in ($ExtraB -split ";")) { if ($e -match "^(\w+)=(.*)$") { $envs[$Matches[1]] = $Matches[2] } } }
         foreach ($k in $envs.Keys) { Set-Item "Env:$k" $envs[$k] }
         $gameBin = if ($i.dir -eq "b" -and $BinB) { $BinB } else { $bin }
         $procs += Start-Process -FilePath (Join-Path $gameBin "mk9.exe") -WorkingDirectory $gameBin -PassThru -ArgumentList `
@@ -84,13 +91,14 @@ function Start-LinkLocal {
         Send $i $line
     }
     "sent start ($match)"
-    if (-not $Attack) { return }
+    if (-not $Attack -and -not $AttackB) { return }
     if (-not (WaitAll "^result" $players 600)) { return }
     foreach ($i in $inst) { "$($i.dir): $(Status $i)" }
     if ($Rematch) {
         $match2 = "$match-2"
-        foreach ($i in $players) { Send $i "rematch match=$match2" }
-        "sent rematch ($match2)"
+        $how = if ($Select) { " select=1" } else { "" }
+        foreach ($i in $players) { Send $i "rematch match=$match2$how" }
+        "sent rematch$how ($match2)"
         Start-Sleep -Seconds 5
         if (-not (WaitAll "^result.*$match2" $players 600)) { return }
         foreach ($i in $inst) { "$($i.dir): $(Status $i)" }

@@ -22,6 +22,7 @@
 #include "mk9/link.h"
 #include "mk9/names.h"
 #include "mk9/net/netplay.h"
+#include "mk9/report.h"
 #include "mk9/snap.h"
 
 namespace mk9::synctest {
@@ -165,6 +166,7 @@ void Mk9App::OnPostSetup() {
   mk9::synctest::Init();  // a sync test takes the frame hooks over from netplay
   mk9::diag::Init();
   mk9::snap::Init();
+  mk9::report::Init();
   mk9::snap::SetCapture([this](mk9::snap::Image& out) {
     auto* presenter = WindowPresenter::Of(window());
     if (!presenter) return false;

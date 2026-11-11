@@ -21,6 +21,9 @@ void SetPlayers(const std::string& p1, const std::string& p2);
 // at the end of each frame, on the main thread: where the bars are, read from the game
 void OnFrame(uint64_t frame);
 
+// a line at the top of the screen for five seconds, on the main thread (F3's: mk9/report.h)
+void ShowNotice(const std::string& text);
+
 // Mk9App: the font (before the renderer builds the atlas), and the drawer the overlay opens in while names are
 // up, with a way to run a task on the UI thread (the overlay's)
 void ConfigureFonts(ImFontAtlas* atlas);

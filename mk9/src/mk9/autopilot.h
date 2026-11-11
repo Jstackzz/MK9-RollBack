@@ -23,11 +23,16 @@ struct Plan {
   std::string picks[4];  // roster ids the autopilot picks; empty: the player picks
 };
 
-// at start (launcher=true: the boot goes to the hold point by itself)
+// at start (launcher=true: the boot goes to the hold point by itself). Both ways the boot's movies are
+// skipped (A, which the movie player takes for a skip); without the launcher (single player) the title's
+// START is pressed too, and the player takes over at the main menu. Not with scripted test controllers
+// (their frames count from a boot with the movies), nor with MK9_SHOW_INTRO=1.
 void Init(bool launcher);
 // end of every frame on the main thread
 void OnFrame(uint64_t frame);
 bool AtHoldPoint();
+// single player: on its way to the main menu (OnFrame wanted until then)
+bool Skipping();
 
 // from the hold point to the plan's select screen; online, slot 0's autopilot steers both games
 // (its presses are its player's netplay input) and the others wait

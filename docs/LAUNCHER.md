@@ -102,7 +102,11 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
   tooltip; the ranked MATCH FOUND window shows "Your rank: X (N Elo)", the match log the opponent's once both
   accepted, the set card the opponent's, and a set's end the rank change ("Ranked up to Warrior!").
 - **Lobby**: create (name, mode, optional password, best of 1/3/5, *King of the Hill*), join from the list or by its
-  5-letter code, chat, Ready. Ready starts no game (it only checks that the game is built and the disc extracted).
+  5-letter code, chat, Ready. Ready starts no game (it only checks that this PC can play: `MatchController::
+  prepareGame`, the game built for the release the launcher has, no build running, the disc extracted). A search
+  asks the same, and so does every match's game before it boots (`bootGame`): a launcher that updated before its
+  game was built again started the old game for a lobby's countdown, which met the other player's new one and ended
+  at once ("another release", 2026-11-10). Build game starting takes a lobby's Ready back.
   The two to play ready (both players, or the first two in a King of the Hill line), the server starts the match
   after a 3 s countdown (STARTING IN 3, 2, 1, then MATCH IN PROGRESS), and the countdown boots both players' games
   at once (`MatchController::lobbyMatchComing`; single player open closes first, a countdown called off closes the
@@ -179,9 +183,12 @@ A game that ends during a match reports `left` with how (`crash C0000005`, `abor
 ## Crash reports
 
 A game the launcher started that ends by itself with an exit code other than 0 (not asked to quit, not killed), or
-that was closed while it stood still in a match (it wrote `hang.txt`: no frame for 10 s in sync while not waiting for
+that ended while it stood still in a match (it wrote `hang.txt`: no frame for 10 s in sync while not waiting for
 the other players, mk9/src/mk9/crash.h), gets a report in `crashes\<yyyyMMdd-hhmmss>-mk9\` beside the launcher's log
-(`CrashReports`; the newest 20 are kept):
+(`CrashReports`; the newest 20 are kept). Since 0.5.8 that is also a frozen game the launcher closed itself (killed
+5 s after its `quit` went unanswered): the player who gave up on a frozen match ended it with LEAVE MATCH, and
+nothing else says where that game stood (2026-11-10, a Kasual series' SELECT A NEW FIGHTER: one game sent nothing
+for 10 s as the select screen loaded, its player ended the match, and no report came):
 
 - `report.txt`: the time, the launcher's and the game's versions, the exit code in words, this PC (Windows,
   processor, memory, the graphics card the game's log names), the launcher's last match messages, the game's own
@@ -209,7 +216,8 @@ official one). The stand-in game (`.py`) gets no reports.
 
 The launcher owns a game it starts for online play. Environment: `MK9_LINK=1`, `MK9_CMD=<session>\cmd.txt`,
 `MK9_STATUS=<session>\status.txt`, `MK9_SESSION_DIR`, `MK9_INSTANCE` (1, or 1/2 in a local test),
-`MK9_NET_LOG=<session>\net-{match}.log` (unless already set), `MK9_CONTROLS=<controls.toml>`. Command line:
+`MK9_NET_LOG=<session>\net-{match}.log` (unless already set), `MK9_CONTROLS=<controls.toml>`,
+`MK9_CAPTURE_DIR=<session>\captures` (F3 reports, PROTOCOL.md: `ReportSender` looks there). Command line:
 `--game_data_root=<disc folder> --user_data_root=<session>\save --cache_root=<data dir>\cache\mk9-online-<instance>
 --log_file=<session>\game.log --fullscreen|--no-fullscreen` (the shader cache outlives the fresh saves; one per
 instance). Single player: no `MK9_LINK`/`MK9_CMD`/`MK9_STATUS`, `--user_data_root=<save folder>`, no

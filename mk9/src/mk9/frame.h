@@ -38,8 +38,8 @@ void RunAgain(PPCContext& ctx, uint8_t* base);
 void SetCount(uint64_t n);
 bool Replaying();
 
-// Netplay keeping the sides even: the next frame starts a whole frame later than the cap would start it (the screen
-// shows this frame once more). From the main thread
-void HoldNext();
+// Netplay keeping the sides even: the next frame starts `periods` whole frames later than the cap would start it (the
+// screen shows this frame that many times more). From the main thread
+void HoldNext(int periods = 1);
 
 }  // namespace mk9::frame

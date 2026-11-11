@@ -236,6 +236,10 @@ void LobbyPage::pressReady() {
     else if (ready_->isVisible() && ready_->isEnabled()) ready_->click();
 }
 
+void LobbyPage::dropReady() {
+    if (inLobby() && ready_->isChecked()) ready_->click();  // as the player's click: the server hears it
+}
+
 void LobbyPage::focusReady() {
     if (inLobby() && ready_->isVisible() && ready_->isEnabled()) ready_->setFocus(Qt::OtherFocusReason);
 }

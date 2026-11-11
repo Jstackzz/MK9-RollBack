@@ -271,6 +271,31 @@ and its address, the thread, the first host frames, the guest `lr` and call stac
 match), the graphics card the game's log names and its last errors, with the desync reports' filter (addresses as
 `x.x.x.x`, the user folder as `*`); LAUNCHER.md, "Crash reports".
 
+## F3 reports (server 0.3.3)
+
+```json
+C: {"type":"report_file","report":"0123456789abcdef","game":"mk9","name":"final.jpg",
+    "part":0,"parts":3,"data":"<base64>"}
+C: {"type":"report_file","report":"0123456789abcdef","game":"mk9","name":"game.log",
+    "part":0,"parts":1,"data":"<base64>","zlib":true}
+C: {"type":"report_done","report":"0123456789abcdef"}
+S: {"type":"report_saved","report":"0123456789abcdef","files":23}
+```
+
+A player who sees something drawn wrong presses F3 in the game (`mk9/src/mk9/report.h`): the game saves what is on the
+screen (`final.png`, at most 1920 wide) and the next 20 frames' pictures (`next_00.png` .. `next_19.png`, at most 1280)
+under `MK9_CAPTURE_DIR` (`<session>\captures\<hhmmss>`), then `state.txt` (the game's and netplay's state), and shows a
+line saying so for five seconds. The launcher (`ReportSender`) finds the new folder in a running game's session once
+`state.txt` is there (or 15 s on), and sends it, signed in: the pictures as JPEG, `state.txt`, the start and end of the
+game's log (16 and 256 KB, IP addresses and user folders taken out) and `info.txt` (launcher version, session, Windows,
+display settings), those three compressed (`zlib`: as Qt's qCompress makes it, a big-endian length then zlib). Each file
+goes in parts of at most 16,000 base64 characters, in order, two parts every 0.1 s so the match's own messages pass;
+`report_done` ends it, and the launcher deletes the folder once the server has it. The server writes each file once its
+last part is in, into `<reports_dir>/<day>/<time>-<player>-<game>-<report>` (`reports` beside the database), and logs
+`REPORT <name> <game> (launcher <version>): <n> files, <KB> KB, in <folder>`. Limits: 3 reports a connection, 12 MB and
+40 files a report, names `[A-Za-z0-9_-]{1,40}` with `.jpg`, `.png`, `.txt` or `.log`, 4 GB of reports on disk (`too_many`,
+`too_large`, `unavailable`, `bad_request`).
+
 ## Other
 
 - `match_go` and the series' state are unchanged otherwise; `match_result` statuses are MK3D's.

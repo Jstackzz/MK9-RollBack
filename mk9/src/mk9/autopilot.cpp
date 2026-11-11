@@ -10,6 +10,11 @@
 //               steers it, as at an arcade's continue)
 // and checks it got where it went before handing the controllers to the players.
 //
+// The boot plays its movies (the WB and NetherRealm logos...) before the title, about 23 s; the movie player
+// skips one on A (Coalesced.ini, [MwyMoviePlayer] ControllerSkipKey=XboxTypeS_A), so the autopilot taps A until
+// the title first comes up, then START there. Single player gets the same way to the main menu, where the
+// player takes over (Phase::Skip).
+//
 // At the hold point the game would not stay by itself: 60 s after the last press MK9 goes back to its title,
 // and about 30 s later plays its attract mode's demo fight, while the launcher still took it as ready (a lobby
 // match then started from the title or the demo's fight, against a game at its main menu). A tap of the left
@@ -28,13 +33,15 @@
 #include "mk9/game.h"
 #include "mk9/input.h"
 #include "mk9/net/netplay.h"
+#include "mk9/testinput.h"
 
 namespace mk9::autopilot {
 namespace {
 
-enum class Phase { Off, Boot, Title, ToMenu, Hold, Wait, Steer, Follow, Pick, Players, Continue, Leave, Lost };
+enum class Phase { Off, Skip, Boot, Title, ToMenu, Hold, Wait, Steer, Follow, Pick, Players, Continue, Leave, Lost };
 
 constexpr uint64_t kHoldTapEvery = 1200, kHoldTapFrames = 6;  // at the hold point: the left trigger, 6 frames in 20 s
+constexpr uint64_t kSkipGiveUp = 3600;  // single player: the main menu not there after a minute, the player's anyway
 
 struct Step {
   uint16_t buttons;
@@ -63,10 +70,21 @@ int g_steer_slot = 0;          // the slot whose autopilot steers online
 uint32_t g_pad_user = 0;       // offline, the user index the autopilot presses for
 Phase g_after_steps = Phase::Players;  // where Steer goes once its steps are done and it got there
 int32_t g_steer_to = game::kPhaseSelect;
+bool g_title_seen = false;  // the title was up once: the boot's movies are over
+bool g_show_intro = false;  // MK9_SHOW_INTRO=1: the movies play
 
 void Enter(Phase p) {
   g_phase = p;
   g_since = g_frame;
+}
+
+// the boot's movies: A taps (4 frames in 40) until the title first comes up. None after that: on its way from
+// the title to the main menu the front end shows a submenu's screen id (0x198) for a moment, and an A there
+// could pick something
+void SkipMovies(uint64_t t, int32_t phase) {
+  if (game::TitleUp()) g_title_seen = true;
+  if (g_show_intro || g_title_seen || phase != game::kPhaseTitle) return;
+  if (t % 40 >= 20 && t % 40 < 24) g_pad.buttons = input::kA;
 }
 
 // a match is to come: no result for it yet
@@ -153,13 +171,21 @@ const char* ModeName(Mode m) {
 
 void Init(bool launcher) {
   g_launcher = launcher;
+  const char* show = std::getenv("MK9_SHOW_INTRO");
+  g_show_intro = show && *show == '1';
   if (launcher) {
     Enter(Phase::Boot);
     input::SetOverride(&Override);
+  } else if (!g_show_intro && !testinput::Active()) {
+    Enter(Phase::Skip);
+    input::SetOverride(&Override);
+    REXLOG_INFO("mk9 autopilot: single player, past the intro to the main menu");
   }
 }
 
 bool AtHoldPoint() { return g_phase == Phase::Hold; }
+
+bool Skipping() { return g_phase == Phase::Skip; }
 
 void Begin(const Plan& plan, bool online) {
   g_plan = plan;
@@ -265,9 +291,22 @@ void OnFrame(uint64_t frame) {
       return;
     case Phase::Continue:
       return;
+    case Phase::Skip:
+      // single player: the main menu is the player's (so is a game still elsewhere after a minute)
+      if (phase == game::kPhaseMenus || frame - g_since > kSkipGiveUp) {
+        REXLOG_INFO("mk9 autopilot: {} at frame {}: the player's controller",
+                    phase == game::kPhaseMenus ? "at the main menu" : "no main menu yet", frame);
+        Enter(Phase::Off);
+        return;
+      }
+      SkipMovies(frame - g_since, phase);
+      // the title: START once it takes presses (it ignores them while it fades in)
+      if (game::TitleUp() && (frame - g_since) % 45 >= 30 && (frame - g_since) % 45 < 38) g_pad.buttons = input::kStart;
+      return;
     case Phase::Boot:
       if (phase == game::kPhaseMenus) Enter(Phase::ToMenu);
       else if (phase == game::kPhaseTitle && game::TitleUp()) Enter(Phase::Title);
+      SkipMovies(frame - g_since, phase);
       // the attract mode's demo fight (the title left alone): START takes it back to the title
       if (phase == game::kPhaseFight && (frame - g_since) % 60 < 8) g_pad.buttons = input::kStart;
       return;
@@ -357,20 +396,22 @@ void OnFrame(uint64_t frame) {
 }
 
 bool LocalPad(input::Pad& out) {
-  // tests (MK9_AUTOPILOT_ATTACK=1): player 1 walks in and jabs through every fight, so matches end
-  static const bool attack = [] {
+  // tests (MK9_AUTOPILOT_ATTACK=1, or 2 for player 2): that player walks in and jabs through every fight, so
+  // matches end (and the other player is the loser, who steers the CONTINUE? menu)
+  static const int attacker = [] {
     const char* v = std::getenv("MK9_AUTOPILOT_ATTACK");
-    return v && *v == '1';
+    return v && (*v == '1' || *v == '2') ? *v - '1' : -1;
   }();
-  if (attack && g_phase == Phase::Players && g_plan.slot == 0 && game::Phase() == game::kPhaseFight) {
+  if (attacker >= 0 && g_phase == Phase::Players && g_plan.slot == attacker && game::Phase() == game::kPhaseFight) {
     out = input::Pad{};
     out.connected = true;
     const uint64_t t = g_frame % 128;
-    if (t < 20) out.buttons = input::kDpadRight;
+    if (t < 20) out.buttons = attacker == 0 ? input::kDpadRight : input::kDpadLeft;  // player 2 starts on the right
     else if (t >= 20 && (t - 20) % 18 < 12) out.buttons = input::kX;
     return true;
   }
   switch (g_phase) {
+    case Phase::Skip:
     case Phase::Title:
     case Phase::Steer:
     case Phase::Pick:

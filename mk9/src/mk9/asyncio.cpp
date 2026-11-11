@@ -129,6 +129,11 @@ using namespace mk9;
 
 REX_HOOK_RAW(sub_827288E0) {
   using namespace mk9::asyncio;
+  // The reading thread makes this object's critical section (+8) as it starts, and the game goes on without waiting for
+  // it. On a busy PC the game's first read could come first, and QueueIORequest entered a critical section that was not
+  // there yet: an access violation in RtlEnterCriticalSection as the game started (rexruntime.dll+0x3ff086, in frames run
+  // 0; a player's report, and a third of the boots in tests beside other games). A moment's wait for it is all it needs.
+  for (int waited_ms = 0; waited_ms < 10000 && game::ReadU32(ctx.r3.u32 + 8) == 0; waited_ms++) Sleep(1);
   if (g_off || !rb::Armed() || !SimThread()) return Queue(ctx, base);
   const uint32_t name = ctx.r4.u32, offset = ctx.r5.u32, size = ctx.r6.u32, uncompressed = ctx.r7.u32;
   const uint32_t dest = ctx.r8.u32;

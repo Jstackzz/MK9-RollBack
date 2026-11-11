@@ -5,6 +5,7 @@
 //   MK9_SNAP_WIDTH  = 1280           the PNG's width (the output is scaled down to it)
 // Snap(name) captures now, from any thread.
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <vector>
@@ -25,5 +26,9 @@ void Init();
 void OnFrame(uint64_t frame);
 // capture now into <dir>\<name>.png; false when nothing can be captured yet
 bool Snap(const std::string& name);
+// the presented image now, from any thread (mk9/report.h); false when there is none yet
+bool CaptureNow(Image& out);
+// an image as a PNG, scaled down to at most that width
+bool Save(const std::filesystem::path& path, const Image& image, uint32_t max_width);
 
 }  // namespace mk9::snap

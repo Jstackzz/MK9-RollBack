@@ -236,7 +236,10 @@ void Init() {
   const char* on = std::getenv("MK9_LINK");
   const char* cmd = std::getenv("MK9_CMD");
   const char* status = std::getenv("MK9_STATUS");
-  if (!on || std::strcmp(on, "1") != 0 || !cmd || !*cmd || !status || !*status) return;
+  if (!on || std::strcmp(on, "1") != 0 || !cmd || !*cmd || !status || !*status) {
+    autopilot::Init(false);  // single player: past the intro to the main menu
+    return;
+  }
   g_on = true;
   g_cmd = Widen(cmd);
   g_status = Widen(status);
@@ -247,7 +250,10 @@ void Init() {
 bool On() { return g_on; }
 
 void OnFrame(uint64_t frame) {
-  if (!g_on) return;
+  if (!g_on) {
+    if (autopilot::Skipping()) autopilot::OnFrame(frame);
+    return;
+  }
   autopilot::OnFrame(frame);
   if (frame % 6 == 0) {
     std::string line;

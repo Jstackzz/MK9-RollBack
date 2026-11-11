@@ -324,6 +324,7 @@ int keyFromEvent(const QKeyEvent* event) {
         case VK_LMENU:
         case VK_RMENU:
         case VK_F10:
+        case VK_F3:
         case VK_LWIN:
         case VK_RWIN:
         case VK_APPS:

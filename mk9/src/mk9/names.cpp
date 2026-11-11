@@ -42,8 +42,11 @@ constexpr float kFontPixels = 64.0f;  // the atlas' size: sharp up to a 4K windo
 constexpr float kP1Start = 145, kP1End = 592, kP2Start = 682, kP2End = 1132, kLine = 33;
 constexpr float kTextHeight = 26;  // the names' line height: capitals about 14 lines tall, as the bars' own
 constexpr int kSettleFrames = 3, kFadeInFrames = 15;
+constexpr int kNoticeFrames = 300;  // five seconds
 
 std::mutex g_lock;
+std::string g_notice;   // a line for the top of the screen (ShowNotice), while g_notice_left counts down
+int g_notice_left = 0;
 std::string g_match[2], g_test[2];  // the match's (the link's), the test switch's
 // this frame's, copied under g_lock: how far the names show (0 to 1), how far down the bar is
 float g_shade = 0, g_offset = 0;
@@ -71,6 +74,7 @@ class Overlay final : public rex::ui::ImGuiDialog {
     float shade, offset;
     {
       std::lock_guard<std::mutex> lock(g_lock);
+      if (g_notice_left > 0) DrawNotice(io, g_notice);
       const std::string* source = g_match[0].empty() && g_match[1].empty() ? g_test : g_match;
       if (g_shade <= 0 || (source[0].empty() && source[1].empty())) return;
       names[0] = source[0];
@@ -115,7 +119,22 @@ class Overlay final : public rex::ui::ImGuiDialog {
   }
 
  private:
+  void DrawNotice(const ImGuiIO& io, const std::string& text) {
+    ImFont* font = g_font ? g_font : ImGui::GetFont();
+    const float size = std::max(14.0f, io.DisplaySize.y / 40.0f);
+    const ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str());
+    const float pad = size / 3, x = std::floor((io.DisplaySize.x - extent.x) / 2), y = std::floor(size);
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    draw->AddRectFilled(ImVec2(x - pad, y - pad), ImVec2(x + extent.x + pad, y + extent.y + pad), IM_COL32(0, 0, 0, 190), pad);
+    draw->AddText(font, size, ImVec2(x, y), IM_COL32(255, 255, 255, 255), text.c_str());
+    if (!notice_drawn_) {  // once each time the overlay opens (a test reads it)
+      notice_drawn_ = true;
+      REXLOG_INFO("mk9 names: notice drawn");
+    }
+  }
+
   bool drawn_ = false;
+  bool notice_drawn_ = false;
 };
 
 // The overlay is open only while names are up: an open ImGui dialog makes the presenter paint every frame on the
@@ -141,6 +160,12 @@ void SetPlayers(const std::string& p1, const std::string& p2) {
   g_match[1] = p2;
   if (p1.empty() && p2.empty()) REXLOG_INFO("mk9 names: none");
   else REXLOG_INFO("mk9 names: {} and {} over the fight", p1.empty() ? "-" : p1, p2.empty() ? "-" : p2);
+}
+
+void ShowNotice(const std::string& text) {
+  std::lock_guard<std::mutex> lock(g_lock);
+  g_notice = text;
+  g_notice_left = kNoticeFrames;
 }
 
 void OnFrame(uint64_t) {
@@ -172,7 +197,9 @@ void OnFrame(uint64_t) {
   }
   g_shade = float(g_shown) / kFadeInFrames;
   g_offset = up ? offset : 0;
-  const bool open = g_shown > 0 && !(g_match[0].empty() && g_match[1].empty() && g_test[0].empty() && g_test[1].empty());
+  if (g_notice_left > 0) g_notice_left--;
+  const bool open = g_notice_left > 0 ||
+                    (g_shown > 0 && !(g_match[0].empty() && g_match[1].empty() && g_test[0].empty() && g_test[1].empty()));
   if (open != g_open.exchange(open) && g_in_ui_thread) g_in_ui_thread(Follow);
 }
 

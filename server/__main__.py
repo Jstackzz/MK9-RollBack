@@ -62,6 +62,7 @@ def config_from_args(args: argparse.Namespace) -> ServerConfig:
         admins=tuple(a.strip() for a in args.admins.split(",") if a.strip()),
         min_client=args.min_client,
         update_file=args.update_file or os.path.join(base, "update.json"),
+        reports_dir=os.path.join(base, "reports"),
         accept_timeout=args.accept_timeout,
         relay=not args.no_relay,
         upnp=args.upnp,

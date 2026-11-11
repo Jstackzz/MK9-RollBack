@@ -31,9 +31,6 @@ public:
     void setGame(const QString& gameId) override;
     void extractImage(const QString& path);  // fill in the image and start, as if Extract was clicked
     bool busy() const { return step_ != Step::Idle; }  // extracting a disc or building the game
-    // the game was built from another release than the package's project now holds (an update came): it must be
-    // built again before it plays online (netplay refuses two different releases)
-    static bool needsRebuild(const QString& gameId);
     void rebuild();  // as if Build was clicked
     void findDisc();  // nothing built or extracted yet: looks for the disc image where one usually is
 

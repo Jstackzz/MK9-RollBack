@@ -120,7 +120,8 @@ void CrashReports::gameEnded(const QString& gameId, const QString& sessionDir, i
     QString gameReport;
     QFile crashTxt(session.filePath(QStringLiteral("crash.txt")));
     QFile hangTxt(session.filePath(QStringLiteral("hang.txt")));
-    const bool stoodStill = exitCode == 0 && hangTxt.exists();
+    // (a game that stood still may have been killed: closed for a match that ended, it did not answer)
+    const bool stoodStill = !crashTxt.exists() && hangTxt.exists();
     if (crashTxt.open(QIODevice::ReadOnly)) gameReport = QString::fromUtf8(crashTxt.readAll()).trimmed();
     else if (stoodStill && hangTxt.open(QIODevice::ReadOnly)) gameReport = QString::fromUtf8(hangTxt.readAll()).trimmed();
     const QString dump = session.filePath(QStringLiteral("crash.dmp"));

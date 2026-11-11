@@ -170,7 +170,12 @@ A game that stands still says where too (since 0.5.5, as MK3D Online's game link
 sync and not waiting for the others' inputs (`net::Waiting`; a barrier is not in sync), it writes `hang.txt` beside
 where `crash.txt` would go: where the main thread's host code is (its registers taken while it is suspended a moment,
 its stack walked once it runs again) and its guest registers and call stack, the rendering thread's
-(`engine::RenderContext`), the frames run and the game's and netplay's state; the log says `mk9 watch: no frame for
+(`engine::RenderContext`), the frames run and the game's and netplay's state, and since 0.5.10 the hold's state
+(`engine::HoldState`) and every thread of the process the same way: its host stack, then, last of all through the
+kernel's object table (whose lock a frozen thread may hold: the host stacks are on disk by then), the guest registers
+and stack of each guest thread (a player's 0.5.9 report of a game standing still showed only its main thread, in
+FMOD waiting for FMOD's own thread; "Known gaps". Tried with `MK9_CRASH_TEST=6600:hang` in a lagged two-game
+match: 79 threads listed on each game, the match went on after the 15 s); the log says `mk9 watch: no frame for
 10 s at frame f: the game stands still (hang.txt), its main thread at ...`, once, until frames go on again (`mk9 watch:
 frames again after n s`, and it becomes `hang-over.txt`). A look a second or more after the last one (a debugger, the
 PC asleep) starts the count again. The launcher reports a game closed with `hang.txt` there. 0.5.3's three matches
@@ -326,6 +331,21 @@ of one game's file loader requests back that long while a match is in sync befor
   wrong guess puts the game back to the top of that frame and runs the frames since again with
   the real inputs (see "Rollback" below). Menus, loading and the match's end run in lockstep, and
   a fight's first 30 frames take no input on any PC, so no rollback goes back into them ("Known gaps").
+
+The server picks a match's input delay from the round trip it measured as the match connected
+(`protocol.auto_delay`, docs/PROTOCOL.md "Input delay"; a player's own choice in Settings counts when it is larger).
+With rollback it is the one-way trip in frames with half a frame to spare since 0.5.10, `ceil(rtt_ms / 33.33 + 0.5)`, 2
+to 8 (3 from 51 ms, 4 from 84, 7 at 193). From 0.5.4 to 0.5.9 it was the trip but a frame, MK3D Online's rule
+(`round(rtt_ms / 33.33) - 1`, 2 to 6, 5 at 193 ms), meant to keep the guesses a frame long. But the trip as the game
+sees it runs about half a frame over the ping (`Pace`'s round trip: 12.0 to 12.3 frames at 193 ms, 5.8 at 82), so
+nearly every input of the other player came a frame late and every change of it was a rollback, and a rollback costs
+MK9 a frame or more of its time (7 to 10 ms for each frame run again, 3 to 5 ms to put memory back): the server's match
+log rated all 24 player sides of 0.5.9's first day "stutter", 4 to 7 rollbacks a second and 60 to 300 frames a minute
+shown twice, nearly all of them in seconds with a rollback and nothing else (`tools/matchlog.py`, `per_second`). A
+side session's count over a player's 2026-11-10 series put one frame more of delay at 60 % fewer rollbacks (4,508 to
+1,843) and 88 % fewer of two frames or more. A player who sets a delay below what the ping needs still gets it when
+the other player's is no larger: one 0.5.9 match at 279 ms played at delay 1, both players' choice, and waited at the
+8-frame limit 247 times in 53 s.
 
 With input delay d, what a player's pad holds at the top of frame f is their input for frame f+d on
 every PC, and frame f+d plays on it. A frame's top is the top of GuardedMain's loop (`frame.cpp`):
@@ -776,6 +796,36 @@ of a fight that rolls back (`mk9 sound: n starts on frames' first runs, m asked 
 
 ## Known gaps
 
+- **A freed string's page table gone after a rollback: the UI library's heap crash** (found and fixed 2026-11-11): a
+  player's 0.5.9 report, an access violation on the main thread at `sub_82E80968+0xED` reading `0x7F0`, 427 rollbacks
+  into a fight's third round, under the HUD's ActionScript (`sub_82E85B00` dropping a string node, `sub_82E85488`
+  freeing its text through the UI library's own heap: Scaleform GFx's memory heap, `sub_82E80968` its free). That heap
+  finds a block's segment through a two-level page table in the executable's data (`0x834B7F78`, 32 KB, an entry a
+  megabyte with a pointer to a page of 4 KB entries, its pointer at `0x834BFF7C`), which `engine.cpp` had left out of
+  rollback as "FMOD's memory table" since 0.5.1 (`kOtherThreadsGlobals`; it was found by tracing the pages written by
+  what was then taken for FMOD's code), while the heap itself, its segments and the second-level pages live in the
+  simulation heap and go back with the frames. The heap grows and shrinks in a fight (the HUD's strings, `3 HITS 15%
+  Damage`): a frame that gave a segment back, taken back by a rollback, left the table without its page while the heap
+  had the segment and its strings again, and the next free of one of those strings read the page that was not there
+  (`[L1 + 4]` null, so `0x7F0` = the entry's offset). Only simulation threads write the table (the main and rendering
+  threads, through the heap's segment calls `sub_82EF1640` / `sub_82EF0C90` and `sub_82EF4F50`), so since 0.5.10 it is
+  kept and put back like the heap. 0.5.1's crash at a rollback to a fight's first frame, in this same library as the
+  HUD came up (its segments are made then), was most likely the same table; `kQuietFrames` stays. Tested: the ghost sync test 8 frames back every 4 (each rollback's frames first run with an attack nobody pressed,
+  then with the real inputs; Reptile against Sub-Zero, then Cyber Sub-Zero against Sub-Zero with other seeds) to frame
+  12,000 each, 1,598 rollbacks apiece: no crash, no block freed twice;
+  three lagged launcher-link runs (40 ms, 20 of jitter) of a match and its SELECT A NEW FIGHTER rematch, both
+  players attacking in turn: every result right on both games, 679 to 844 rollbacks on the side that rolled back, no
+  crash and no stand-still (the select screen loaded three times a run).
+- **A game standing still at the select screen after a match** (open): two players' games, 0.5.7 and 0.5.9, stopped
+  as the select screen of a Kasual series' next match loaded, and the launcher closed them 10 s later (the other
+  player's game saw them stop answering). The 0.5.9 note has the main thread in FMOD's `Sound::release`
+  (`sub_82DE7740`, under `sub_82DDBFE8` from the event group's free of a sound bank, `sub_82E55C70` and up, called by
+  the garbage collector's purge, `sub_826DD740`, through `sub_8260C268`) sleeping 2 ms at a time (`sub_8237C530`) until
+  the sound's open state (`+216`) is ready or in error and its flag bit 0 (`+60`) is down: a nonblocking load FMOD's own
+  thread was to finish and never did. The rendering thread was idle; the last log line an XMA decode error from the
+  SDK's audio (`ffmpeg: num_vec_coeffs 232 is too large`), which by its code skips the frame and goes on (and shows in
+  other players' logs with no stand-still). Not reproduced here (the lagged SELECT flow, `link-local.ps1 -Select`,
+  passes). hang.txt lists every thread since 0.5.10 so that the next report shows FMOD's.
 - **A frame closed with the rendering thread still running: blocks with two owners, the level list's crash** (found and fixed
   2026-11-10): an access violation on the main thread at `sub_82875618+0x18C`, called from `sub_828FCDE0+0x343`, in a frame run
   again a few seconds into a fight. Seen twice: a player's report (0.5.2, frame 420, 30 rollbacks) and 1 of 11 lagged test

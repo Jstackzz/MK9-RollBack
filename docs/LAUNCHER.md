@@ -141,7 +141,8 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
   key names, `[buttons]`); every game started gets its path in `MK9_CONTROLS`. Online matches run on a fresh save,
   so they play with the game's default button layout: remap here.
 - **Settings**: server address and pinned fingerprint, region, max ping, **input delay** (Auto, the default: from
-  the ping measured when the match connects, with rollback the one-way trip in frames but one, 2 to 6; or 0-6
+  the ping measured when the match connects, with rollback the one-way trip in frames with half a frame to spare,
+  2 to 8; or 0-6
   frames; 0.5.9 put everyone's back on Auto once, `online/delay_auto_059`), **netcode** (Rollback,
   the default, or Lockstep: a match plays rollback only when both players chose it), game UDP port,
   *Play a sound when a match is found* (on), UPnP, *Hide my IP address from opponents* (off: every match of the

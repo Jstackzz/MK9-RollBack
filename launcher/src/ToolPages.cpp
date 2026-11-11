@@ -552,8 +552,10 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     for (int f = 0; f <= 6; ++f) delay->addItem(tr("%n frame(s)", nullptr, f), f);
     delay->setCurrentIndex(cfg::inputDelay() < 0 ? 0 : qMax(0, delay->findData(cfg::inputDelay())));
     delay->setToolTip(tr("Frames between a press and the game using it. Auto takes it from the ping measured when the "
-                         "match connects: with rollback the one-way trip in frames but one, 2 to 6 (2 up to 116 ms, "
-                         "4 at 180 ms), so the guesses stay short at a high ping; lockstep waits at every frame whose "
+                         "match connects: with rollback the one-way trip in frames with half a frame to spare, 2 to 8 "
+                         "(2 up to 50 ms, 4 from 84, 7 at 193), so that the other player's inputs are there before the "
+                         "game needs them (each that is not is a rollback, a frame or more of the game's time); lockstep "
+                         "waits at every frame whose "
                          "input is still on its way, so it covers all of it, (ping / 2 + 8 ms) / 16.7 ms, 2 to 8. A "
                          "match takes the larger delay of the two players."));
     auto* netcode = new QComboBox;
@@ -597,8 +599,8 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     of->addRow(QString(), hideIp);
     of->addRow(QString(), hideIpAlways);
     of->addRow(tr("Router"), routerState_);
-    auto* delayNote = ui::label(tr("A match takes the larger delay of the two players (Auto: from the ping, 2 to 6 "
-                                   "frames with rollback, 2 to 8 with lockstep; Ranked at least 1). Players who cannot "
+    auto* delayNote = ui::label(tr("A match takes the larger delay of the two players (Auto: from the ping, 2 to 8 "
+                                   "frames; Ranked at least 1). Players who cannot "
                                    "reach each other directly, or who hide their IP address, play through the server: "
                                    "more ping the farther both are from it. A hidden match over 100 ms that way tries a "
                                    "direct connection once and plays it when it is 20 ms faster."), "Muted");

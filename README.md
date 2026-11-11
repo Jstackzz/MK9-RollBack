@@ -109,6 +109,15 @@ the game's log (no IP addresses, no folder names), as long as you are signed in.
 - Until 0.5.7 you had to install Visual Studio Build Tools (several GB) before the game could be built, and the folder
   could not have `( ) & ^ %` in its name. Since 0.5.7 the zip has everything and any folder works: only the game's own
   code is compiled on your PC, which also takes a few minutes instead of 15 (mk9/player/README.md).
+- Until 0.5.9 the input delay the server chose for a rollback match was a frame short of the one-way trip (5 frames
+  at 193 ms of ping, 2 at 82), so nearly every input of the other player came a frame late and every change of it
+  was a rollback, each of which holds the game up a frame or more: the server's match log rated every 0.5.9 match
+  "stutter" on both PCs. Since 0.5.10 the delay covers the trip with half a frame to spare (3 from 51 ms of ping, 4
+  from 84, 7 at 193, 8 at most): more frames between a press and the move, far fewer frames shown twice. Settings
+  can still set it lower by hand (docs/PROTOCOL.md, "Input delay").
+- Until 0.5.9 a rollback could crash the game in its HUD a few minutes into a fight (the UI library's heap lost the
+  page table of memory the rollback brought back). Fixed in 0.5.10 (docs/GAME.md, "Known gaps"). A game that stands
+  still in a match now reports every thread, for the select-screen freeze two players met.
 
 ## Building from source
 

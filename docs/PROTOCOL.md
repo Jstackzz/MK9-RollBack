@@ -28,9 +28,12 @@ ignored by MK9 launchers.
 
 `queue_join`'s and `lobby_ready`'s `delay` is 0-6 frames (MK3D: 0-4) or `"auto"`. `match_go`'s `delay` is the
 larger of the two players' delays, where an `"auto"` one comes from the match's `rtt_ms` (the larger of the two
-players' measured round trips, `protocol.auto_delay`): with rollback `clamp(round(rtt_ms / 33.33) - 1, 2, 6)`, the
-one-way trip in frames but one, as MK3D Online since 0.1.18 (2 up to 116 ms, 3 from 117, 4 from 150, 5 from 184, 6
-from 217; until 0.5.4's server `ceil((rtt_ms / 2 + 8) / 16.67) - 3`, 3 at 180 ms); with lockstep all of it,
+players' measured round trips, `protocol.auto_delay`): with rollback `clamp(ceil(rtt_ms / 33.33 + 0.5), 2, 8)`, the
+one-way trip in frames with half a frame to spare (2 up to 50 ms, 3 from 51, 4 from 84, 5 from 117, 6 from 151, 7 from
+184, 8 from 217; a rollback costs MK9 a frame or more, so the other player's inputs should be there before the game
+needs them. From 0.5.4 to 0.5.9 `clamp(round(rtt_ms / 33.33) - 1, 2, 6)`, the trip but one as MK3D Online since its
+0.1.18, 5 at 193 ms, which left nearly every input a frame late; until 0.5.4 `ceil((rtt_ms / 2 + 8) / 16.67) - 3`, 3
+at 180 ms); with lockstep all of it,
 `clamp(ceil((rtt_ms / 2 + 8) / 16.67), 2, 8)`; at least 1 in ranked. `"delay_auto": true` says an auto delay took
 part. Both games get the same value, and a series' in-game rematch the same as its first match.
 

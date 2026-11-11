@@ -19,6 +19,8 @@ void ExcludeFromRollback();
 
 // the rendering thread or a job worker (the main thread is mk9::frame's)
 bool IsSimulationThread(uint32_t host_tid);
+// diagnostics (hang.txt): the hold's flags and which threads say they wait
+std::string HoldState();
 
 // The other simulation threads held still while rollback keeps or puts back memory: the rendering
 // thread done with everything queued and asleep in its idle loop, every job worker in its idle

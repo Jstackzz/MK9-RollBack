@@ -112,11 +112,14 @@ constexpr std::pair<uint32_t, uint32_t> kOtherThreadsGlobals[] = {
     // rollback is armed only other threads allocate from the engine heap (mk9/gmalloc.cpp)
     {0x83423BA8, 0x848},
     {0x8342EA60, 0x40},
-    // A table of the memory the HUD's UI library (Scaleform GFx, taken for FMOD until 2026-11-04) uses, an entry a
-    // megabyte (built by sub_82EF4E78 with its pointer at 0x834BFF7C, kept only by its allocations and frees,
-    // sub_82EF1640 / sub_82EF0C90). They happen in a fight's first frames, where no rollback goes since
-    // (mk9/net/netplay.cpp, kQuietFrames)
-    {0x834B7F78, 0x8008},
+    // Not here since 2026-11-11: the page table of the HUD's UI library's heap (Scaleform GFx; 0x834B7F78, 0x8008
+    // bytes, an entry a megabyte, its pointer at 0x834BFF7C; built by sub_82EF4E78, kept by the heap's own segment
+    // allocations and frees, sub_82EF1640 / sub_82EF0C90, and read by every free, sub_82E80968). It was taken for
+    // FMOD's and left alone by restores, but the heap it describes lives in the simulation heap and goes back with
+    // the frames, and the heap grows and shrinks in a fight (the HUD's ActionScript strings): a frame that freed a
+    // segment, taken back, left the table without it while the heap had it again, and the next free of a string in
+    // it read a page table that was not there (a player's 0.5.9 report, sub_82E80968+0xED reading 0x7F0). Only
+    // simulation threads write it, so it is kept and put back like the heap.
     // XAudio2's own globals, which its mixing thread (sub_832C92D0) writes on pages that hold other globals: its lock
     // and its seven objects of 0x430 bytes (from 0x833C3B60, built by sub_83367DE0 and the six after it), and its
     // allocator's bookkeeping with its lock (0x834C19B0, sub_832AEB58), its voices' table and the engine's globals.
@@ -408,6 +411,14 @@ void ExcludeFromRollback() {
   REXLOG_INFO("mk9 engine: rollback leaves the rendering command ring ({:08X}-{:08X}) and the D3D device ({:08X}) "
               "alone; rendering thread {}, {} job workers, {} PhysX threads",
               data, end, device, g_render_tid.load(), workers, physics);
+}
+
+std::string HoldState() {
+  return fmt::format("hold {} held {} holding {}; rendering thread {} (alive {}); job workers waiting {} of {}; PhysX "
+                     "threads waiting {} of {}; pool threads waiting {} of {}",
+                     g_hold.load(), g_held.load(), g_holding, g_render_waiting.load() ? "waiting" : "busy",
+                     g_render_alive.load(), g_workers_waiting.load(), g_workers.Count(), g_physics_waiting.load(),
+                     g_physics.Count(), g_pool_waiting.load(), g_pool.Count());
 }
 
 bool IsSimulationThread(uint32_t host_tid) {

@@ -190,11 +190,14 @@ def get_delay(msg: dict, key: str = "delay", *, default: int = 2) -> int:
 
 def auto_delay(rtt_ms: int, netcode: str = "lockstep") -> int:
     """The input delay for a round trip, in 60 Hz frames. Lockstep waits at every frame whose input is still on its
-    way, so it covers the one-way latency (half the trip, plus 8 ms for the frame on its way): 2 to 8. Rollback guesses
-    the rest and corrects it, so it covers the one-way trip but a frame, as MK3D Online does since its 0.1.18 (the
-    guesses stay about a frame long: fewer frames run again, steadier at a high ping): 2 to 6, 4 at 180 ms."""
+    way, so it covers the one-way latency (half the trip, plus 8 ms for the frame on its way): 2 to 8. Rollback
+    guesses what has not come and corrects it, and every correction is a rollback that costs MK9 a frame or more of its
+    time (the frames run again take 7 to 10 ms each), so it covers the one-way trip with half a frame to spare: 2 to 8,
+    3 from 51 ms, 4 from 84, 5 from 117, 7 at 193. From 0.5.4 to 0.5.9 it was the trip but a frame, as MK3D Online's
+    (5 at 193 ms, 2 at 82): nearly every input of the other player came a frame late, 4 to 7 rollbacks a second, and
+    the server's match log rated every 0.5.9 match "stutter" on both PCs."""
     if netcode == "rollback":
-        return min(6, max(2, math.floor(rtt_ms / (2000 / 60) + 0.5) - 1))
+        return min(8, max(2, math.ceil(rtt_ms / (2000 / 60) + 0.5)))
     return min(8, max(2, math.ceil((rtt_ms / 2 + 8) / 16.67)))
 
 

@@ -31,6 +31,8 @@
 #include <rex/ppc/func.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/thread_state.h>
+#include <rex/system/util/object_table.h>
+#include <rex/system/xthread.h>
 #include <rex/system/xmemory.h>
 
 #include "mk9/engine.h"
@@ -334,6 +336,66 @@ void GuestPart(Out& out, const PPCContext* g) {
   out("\n");
 }
 
+// Every thread of the process but this one, for hang.txt: where its host code is, and for a guest thread its guest
+// registers and stack. Each thread is suspended only for the moment its registers are read; the walk from them comes
+// once it runs again (a walk while it is suspended could wait on a lock it holds), so a thread that runs on may show
+// a stack that moved, and one that stands still, what a hang is about, its own. The guest side comes last, through
+// the kernel's object table: its lock may be the very one a frozen thread holds, and all the host stacks are on
+// disk by then
+void AllThreads(Out& out, HANDLE file) {
+  const DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+  if (snap == INVALID_HANDLE_VALUE) return;
+  std::vector<DWORD> tids;
+  THREADENTRY32 te{};
+  te.dwSize = sizeof te;
+  for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te))
+    if (te.th32OwnerProcessID == pid && te.th32ThreadID != self) tids.push_back(te.th32ThreadID);
+  CloseHandle(snap);
+  out("all threads (%zu):\n", tids.size());
+  for (const DWORD tid : tids) {
+    HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
+    if (!t) continue;
+    CONTEXT c{};
+    c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    bool got = false;
+    if (SuspendThread(t) != DWORD(-1)) {
+      got = GetThreadContext(t, &c) != 0;
+      ResumeThread(t);
+    }
+    CloseHandle(t);
+    char name[160];
+    ThreadName(tid, name, sizeof name);
+    out("thread %lu%s%s%s%s\n", tid, name[0] ? " \"" : "", name, name[0] ? "\"" : "", got ? ":" : ": no registers");
+    for (int i = 0; got && i < 40 && c.Rip; i++) {
+      char where[MAX_PATH + 96];
+      Where(uintptr_t(i ? c.Rip - 1 : c.Rip), where, sizeof where);
+      out("  %2d %s\n", i, where);
+      if (!Readable(reinterpret_cast<void*>(c.Rsp), 64)) break;
+      DWORD64 image = 0;
+      PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(c.Rip, &image, nullptr);
+      if (!f) {
+        c.Rip = *reinterpret_cast<DWORD64*>(c.Rsp);
+        c.Rsp += 8;
+      } else {
+        void* handler_data = nullptr;
+        DWORD64 frame = 0;
+        RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, c.Rip, f, &c, &handler_data, &frame, nullptr);
+      }
+    }
+  }
+  FlushFileBuffers(file);
+  auto* ks = REX_KERNEL_STATE();
+  if (!ks) return;
+  for (const auto& thread : ks->object_table()->GetObjectsByType<rex::system::XThread>()) {
+    if (!thread.get() || !thread->thread() || !thread->thread_state()) continue;
+    const uint32_t tid = thread->thread()->system_id();
+    if (tid == self || std::find(tids.begin(), tids.end(), DWORD(tid)) == tids.end()) continue;
+    out("guest thread %08X on host thread %u:\n", thread->thread_id(), tid);
+    GuestPart(out, thread->thread_state()->context());
+  }
+}
+
 void GamePart(Out& out) {
   const uint64_t frames = frame::Count();
   out("frames run: %llu\n", static_cast<unsigned long long>(frames));
@@ -493,6 +555,8 @@ void WriteHang(ULONGLONG still_ms) {
   out("rendering thread%s\n", render ? ":" : ": not running");
   if (render) GuestPart(out, render);
   GamePart(out);
+  out("%s\n", engine::HoldState().c_str());
+  AllThreads(out, f);
   FlushFileBuffers(f);
   CloseHandle(f);
   REXLOG_WARN("mk9 watch: no frame for {} s at frame {}: the game stands still (hang.txt), its main thread at {}",

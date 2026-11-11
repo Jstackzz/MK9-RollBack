@@ -387,6 +387,13 @@ Tests: `MK9_AUTOPILOT_ATTACK=1` has player 1 jab through every fight so matches 
 -Select` plays a match and then SELECT A NEW FIGHTER, as a Kasual series' "both pick again";
 `-ExtraB "MK9_FRAME_CAP=30"` gives player 2's game its own environment, here a slower PC (Pace).
 
+Each online match's stats (since 0.5.9, `net::MatchStatsJson`): `stats-<match>.json` in `MK9_SESSION_DIR`, written
+at the match's end before its status line and every 10 s meanwhile (from another thread: no file work in the
+match's frames). How long each fight frame stayed on the screen (over 25 ms: shown again), the rollbacks and how deep,
+the waits at the prediction limit, the frames held back to keep pace, the other's frame rate, and a line a second;
+the launcher sends them to the server's match log (PROTOCOL.md, "Match stats"). The frame rollback is armed in
+(Arm's) is left out. `tools\link-local.ps1` sets `MK9_SESSION_DIR` to each game's folder.
+
 ## Names over the fight
 
 In an online match, and one watched, each player's account name stands just above their health

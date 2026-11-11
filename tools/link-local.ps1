@@ -42,7 +42,7 @@ function Start-LinkLocal {
         New-Item -ItemType Directory -Force $d | Out-Null
         $envs = @{ MK9_LINK = "1"; MK9_CMD = (Join-Path $d "cmd.txt"); MK9_STATUS = (Join-Path $d "status.txt");
                    MK9_NET_LOG = (Join-Path $d "net-{match}.log"); MK9_NET_SNAPS = $Snaps;
-                   MK9_SNAP_DIR = $d; MK9_SNAP_WIDTH = "480" }
+                   MK9_SNAP_DIR = $d; MK9_SNAP_WIDTH = "480"; MK9_SESSION_DIR = $d }
         if ($Attack) { $envs["MK9_AUTOPILOT_ATTACK"] = "1" }
         if ($AttackB) { $envs["MK9_AUTOPILOT_ATTACK"] = "2" }
         if ($TraceRand) { $envs["MK9_TRACE_RAND"] = (Join-Path $d "rand.txt") }

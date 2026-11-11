@@ -9,6 +9,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QPointer>
 #include <QRandomGenerator>
 #include <QRegularExpression>
@@ -163,6 +164,57 @@ QString gameFiles(const QString& gameId) {
                                .arg(entries.size())
                                .arg(bytes)
                                .arg(QString::fromLatin1(list.toHex().left(16)));
+}
+// The game's stats of a match (docs/PROTOCOL.md, "Match stats"; mk9/src/mk9/link.cpp writes stats-<match>.json in its
+// session at the match's end, before its status line, and every 10 s while it goes on), with this PC's processor,
+// graphics card and Windows; the lines a second halved ("step") until the message fits the server's lines (16 KB).
+// Empty when the game wrote none for this match.
+QJsonObject matchStats(const QString& sessionDir, const QString& match) {
+    QFile f(QDir(sessionDir).filePath(QStringLiteral("stats-%1.json").arg(match)));
+    if (match.isEmpty() || !f.open(QIODevice::ReadOnly)) return {};
+    QJsonObject st = QJsonDocument::fromJson(f.read(64 * 1024)).object();
+    if (st.isEmpty() || st.value(QStringLiteral("match")).toString() != match) return {};
+    st.remove(QStringLiteral("match"));
+    const auto plain = [](QString s) {
+        static const QRegularExpression unprintable(QStringLiteral("[^\\x20-\\x7E]"));
+        return s.replace(unprintable, QStringLiteral("?")).simplified().left(100);
+    };
+    const QSettings cpu(QStringLiteral("HKEY_LOCAL_MACHINE\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0"),
+                        QSettings::NativeFormat);
+    st.insert(QStringLiteral("cpu"), plain(cpu.value(QStringLiteral("ProcessorNameString")).toString()));
+    st.insert(QStringLiteral("threads"), QThread::idealThreadCount());
+    st.insert(QStringLiteral("os"), plain(QSysInfo::prettyProductName()));
+    // the graphics card the game's log names ("DXGI adapter: <name> (vendor ...)", near its start)
+    QFile log(QDir(sessionDir).filePath(QStringLiteral("game.log")));
+    if (log.open(QIODevice::ReadOnly)) {
+        static const QRegularExpression adapter(QStringLiteral("DXGI adapter: (.+?) \\(vendor"));
+        const QRegularExpressionMatch m = adapter.match(QString::fromUtf8(log.read(256 * 1024)));
+        if (m.hasMatch()) st.insert(QStringLiteral("gpu"), plain(m.captured(1)));
+    }
+    for (int step = 1; step <= 16; step *= 2) {
+        if (QJsonDocument(st).toJson(QJsonDocument::Compact).size() < 15000) break;
+        // two lines a second into one: their frames, late frames, frames run again, waits and holds added up, the
+        // deeper rollback
+        const QJsonArray lines = st.value(QStringLiteral("per_second")).toArray();
+        QJsonArray half;
+        for (qsizetype i = 0; i < lines.size(); i += 2) {
+            QJsonArray a = lines[i].toArray();
+            if (i + 1 < lines.size()) {
+                const QJsonArray b = lines[i + 1].toArray();
+                for (int k = 0; k < a.size() && k < b.size(); k++)
+                    a[k] = k == 3 ? std::max(a[k].toInt(), b[k].toInt()) : std::min(65535, a[k].toInt() + b[k].toInt());
+            }
+            half.append(a);
+        }
+        st.insert(QStringLiteral("per_second"), half);
+        st.insert(QStringLiteral("step"), step * 2);
+    }
+    // a line over the server's limit closes the connection (the series with it): without the lines a second then
+    if (QJsonDocument(st).toJson(QJsonDocument::Compact).size() >= 15000) {
+        st.remove(QStringLiteral("per_second"));
+        st.remove(QStringLiteral("step"));
+    }
+    return st;
 }
 }  // namespace
 
@@ -1304,6 +1356,27 @@ void MatchController::reportDesync(int frame) {
     });
 }
 
+// What the match was like on this PC (the game's stats-<match>.json, matchStats) to the server's match log, with the
+// result: the game wrote them just before its result line (a game that ended in the match left those of its last 10 s)
+void MatchController::sendMatchStats() {
+    if (!game_ || go_.isEmpty() || !server_->isLoggedIn()) return;
+    // a server before 0.3.4 does not take them
+    const QString version = server_->welcome().value(QStringLiteral("version")).toString();
+    if (QVersionNumber::fromString(version) < QVersionNumber(0, 3, 4)) return;
+    const QString match = str(go_, "match");
+    const QJsonObject st = matchStats(game_->sessionDir(), match);
+    if (st.isEmpty()) return;
+    server_->send({{QStringLiteral("type"), QStringLiteral("match_stats")},
+                   {QStringLiteral("game"), game_->gameId()},
+                   {QStringLiteral("match"), match.left(16)},
+                   {QStringLiteral("stats"), st}});
+    log(tr("Match stats to the server: %1 fight frames, %2 shown again, %3 rollbacks, %4 waits")
+            .arg(st.value(QStringLiteral("frames")).toInt())
+            .arg(st.value(QStringLiteral("late")).toInt())
+            .arg(st.value(QStringLiteral("rollbacks")).toInt())
+            .arg(st.value(QStringLiteral("waits")).toInt()));
+}
+
 // this player's game ended during the match: the report says so, with how it ended (the server logs it with the match)
 void MatchController::reportLeft() {
     if (resultSent_ || go_.isEmpty()) return;
@@ -1330,6 +1403,7 @@ void MatchController::reportResult(QJsonObject fields) {
         server_->send(fields);
     else
         pendingResult_ = fields;
+    sendMatchStats();
     const QString what = fields.contains(QStringLiteral("winner"))
                              ? tr("player %1 won %2-%3").arg(fields.value(QStringLiteral("winner")).toInt())
                                    .arg(fields.value(QStringLiteral("p1_rounds")).toInt())

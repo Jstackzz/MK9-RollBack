@@ -296,6 +296,53 @@ last part is in, into `<reports_dir>/<day>/<time>-<player>-<game>-<report>` (`re
 40 files a report, names `[A-Za-z0-9_-]{1,40}` with `.jpg`, `.png`, `.txt` or `.log`, 4 GB of reports on disk (`too_many`,
 `too_large`, `unavailable`, `bad_request`).
 
+## Match stats (server 0.3.4)
+
+What a match was like on each player's PC, so the server can tell which matches stuttered and when:
+
+```json
+C: {"type": "match_stats", "game": "mk9", "match": "5a9e1f5b7a69",
+    "stats": {"v": 1, "end": "result", "netcode": "rollback", "delay": 4, "secs": 151.2, "fight_secs": 120.0,
+              "frames": 7190, "late": 3, "stalls": 0, "longest_ms": 41.2, "rollbacks": 310, "rerun": 640,
+              "depth": [200, 96, 12, 2], "rollback_ms": 1800.5, "rollback_longest_ms": 21.3, "waits": 0,
+              "wait_ms": 0, "held": 12, "their_fps": 59.8, "my_fps": 60.0, "round_trip": 9.4,
+              "cpu": "AMD Ryzen 7 9800X3D 8-Core Processor", "threads": 16, "gpu": "NVIDIA GeForce RTX 4070",
+              "os": "Windows 11 Version 25H2", "per_second": [[0, 0, 0, 0, 0, 0], [60, 0, 4, 2, 0, 0], "..."]}}
+S: {"type": "match_stats_ack", "match": "5a9e1f5b7a69"}
+```
+
+The game keeps them from the match's start (the link's `start` or `rematch`) and writes them as
+`stats-<match>.json` in its session (`MK9_SESSION_DIR`) at the match's end, before its `result` / `desync` /
+`disconnected` line, and every 10 s while it goes on (`mk9/src/mk9/net/netplay.h`, `MatchStats`); the launcher sends
+them with the match's result, adding this PC's processor, threads, Windows and the graphics card the game's log names.
+A fight frame is one that ran while rollback was armed (lockstep: in the fight). `frames`: fight frames, over
+`fight_secs` (from each one's top to the next one's: what the screen showed it for, its frames run again and its waits
+in it); `late`: those over 25 ms (a 60 Hz screen showed the frame before again), `stalls` over 50 ms, `longest_ms`;
+`rollbacks`, `rerun` (frames run again), `depth` (how many went back 1, 2, 3-4, 5 or more frames), their time
+(`rollback_ms`, `rollback_longest_ms`); `waits` / `wait_ms` at the 8-frame prediction limit; `held`: frames held back to
+keep pace with the other PC; `their_fps` / `my_fps`: the other's frame rate as this PC saw it, this PC's own with its
+holds and waits taken out (Pace); `round_trip` in frames; `secs`: since the match's first frame in sync; `end`: how
+the match ended on this PC (`result`, `desync`, `disconnected`, `mismatch`, or `playing` from a game that ended in it).
+`per_second`: a line a second from the start (15 minutes at most): fight frames, the late ones, frames run again, the
+deepest rollback, ms waited at the limit, frames held back; a launcher halves them (`"step": 2`, two seconds a line)
+until the message fits a line (16 KB).
+
+Signed in, from a player of that match, within 3 hours of its start (`no_such_match` otherwise); fields of the wrong
+type or out of range are `bad_request`, unknown ones dropped, text made printable ASCII; 300 a connection
+(`too_many`). The server keeps them beside the match (`match_stats`, one row a player; sent again, the later stands),
+the lines a second for 30 days, and logs `STATS match=<id> <name> (side <n>, launcher <version>): <verdict>; <fps>
+over <fight time>, <n> frames late (... a minute, longest ... ms), <n> rollbacks (... a second, <n> of 3+ frames), <n>
+waits at the limit (... ms), <n> frames held back; the other at ... fps, this PC at ...; round trip ... frames, delay
+<n>, <netcode>, ended <end>`. The verdict (`server/matchstats.py`): `stutter` under 50 fps, 30 or more late frames a
+minute, 10 stalls a minute or 3 s waited; `some stutter` under 57 fps, 6 late frames a minute, 2 stalls a minute or
+0.5 s waited; else `smooth` (`no fight` under 5 s of fight). Deep rollbacks are jumps rather than stutter and are
+shown apart.
+
+`python -m server.matchlog --db <database> [--hours 24] [--player <name>] [--match <id>] [--json|--html]` (read only)
+lists the matches with both players' lines, one match second by second, or makes a page with a chart a player
+(`server/matchpage.py`); `tools/matchlog.py` runs it on the server over ssh from the developer's PC (`--html <file>
+--open`).
+
 ## Other
 
 - `match_go` and the series' state are unchanged otherwise; `match_result` statuses are MK3D's.

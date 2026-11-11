@@ -142,7 +142,7 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
   so they play with the game's default button layout: remap here.
 - **Settings**: server address and pinned fingerprint, region, max ping, **input delay** (Auto, the default: from
   the ping measured when the match connects, with rollback the one-way trip in frames but one, 2 to 6; or 0-6
-  frames), **netcode** (Rollback,
+  frames; 0.5.9 put everyone's back on Auto once, `online/delay_auto_059`), **netcode** (Rollback,
   the default, or Lockstep: a match plays rollback only when both players chose it), game UDP port,
   *Play a sound when a match is found* (on), UPnP, *Hide my IP address from opponents* (off: every match of the
   player's goes through the server, `relay` in `queue_join` / `lobby_ready`, at the cost of ping for players far
@@ -179,6 +179,10 @@ PROTOCOL.md; servers from 0.3.0): this PC's Windows and processor, the game's `m
 match's start (addresses as `x.x.x.x`, the user folder as `*`), the match's last frames from `net-<match>.log`, and the
 extracted game's files in brief (count, bytes, a hash of names and sizes); the server logs both players' side by side.
 A game that ends during a match reports `left` with how (`crash C0000005`, `abort`, `closed`, `exit code N`).
+With every match's result goes what the match was like on this PC (`match_stats`, PROTOCOL.md; servers from 0.3.4):
+the game's `stats-<match>.json` from its session (written just before its result line; a game that ended in the match
+left those of its last 10 s) with this PC's processor, Windows and graphics card, its lines a second halved until
+the message fits 16 KB. `launcher/tools/fake_game.py` writes made-up ones (player 2's PC slow on an odd seed).
 
 ## Crash reports
 

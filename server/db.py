@@ -1,7 +1,9 @@
-"""SQLite storage: accounts, login tokens, per game/mode stats, match log, result reports and ranked sets."""
+"""SQLite storage: accounts, login tokens, per game/mode stats, match log, result reports, ranked sets and what each
+match was like on its players' PCs (match_stats, matchstats.py)."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -94,6 +96,17 @@ CREATE TABLE IF NOT EXISTS sets (
     p2_elo_before INTEGER,
     p2_elo_after  INTEGER
 );
+CREATE TABLE IF NOT EXISTS match_stats (
+    match_id   TEXT NOT NULL,
+    account_id INTEGER NOT NULL,
+    side       INTEGER NOT NULL,
+    launcher   TEXT,
+    received   REAL NOT NULL,
+    stats      TEXT NOT NULL,
+    per_second TEXT,
+    PRIMARY KEY (match_id, account_id)
+);
+CREATE INDEX IF NOT EXISTS match_stats_received ON match_stats (received);
 """
 
 MATCH_FIELDS = {
@@ -333,3 +346,23 @@ class Database:
 
     def reports(self, match_id: str) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM reports WHERE match_id = ? ORDER BY side", (match_id,)))
+
+    # --- match stats (matchstats.py) ---------------------------------------------------------------
+
+    def add_match_stats(self, match_id: str, account_id: int, side: int, launcher: str, stats: dict[str, Any],
+                        per_second: list[list[int]], now: float) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO match_stats (match_id, account_id, side, launcher, received, stats, per_second) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (match_id, account_id, side, launcher, now, json.dumps(stats, separators=(",", ":")),
+             json.dumps(per_second, separators=(",", ":")) if per_second else None),
+        )
+
+    def match_stats(self, match_id: str) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM match_stats WHERE match_id = ? ORDER BY side", (match_id,)))
+
+    def drop_old_seconds(self, before: float) -> int:
+        """The lines a second of stats received before `before` (the summaries stay); how many rows had them."""
+        cur = self.conn.execute(
+            "UPDATE match_stats SET per_second = NULL WHERE received < ? AND per_second IS NOT NULL", (before,))
+        return cur.rowcount

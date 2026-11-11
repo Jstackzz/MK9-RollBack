@@ -22,6 +22,10 @@
 // status.txt: booting (also on the way back to a hold point the game left), ready, in_match match=<id>,
 // result winner=N p1_rounds=.. p2_rounds=.. match=<id>, desync frame=N match=<id>, disconnected match=<id>,
 // error <text>.
+//
+// stats-<match>.json in MK9_SESSION_DIR: what an online match was like on this PC (net::MatchStatsJson), for the
+// launcher to send to the server's match log; written at the match's end before its status line, and every 10 s while
+// it goes on (a game closed or crashed in the match leaves those).
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -29,12 +33,16 @@
 
 #include "mk9/link.h"
 
+#include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include <fmt/format.h>
 #include <rex/logging.h>
@@ -62,6 +70,38 @@ std::wstring Widen(const std::string& s) {
   std::wstring w;
   for (unsigned char c : s) w += wchar_t(c);
   return w;
+}
+
+// the match's stats file (see the top): written by one thread at a time, a later one never overwritten by an earlier
+std::wstring g_session;
+std::mutex g_stats_lock;
+uint64_t g_stats_seq = 0, g_stats_written = 0;
+std::chrono::steady_clock::time_point g_stats_at{};
+
+void SaveStats(const std::string& text, const std::wstring& path, uint64_t seq) {
+  std::lock_guard<std::mutex> lock(g_stats_lock);
+  if (seq < g_stats_written) return;
+  g_stats_written = seq;
+  const std::wstring tmp = path + L".tmp";
+  FILE* f = _wfopen(tmp.c_str(), L"wb");
+  if (!f) return;
+  std::fwrite(text.data(), 1, text.size(), f);
+  std::fclose(f);
+  MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+}
+
+// `end` as in net::MatchStatsJson; at once (the match's end: the launcher reads it on the status line that follows) or
+// from another thread (a match going on: no file work in its frames)
+void WriteStats(const char* end, bool now) {
+  if (g_session.empty() || !g_online || g_net.watch) return;
+  std::string id;
+  for (char c : g_match) id += std::isalnum(uint8_t(c)) || c == '-' || c == '_' ? c : '_';
+  const std::wstring path = g_session + L"\\stats-" + Widen(id) + L".json";
+  std::string text = net::MatchStatsJson(g_match, end);
+  const uint64_t seq = ++g_stats_seq;
+  g_stats_at = std::chrono::steady_clock::now();
+  if (now) SaveStats(text, path, seq);
+  else std::thread([text = std::move(text), path, seq] { SaveStats(text, path, seq); }).detach();
 }
 
 void WriteStatus(const std::string& line) {
@@ -195,6 +235,8 @@ void Start(const Command& c) {
   g_plan = plan;
   g_in_match = true;
   g_reported = false;
+  net::ResetMatchStats();
+  g_stats_at = std::chrono::steady_clock::now();
   autopilot::Begin(plan, g_online);
   const std::string what = fmt::format("{} {} of {}, match {}, {} {}", Key(c, "mode", "versus"),
                                        st.watch ? std::string("watching") : "slot " + std::to_string(slot),
@@ -223,6 +265,8 @@ void Rematch(const Command& c) {
   if (std::string m = Key(c, "match"); !m.empty()) g_match = m;
   if (std::string seed = Key(c, "seed"); !seed.empty()) g_plan.seed = uint32_t(std::strtoul(seed.c_str(), nullptr, 10));
   g_reported = false;
+  net::ResetMatchStats();
+  g_stats_at = std::chrono::steady_clock::now();
   // select=1 (or the fighters given as "-"): both players pick again
   const bool select = Key(c, "select") == "1" || Key(c, "p1") == "-" || Key(c, "p2") == "-";
   if (select) autopilot::SelectAgain(g_plan);
@@ -243,6 +287,8 @@ void Init() {
   g_on = true;
   g_cmd = Widen(cmd);
   g_status = Widen(status);
+  wchar_t dir[MAX_PATH];
+  if (const DWORD n = GetEnvironmentVariableW(L"MK9_SESSION_DIR", dir, MAX_PATH); n > 0 && n < MAX_PATH) g_session = dir;
   WriteStatus("booting");
   autopilot::Init(true);
 }
@@ -288,26 +334,31 @@ void OnFrame(uint64_t frame) {
   if (g_online) {
     const net::Status s = net::GetStatus();
     if (s == net::Status::Desynced) {
+      WriteStats("desync", true);
       WriteStatus("desync frame=" + std::to_string(net::Frame()) + " match=" + g_match);
       g_reported = true;
       return;
     }
     if (s == net::Status::Disconnected) {
+      WriteStats("disconnected", true);
       WriteStatus("disconnected match=" + g_match);
       g_reported = true;
       return;
     }
     if (s == net::Status::Mismatch) {
+      WriteStats("mismatch", true);
       WriteStatus("error the other player's game is another release; both need the same update");
       g_reported = true;
       return;
     }
   }
+  if (g_online && std::chrono::steady_clock::now() - g_stats_at >= std::chrono::seconds(10)) WriteStats("playing", false);
   WriteStatus("in_match match=" + g_match);
 }
 
 void ReportResult(int winner, int p1_rounds, int p2_rounds) {
   if (!g_on || !g_in_match || g_reported) return;
+  WriteStats("result", true);
   WriteStatus("result winner=" + std::to_string(winner) + " p1_rounds=" + std::to_string(p1_rounds) +
               " p2_rounds=" + std::to_string(p2_rounds) + " match=" + g_match);
   g_reported = true;
@@ -315,6 +366,7 @@ void ReportResult(int winner, int p1_rounds, int p2_rounds) {
 
 void ReportProblem(const std::string& status) {
   if (!g_on || g_reported) return;
+  WriteStats(status.substr(0, status.find(' ')).c_str(), true);
   WriteStatus(status + " match=" + g_match);
   g_reported = true;
 }

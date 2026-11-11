@@ -101,4 +101,13 @@ struct Stats {
 };
 Stats GetStats();
 
+// What one of the launcher's matches was like on this PC, for the server's match log (docs/PROTOCOL.md, "Match
+// stats"): from ResetMatchStats on (the link's start or rematch), how long each fight frame stayed on the screen (one
+// over 25 ms was shown again), the rollbacks and how deep they went, the waits at the prediction limit, the frames held
+// back to keep pace, the other's frame rate, and a line for every second. Main thread
+void ResetMatchStats();
+// those as one line of JSON; `end`: how the match ended on this PC (result, desync, disconnected, mismatch), or
+// playing while it goes on
+std::string MatchStatsJson(const std::string& match, const char* end);
+
 }  // namespace mk9::net

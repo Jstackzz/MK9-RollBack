@@ -70,6 +70,14 @@ void init(const QString& configOverride) {
         g_settings->setValue(moved, true);
         g_settings->sync();
     }
+    // 0.5.9 puts every player's input delay on Auto (the default: from the match's ping) once, whatever was chosen
+    // before; a delay chosen after that stays. delay_auto_059 marks the settings gone over
+    const QString autoOnce = QStringLiteral("online/delay_auto_059");
+    if (!g_settings->value(autoOnce).toBool()) {
+        g_settings->remove(QStringLiteral("online/delay"));
+        g_settings->setValue(autoOnce, true);
+        g_settings->sync();
+    }
 }
 
 QString configFile() { return g_config; }

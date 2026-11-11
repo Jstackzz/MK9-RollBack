@@ -26,7 +26,8 @@ Without MK9_LINK=1 (single player) it just runs until it is closed. Knobs: MK9_F
 default 1.5), MK9_FAKE_RESULT=desync (report "desync frame=600", its log then has a match's "mk9 net:" lines as the
 game writes them, for the launcher's desync report) or none (never report a result, a match that does not get to its
 end), MK9_FAKE_EXIT=<code> (the game ends by itself with that exit code halfway through a match: a crash or a closed
-window, for the launcher's "left" report).
+window, for the launcher's "left" report). With MK9_SESSION_DIR it writes the match's stats there as the game does
+(stats-<match>.json, made up from the seed and the slot), before its result or desync line.
 """
 
 from __future__ import annotations
@@ -215,6 +216,31 @@ class FakeGame:
             f"{keys.get('netcode', 'lockstep')}, delay {keys.get('delay')}, seed {keys.get('seed')}, "
             f"p1={keys.get('p1', '-')} p2={keys.get('p2', '-')}")
 
+    def write_stats(self, end: str) -> None:
+        """The match's stats as the game writes them (mk9/src/mk9/net/netplay.cpp, MatchStatsJson): made-up numbers,
+        player 2's PC the slower one when the seed is odd."""
+        folder = os.environ.get("MK9_SESSION_DIR")
+        if not folder or self.state == "watching":
+            return
+        slow = self.slot() == 1 and int(self.start.get("seed", "0")) % 2 == 1
+        seconds = max(1, int(self.match_seconds))
+        line = [45, 12, 30, 4, 40, 0] if slow else [60, 0, 6, 2, 0, 1]
+        stats = {
+            "v": 1, "match": self.match, "end": end, "netcode": self.start.get("netcode", "lockstep"),
+            "delay": int(self.start.get("delay", "2")), "secs": round(time.monotonic() - self.started_at, 1),
+            "fight_secs": float(seconds), "frames": line[0] * seconds, "late": line[1] * seconds, "stalls": 0,
+            "longest_ms": 61.0 if slow else 18.2, "rollbacks": 3 * seconds, "rerun": line[2] * seconds,
+            "depth": [seconds, seconds, seconds if slow else 0, 0], "rollback_ms": 9.5 * seconds,
+            "rollback_longest_ms": 12.5, "waits": seconds if slow else 0, "wait_ms": float(line[4] * seconds),
+            "held": line[5] * seconds, "their_fps": 60.0, "my_fps": 45.0 if slow else 60.0, "round_trip": 4.2,
+            "per_second": [line] * seconds,
+        }
+        path = os.path.join(folder, f"stats-{self.match}.json")
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="ascii") as fh:
+            json.dump(stats, fh, separators=(",", ":"))
+        os.replace(tmp, path)
+
     def finish(self) -> None:
         """The match's end: its result (or none), then the CONTINUE? menu."""
         self.state = "continue"
@@ -236,6 +262,7 @@ class FakeGame:
                     for f in range(590, 601):
                         fh.write(f"{f} 0000:0000:00000000 0000:0000:00000000 check {f * 2654435761 & 0xFFFFFFFF:08X} "
                                  f"timer {f} rand {f * 40503 & 0xFFFFFFFF:08X}\n")
+            self.write_stats("desync")
             self.status(f"desync frame=600 match={self.match}")
         elif self.result_mode == "none":
             self.state = "playing"  # never gets to its end
@@ -243,6 +270,7 @@ class FakeGame:
         else:
             seed = int(self.start.get("seed", "0"))
             winner, r1, r2 = simulated_result(seed, int(self.start.get("rounds", "3")))
+            self.write_stats("result")
             self.status(f"result winner={winner} p1_rounds={r1} p2_rounds={r2} match={self.match}")
 
     def handle(self, line: str) -> bool:

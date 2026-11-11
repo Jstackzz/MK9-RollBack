@@ -35,6 +35,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -47,6 +48,7 @@
 #include <sstream>
 #include <thread>
 
+#include <fmt/format.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
@@ -205,6 +207,44 @@ struct Pacing {
   double ahead_sum = 0, limit_ms = 0;
 };
 Pacing g_pace;
+
+// One of the launcher's matches on this PC (ResetMatchStats, MatchStatsJson): its fight frames, the frames that ran
+// while rollback was armed (in lockstep: while the game's phase was the fight). A frame's length is from its top to the
+// next one's, what the player saw it for, with its frames run again, its wait at the prediction limit and its holds in
+// it; the frame rollback was armed in (its Arm) does not count. Over 25 ms a 60 Hz screen showed the frame before again
+constexpr double kLateMs = 25.0;
+constexpr double kStallMs = 50.0;     // shown three times or more
+constexpr size_t kStatSeconds = 900;  // the lines a second kept: 15 minutes
+struct MatchStats {
+  Clock::time_point start{}, last_top{};  // the match's first frame in sync; the top of the frame that runs now
+  uint32_t frames = 0, late = 0, stalls = 0;
+  double fight_ms = 0, longest_ms = 0;
+  uint32_t rollbacks = 0, rerun = 0, depth[4] = {};  // how many went back 1, 2, 3-4, 5 or more frames
+  double rollback_ms = 0, rollback_longest_ms = 0;
+  uint32_t limit_waits = 0, held = 0;
+  double limit_ms = 0;
+  double their_rate = 0, my_rate = 0, round_trip = 0;  // sums of Pace's, over rates_n and trips_n frames
+  uint32_t rates_n = 0, trips_n = 0;
+  // every second from the start: fight frames, the late ones among them, frames run again, the deepest rollback, ms
+  // waited at the prediction limit, frames held back
+  struct Second {
+    uint16_t frames = 0, late = 0, rerun = 0, deepest = 0, wait_ms = 0, held = 0;
+  };
+  std::vector<Second> seconds;
+};
+MatchStats g_ms;
+
+void Add(uint16_t& to, uint32_t n) { to = uint16_t(std::min<uint32_t>(0xFFFF, to + n)); }
+
+// this second's line (none before the match's first frame in sync, or past kStatSeconds)
+MatchStats::Second* StatSecond() {
+  if (g_ms.start == Clock::time_point{}) return nullptr;
+  const auto i = size_t(std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - g_ms.start).count());
+  if (i >= kStatSeconds) return nullptr;
+  if (g_ms.seconds.size() <= i) g_ms.seconds.resize(i + 1);
+  return &g_ms.seconds[i];
+}
+
 uint32_t g_barrier_id = 0;  // the id the game's next object took at the last barrier (the desync line has it)
 uint32_t g_draws_apart = 0;  // checks of this match whose fight was the same and whose draws were not
 
@@ -781,6 +821,7 @@ bool StartRolling(PPCContext& ctx) {
   g_pace.owed = 0;
   g_pace.keeping = false;
   for (PeerState& p : g_peers) p.confirmed = g_frame;
+  g_ms.last_top = {};  // this frame, Arm's, is not counted (MatchStats)
   REXLOG_INFO("mk9 net: rollback from frame {} of match {}", g_frame, g_match);
   return true;
 }
@@ -803,6 +844,26 @@ void SkipDraws(bool skip) {
 }
 
 double Ms(Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); }
+
+// the top of a frame in a match in sync: the frame before it counts if it was a fight frame (MatchStats)
+void StatTop() {
+  const auto t = Clock::now();
+  if (g_ms.start == Clock::time_point{}) g_ms.start = t;
+  const bool fight = g_rolling || (!g_cfg.rollback && game::Phase() == game::kPhaseFight);
+  if (fight && g_ms.last_top != Clock::time_point{}) {
+    const double ms = Ms(t - g_ms.last_top);
+    g_ms.frames++;
+    g_ms.fight_ms += ms;
+    g_ms.longest_ms = std::max(g_ms.longest_ms, ms);
+    if (ms > kLateMs) g_ms.late++;
+    if (ms > kStallMs) g_ms.stalls++;
+    if (MatchStats::Second* s = StatSecond()) {
+      Add(s->frames, 1);
+      if (ms > kLateMs) Add(s->late, 1);
+    }
+  }
+  g_ms.last_top = t;
+}
 
 void LogReplayTimes(bool now) {
   const auto t = Clock::now();
@@ -957,6 +1018,17 @@ bool CorrectGuesses(PPCContext& ctx, uint8_t* base) {
   g_replay.rollbacks++;
   g_replay.frames += now - wrong;
   g_replay.longest_ms = std::max(g_replay.longest_ms, Ms(Clock::now() - t0));
+  const uint32_t depth = now - wrong;
+  const double took = Ms(Clock::now() - t0);
+  g_ms.rollbacks++;
+  g_ms.rerun += depth;
+  g_ms.depth[depth <= 2 ? depth - 1 : depth <= 4 ? 2 : 3]++;
+  g_ms.rollback_ms += took;
+  g_ms.rollback_longest_ms = std::max(g_ms.rollback_longest_ms, took);
+  if (MatchStats::Second* s = StatSecond()) {
+    Add(s->rerun, depth);
+    s->deepest = uint16_t(std::max<uint32_t>(s->deepest, depth));
+  }
   LogReplayTimes(false);
   return true;
 }
@@ -1047,6 +1119,13 @@ void Pace() {
     const double ran_here = span - (s.tops.back().paused - s.tops.front().paused);
     if (span > 1.0) rate = std::clamp(ran / span, 0.25, 1.0);
     if (ran_here > 1.0) mine = std::clamp(double(kPaceRateFrames - 1) / ran_here, 0.25, 1.0);
+    g_ms.their_rate += rate;
+    g_ms.my_rate += mine;
+    g_ms.rates_n++;
+  }
+  if (s.round_trip >= 0) {
+    g_ms.round_trip += s.round_trip;
+    g_ms.trips_n++;
   }
   s.their_rate = rate;
   s.my_rate = mine;
@@ -1074,6 +1153,8 @@ void Pace() {
   if (periods) {
     s.held += uint32_t(periods);
     s.paused += periods;
+    g_ms.held += uint32_t(periods);
+    if (MatchStats::Second* sec = StatSecond()) Add(sec->held, uint32_t(periods));
     frame::HoldNext(periods);
   }
 }
@@ -1126,6 +1207,7 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
   } release_at_end;
   ApplyPending();
   if (g_status == Status::Off) return StopRolling();
+  if (g_status == Status::InSync) StatTop();
   Receive();
   const bool meet_now = g_status == Status::Connecting &&
                         ((g_meet_frame && frame::Count() == g_meet_frame) || g_meet_asked.exchange(false));
@@ -1179,9 +1261,13 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
       const uint32_t waits = g_stats.waits;
       if (!WaitForInputs(g_frame - kMaxPredict)) return Lost(Status::Disconnected);
       if (g_stats.waits != waits) {
+        const double ms = Ms(Clock::now() - t);
         g_pace.limit_waits++;
-        g_pace.limit_ms += Ms(Clock::now() - t);
-        g_pace.paused += Ms(Clock::now() - t) * 60.0 / 1000.0;  // standing still, as a frame held back (Pace)
+        g_pace.limit_ms += ms;
+        g_pace.paused += ms * 60.0 / 1000.0;  // standing still, as a frame held back (Pace)
+        g_ms.limit_waits++;
+        g_ms.limit_ms += ms;
+        if (MatchStats::Second* s = StatSecond()) Add(s->wait_ms, uint32_t(ms + 0.5));
       }
     }
     if (!CorrectGuesses(ctx, base)) return Lost(Status::Desynced);
@@ -1485,5 +1571,30 @@ void Check(uint32_t frame, uint32_t fight, uint32_t draws) {
 }
 
 Stats GetStats() { return g_stats; }
+
+void ResetMatchStats() { g_ms = {}; }
+
+std::string MatchStatsJson(const std::string& match, const char* end) {
+  const MatchStats& m = g_ms;
+  std::string id;
+  for (char c : match) id += std::isalnum(uint8_t(c)) || c == '-' || c == '_' ? c : '_';
+  const double secs = m.start == Clock::time_point{} ? 0.0 : Ms(Clock::now() - m.start) / 1000.0;
+  const auto avg = [](double sum, uint32_t n, double scale) { return n ? sum / n * scale : 0.0; };
+  std::string out = fmt::format(
+      "{{\"v\":1,\"match\":\"{}\",\"end\":\"{}\",\"netcode\":\"{}\",\"delay\":{},\"secs\":{:.1f},\"fight_secs\":{:.1f},"
+      "\"frames\":{},\"late\":{},\"stalls\":{},\"longest_ms\":{:.1f},\"rollbacks\":{},\"rerun\":{},\"depth\":[{},{},{},{}],"
+      "\"rollback_ms\":{:.1f},\"rollback_longest_ms\":{:.1f},\"waits\":{},\"wait_ms\":{:.0f},\"held\":{},"
+      "\"their_fps\":{:.1f},\"my_fps\":{:.1f},\"round_trip\":{:.1f},\"per_second\":[",
+      id, end, g_cfg.rollback ? "rollback" : "lockstep", Delay(), secs, m.fight_ms / 1000.0, m.frames, m.late,
+      m.stalls, m.longest_ms, m.rollbacks, m.rerun, m.depth[0], m.depth[1], m.depth[2], m.depth[3], m.rollback_ms,
+      m.rollback_longest_ms, m.limit_waits, m.limit_ms, m.held, avg(m.their_rate, m.rates_n, 60.0),
+      avg(m.my_rate, m.rates_n, 60.0), avg(m.round_trip, m.trips_n, 1.0));
+  for (size_t i = 0; i < m.seconds.size(); i++) {
+    const MatchStats::Second& s = m.seconds[i];
+    out += fmt::format("{}[{},{},{},{},{},{}]", i ? "," : "", s.frames, s.late, s.rerun, s.deepest, s.wait_ms, s.held);
+  }
+  out += "]}";
+  return out;
+}
 
 }  // namespace mk9::net

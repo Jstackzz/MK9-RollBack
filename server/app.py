@@ -26,7 +26,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import auth, elo
+from . import auth, elo, matchstats
 from . import protocol as P
 from . import upnp
 from .db import Database, NameTaken
@@ -39,7 +39,7 @@ NEEDS_LOGIN = {
     "logout", "queue_join", "queue_leave", "match_accept", "match_decline", "ping_report", "match_state",
     "result", "lobby_create", "lobby_list", "lobby_join", "lobby_leave", "lobby_chat", "lobby_character",
     "lobby_ready", "lobby_start", "admin_notice", "series_ready", "lobby_role", "feed", "tunnel", "desync_report",
-    "crash_note", "report_file", "report_done",
+    "crash_note", "report_file", "report_done", "match_stats",
 }
 # a tunnel (docs/PROTOCOL.md): a tun message carries at most this many datagrams, each at most this much base64
 TUNNEL_BATCH = 64
@@ -64,6 +64,11 @@ REPORT_PART_CHARS = 16000        # base64 a report_file message carries at most 
 REPORTS_DIR_MAX_BYTES = 4 << 30  # every report kept: past this, new ones are turned down
 REPORT_ID = re.compile(r"[0-9a-f]{16}")
 REPORT_FILE = re.compile(r"[A-Za-z0-9_-]{1,40}\.(jpg|png|txt|log)")
+# match stats (docs/PROTOCOL.md): what each match was like on a player's PC, sent at its end; a session's at most,
+# how long after a match's start its players can still send them, and how long their lines a second are kept
+MATCH_STATS_PER_SESSION = 300
+MATCH_STATS_WINDOW = 3 * 3600
+MATCH_STATS_SECONDS_DAYS = 30
 # the spectator feed's packets (mk9/src/mk9/net/netplay.cpp): u32 magic "MK9N", u8 type, u8 slot (the sender's), u16
 # match; types 6 MEET (its READY at a barrier), 7 OWN (its own inputs), 8 CHECK, 9 END
 FEED_MAGIC = b"MK9N"
@@ -190,6 +195,7 @@ class Session:
         self.reports: dict[str, Report] = {}  # F3 reports coming in, and the ones saved (by id)
         self.desync_reports = 0
         self.crash_notes = 0
+        self.match_stats = 0
         self.queue: QueueEntry | None = None
         self.lobby: Lobby | None = None
         self.match: Match | None = None
@@ -558,6 +564,7 @@ class Server:
         self.ping_cache = PingCache()
         self.login_failures: dict[str, collections.deque[float]] = {}
         self.crash_sent: dict[str, collections.deque[float]] = {}  # by address: when its crash reports came
+        self._seconds_dropped = 0.0  # when match stats' old lines a second were last dropped (on_match_stats)
         self.tcp_port = self.cfg.port
         self.udp_port = self.cfg.udp_port
         self.fingerprint: str | None = None
@@ -611,6 +618,7 @@ class Server:
             "crash_note": self.on_crash_note,
             "report_file": self.on_report_file,
             "report_done": self.on_report_done,
+            "match_stats": self.on_match_stats,
         }
 
     # --- lifecycle --------------------------------------------------------------------------------
@@ -2710,6 +2718,37 @@ class Server:
         for line in lines:
             log.info("DESYNC_REPORT %s | %s", s.name, line)
         self._reply(s, msg, {"type": "desync_ack"})
+
+    # --- match stats ---------------------------------------------------------------------------------
+
+    def on_match_stats(self, s: Session, msg: dict[str, Any]) -> None:
+        """What a match was like on this player's PC (matchstats.py): kept beside the match, its lines a second for
+        MATCH_STATS_SECONDS_DAYS, and logged as one line (STATS), so both players' lines sit side by side."""
+        assert self.db is not None
+        game = P.get_str(msg, "game", max_len=8)
+        if game not in P.GAMES:
+            raise P.ProtocolError("bad_request", "Unknown game.")
+        match_id = P.get_str(msg, "match", max_len=16)
+        now = time.time()
+        row = self.db.match_row(match_id)
+        if (row is None or s.account_id not in (row["p1"], row["p2"]) or row["game"] != game
+                or now - row["created"] > MATCH_STATS_WINDOW):
+            raise P.ProtocolError("no_such_match", "No such match.")
+        try:
+            stats, per_second = matchstats.clean(msg.get("stats"))
+        except ValueError as e:
+            raise P.ProtocolError("bad_request", f"Match stats: {e}.") from None
+        s.match_stats += 1
+        if s.match_stats > MATCH_STATS_PER_SESSION:
+            raise P.ProtocolError("too_many", "Too many match stats on this connection.")
+        side = 1 if s.account_id == row["p1"] else 2
+        self.db.add_match_stats(match_id, s.account_id, side, s.client_version, stats, per_second, now)
+        if now - self._seconds_dropped > 86400:
+            self._seconds_dropped = now
+            self.db.drop_old_seconds(now - MATCH_STATS_SECONDS_DAYS * 86400)
+        log.info("STATS match=%s %s (side %d, launcher %s): %s", match_id, s.name, side, s.client_version or "?",
+                 matchstats.summary(stats))
+        self._reply(s, msg, {"type": "match_stats_ack", "match": match_id})
 
     # --- F3 reports --------------------------------------------------------------------------------
 

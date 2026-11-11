@@ -158,6 +158,7 @@ private:
     void reportResult(QJsonObject fields);
     void reportLeft();             // the game ended during the match: "left", with how it ended
     void reportDesync(int frame);  // the match went out of step: the game's log of it to the server
+    void sendMatchStats();         // what the match was like on this PC (the game's stats-<match>.json) to the server
     // `status`: the server's match_result status ("" when it did not come)
     void finishMatch(const QString& status = {});
     // the series' next match from the games' CONTINUE? menu (match_go with "rematch"): the game's own rematch command

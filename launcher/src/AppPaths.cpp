@@ -182,7 +182,7 @@ bool pickInGame() { return get(QStringLiteral("online/pick_in_game"), true).toBo
 bool soloWhileWaiting() { return get(QStringLiteral("online/solo_while_waiting"), true).toBool(); }
 bool searchAgain() { return get(QStringLiteral("online/search_again"), true).toBool(); }
 int inputDelay() {
-    const QVariant v = get(QStringLiteral("online/delay"), QStringLiteral("auto"));
+    const QVariant v = get(QStringLiteral("online/delay"), kDefaultDelay);
     bool number = false;
     const int d = v.toInt(&number);
     return number ? qBound(0, d, 6) : kAutoDelay;

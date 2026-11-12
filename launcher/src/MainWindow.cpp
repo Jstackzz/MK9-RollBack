@@ -1017,7 +1017,8 @@ void MainWindow::cliLobbyMessage(const QJsonObject& msg) {
                           {QStringLiteral("delay"), cfg::inputDelayValue(cfg::inputDelay())},
                           {QStringLiteral("netcode"), cfg::netcode()}, {QStringLiteral("relay"), cfg::hideIp()},
                           {QStringLiteral("hide_always"), cfg::hideIpAlways()},
-                          {QStringLiteral("link"), server_->linkType()}};
+                          {QStringLiteral("link"), server_->linkType()},
+                          {QStringLiteral("parked"), controller_->parkedMatch()}};  // as the Ready button says it
         if (controller_->serverRttMs() >= 0) ready.insert(QStringLiteral("server_rtt"), controller_->serverRttMs());
         server_->send(ready);
     }

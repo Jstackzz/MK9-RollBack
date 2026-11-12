@@ -35,7 +35,10 @@ needs them. From 0.5.4 to 0.5.9 `clamp(round(rtt_ms / 33.33) - 1, 2, 6)`, the tr
 0.1.18, 5 at 193 ms, which left nearly every input a frame late; until 0.5.4 `ceil((rtt_ms / 2 + 8) / 16.67) - 3`, 3
 at 180 ms); with lockstep all of it,
 `clamp(ceil((rtt_ms / 2 + 8) / 16.67), 2, 8)`; at least 1 in ranked. `"delay_auto": true` says an auto delay took
-part. Both games get the same value, and a series' in-game rematch the same as its first match.
+part. Both games get the same value, and a series' in-game rematch the same as its first match. The launcher sends
+`2` unless its player chose another delay or Auto in Settings (0.5.9 and 0.5.10 sent `"auto"` unless chosen; 0.5.11
+is back to 2, which a player on a long ping may find too few: each frame the other player's input is late is a
+rollback); a message without `delay` is 2 for the server too.
 
 ## Ending a match without a result
 
@@ -237,6 +240,26 @@ the match's `ABANDONED` line; anything else there is dropped, never refused.
   running match again (`spectate`, the feed from its start).
 - A lobby named `<host>'s lobby` (the launcher's default) is named after the new host when its host leaves.
 
+## Lobbies: the games stay (server 0.3.6, launcher 0.5.11)
+
+Until then a lobby match's game closed after the match and the next match booted a new one on both PCs (about 15 s
+before the select screen). `welcome` now says `"lobby_reuse": true`, and:
+
+- A lobby match that ended with an agreed result leaves both games open: each launcher parks its game (`park`: back to
+  the main menu, the hold point) and keeps it for the lobby. Its next `lobby_ready` says so, `"parked": "<the match's
+  id>"` (`""`, or no key: it has no such game, because it closed, was started again or never played that match).
+- The lobby's state carries `"reuse"`, and `match_found` of a lobby match the same: `true` when no match runs, the last
+  match ended with a result, the next match is between the same two accounts and both launchers' `parked` is that
+  match's id. Then each launcher sends its parked game the start line as it would any game at the hold point, and
+  the select screen comes without a boot; the connection to the other player is set up as for any match (hello, punch,
+  `match_go`), so a long wait in the lobby costs nothing. Otherwise (`false`: another pair, an opponent that left or went
+  to watch, a King of the Hill line that moved on, a match without a result, a game closed meanwhile) both launchers
+  close any game they kept and boot new ones, so a game that has played a match never meets one that has not.
+- A launcher also closes its parked game on its own when the lobby's players are not the same two any more (the state
+  shows it), when it leaves the lobby or goes to watch, and after 10 minutes without a match. One that sees no
+  `lobby_reuse` in `welcome` (a server before 0.3.6) closes its game after every lobby match, and a server before
+  0.3.6 ignores `parked` and never says `reuse`.
+
 ## Desync reports
 
 A launcher whose match went out of step sends what its game logged of it:
@@ -330,13 +353,28 @@ the match ended on this PC (`result`, `desync`, `disconnected`, `mismatch`, or `
 deepest rollback, ms waited at the limit, frames held back; a launcher halves them (`"step": 2`, two seconds a line)
 until the message fits a line (16 KB).
 
+From game 0.5.11 (a server before this change drops the three fields): `late_why`, the late frames by what made them
+long: `[held, waited, rollback, own work, blocked]`: a hold the frame cap slept for, a wait at the prediction limit, a
+rollback in the frame (4 ms or more), the main thread's own work (its CPU cycles in the frame over 1.5 times a normal
+frame's), and the rest, the main thread blocked on something (the rendering thread, the GPU, a lock, a file, another
+process on its core). `shown_late` / `shown_stalls`: the gaps between successive guest frames' presents over 25 ms and
+over 50 ms, in fight frames (`Presenter::ShownGaps`, an SDK addition): what the screen got, whatever the frames' own tops
+did (a PC that makes up a late frame runs the next ones close together and then waits, long frames the screen never
+shows). When they are there the verdict and the match log use them for `late` and `stalls`. `stall_where`: up to 6
+strings, the most common places the main thread was seen at in late frames (a thread looks every few milliseconds once
+a frame is 22 ms old and not asleep in the frame cap): `"41% <host code> | main <guest lr><guest return addresses> |
+render <the rendering thread's>"`, the percentage of the looks; `python -m server.matchlog --match <id>` prints them.
+The game's file also has `screen_lag` (frames the tops are ahead of what the screen got since the fight began: the
+display latency a frame cap that makes up lateness costs), which the server drops.
+
 Signed in, from a player of that match, within 3 hours of its start (`no_such_match` otherwise); fields of the wrong
 type or out of range are `bad_request`, unknown ones dropped, text made printable ASCII; 300 a connection
 (`too_many`). The server keeps them beside the match (`match_stats`, one row a player; sent again, the later stands),
 the lines a second for 30 days, and logs `STATS match=<id> <name> (side <n>, launcher <version>): <verdict>; <fps>
 over <fight time>, <n> frames late (... a minute, longest ... ms), <n> rollbacks (... a second, <n> of 3+ frames), <n>
 waits at the limit (... ms), <n> frames held back; the other at ... fps, this PC at ...; round trip ... frames, delay
-<n>, <netcode>, ended <end>`. The verdict (`server/matchstats.py`): `stutter` under 50 fps, 30 or more late frames a
+<n>, <netcode>, ended <end>` (with the screen's gaps and the late frames by cause when the game sends them). The
+verdict (`server/matchstats.py`): `stutter` under 50 fps, 30 or more late frames a
 minute, 10 stalls a minute or 3 s waited; `some stutter` under 57 fps, 6 late frames a minute, 2 stalls a minute or
 0.5 s waited; else `smooth` (`no fight` under 5 s of fight). Deep rollbacks are jumps rather than stutter and are
 shown apart.

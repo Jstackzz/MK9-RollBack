@@ -375,6 +375,9 @@ class LobbyMember:
     relay_always: bool = False  # and even when that way is slow ("hide_always")
     link: str = ""  # their PC's connection ("ethernet", "wifi", "other"; "" unknown), with their join or ready
     server_rtt: int | None = None  # their round trip to this server, ms, with their join or ready
+    # with their ready: the lobby match their launcher kept its game parked for (back at its hold point since that
+    # match), "" when it has none; the next match starts in those games when both kept theirs (_lobby_reuse)
+    parked: str = ""
 
 
 @dataclass(eq=False)
@@ -411,6 +414,10 @@ class Lobby:
     streak: int = 0          # the king's wins in a row
     starts_at: float | None = None  # the two to play ready: the match starts by itself then (the countdown)
     countdown: int = 0  # the countdowns begun, so a called-off one's timer does nothing
+    # the last match that ended with a result and who played it (account ids): the games it leaves parked at their
+    # hold points play the next match when the same two meet again (Server._lobby_reuse)
+    last_match: str = ""
+    last_pair: frozenset[int] = frozenset()
 
     @property
     def state(self) -> str:
@@ -900,6 +907,9 @@ class Server:
             # Settings say what hiding costs)
             "direct_above_ms": self.cfg.direct_above_ms,
             "ranks": elo.ladder(),  # the ranked titles by Elo (server 0.3.1, MK3D Online's)
+            # a lobby's games stay open after its match (parked at their hold points) when the same two fight again:
+            # the lobby state's `reuse` says so (a launcher that sees no such key closes its game after every match)
+            "lobby_reuse": True,
         }
         if update:
             welcome["update"] = update
@@ -2264,6 +2274,7 @@ class Server:
         self._mark_online()  # the players per game count its members
         self._lobby_countdown(lobby)
         state = lobby.full_state()
+        state["reuse"] = self._lobby_reuse(lobby)
         for member in lobby.members:
             out = {"type": "lobby", "lobby": state}
             if reply_to is not None and member.session is reply_to[0] and "id" in reply_to[1]:
@@ -2279,6 +2290,17 @@ class Server:
         else:
             pair = sorted(lobby.players(), key=lambda mem: mem.session is not lobby.host)
         return pair if len(pair) == 2 else []
+
+    def _lobby_reuse(self, lobby: Lobby) -> bool:
+        """Whether the lobby's next match starts in the games the last one left parked at their hold points (the
+        lobby state's and match_found's `reuse`): that match ended with a result, the same two play again and both
+        launchers kept their game for it (`parked` in their lobby_ready). Any other pair, a game started again
+        meanwhile or a match that ended without a result gets new games on both PCs, so that a game that has played
+        a match never meets one that has not."""
+        pair = self._lobby_pair(lobby)
+        return (lobby.match is None and bool(lobby.last_match) and len(pair) == 2
+                and lobby.last_pair == frozenset(mem.session.account_id for mem in pair)
+                and all(mem.parked == lobby.last_match for mem in pair))
 
     def _lobby_countdown(self, lobby: Lobby) -> None:
         """The two to play ready and no match: it starts by itself once a countdown has run, which anything that clears
@@ -2318,10 +2340,15 @@ class Server:
         if lobby.match is not m:
             return
         lobby.match = None
+        # a match that ended with a result leaves both games parked at their hold points, for the next match of the
+        # same two (_lobby_reuse); any other ending closes them
+        lobby.last_match = m.id if status == "agreed" else ""
+        lobby.last_pair = frozenset(p.account_id for p in m.players)
         if lobby.koth:
             self._koth_rotate(lobby, m, status, winner, fault)
         for member in lobby.members:
             member.ready = False
+            member.parked = ""  # their next ready says whether their game stayed
         if lobby.id in self.lobbies:
             self._broadcast_lobby(lobby)
 
@@ -2615,6 +2642,7 @@ class Server:
         member.netcode = P.get_netcode(msg, default=member.netcode)
         member.relay = P.get_bool(msg, "relay", default=False)
         member.relay_always = member.relay and P.get_bool(msg, "hide_always", default=False)
+        member.parked = P.get_str(msg, "parked", default="", max_len=16)
         self._member_connection(member, msg)
         self._broadcast_lobby(lobby, reply_to=(s, msg))
 
@@ -2680,6 +2708,7 @@ class Server:
                         relay_always=mem.relay_always)
             for i, mem in enumerate(self._lobby_pair(lobby))
         ]
+        reuse = self._lobby_reuse(lobby)
         m = Match(id=secrets.token_hex(6), game=lobby.game, mode=lobby.mode, ranked=False, players=players,
                   created=now, from_queue=False, lobby=lobby, rounds=lobby.rounds, state="accepted",
                   deadline=now + self.cfg.udp_timeout, death_traps=lobby.death_traps)
@@ -2690,9 +2719,10 @@ class Server:
             p.session.send({
                 "type": "match_found", "match": m.id, "game": m.game, "mode": m.mode, "ranked": False,
                 "side": p.side, "accept_timeout": 0, "accept_required": False, "lobby": lobby.id,
-                "death_traps": m.death_traps, "opponent": self._opponent(m, m.other(p)),
+                "death_traps": m.death_traps, "opponent": self._opponent(m, m.other(p)), "reuse": reuse,
             })
-        log.info("lobby %s: match %s started %s", lobby.id, m.id, f"by {by}" if by else "(both ready)")
+        log.info("lobby %s: match %s started %s%s", lobby.id, m.id, f"by {by}" if by else "(both ready)",
+                 ", in the games parked after the last match" if reuse else "")
         self._broadcast_lobby(lobby, reply_to=reply_to)
 
     # --- desync reports ---------------------------------------------------------------------------

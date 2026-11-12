@@ -111,11 +111,20 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
   after a 3 s countdown (STARTING IN 3, 2, 1, then MATCH IN PROGRESS), and the countdown boots both players' games
   at once (`MatchController::lobbyMatchComing`; single player open closes first, a countdown called off closes the
   game again); each takes its start line once at its hold point. With a server before 0.3.0 the host's START does
-  it, and the games boot at `match_found`. After the match the game closes: no game waits in a lobby. The members'
+  it, and the games boot at `match_found`. After a match with a result the games stay open (0.5.11, server 0.3.6):
+  each launcher parks its game, back to its main menu where it waits at the hold point (`MatchController::
+  parkForLobby`), and when the same two ready up again their next match starts in those games with no boot (the
+  start line takes them to the select screen; the server's `reuse`, PROTOCOL.md "Lobbies: the games stay"). When
+  the next match is against someone else (the opponent left or went to watch, another player took the place, a King
+  of the Hill line moved on), this player left or went to watch, or either game is gone, the parked game closes (at
+  once: `LobbyPage::showLobby`) and the next match boots new games on both PCs, so that a game that played a match
+  never meets one that has not. A parked game also closes after 10 minutes without a match; a match without a result
+  closes the games as before, and so does a server that does not say `lobby_reuse` in its welcome. The members'
   table has a Connection column (the Wi-Fi or wired icon, their ping to the server). START on a controller presses
   Ready, and after a lobby match the lobby comes back in front with Ready focused, the controllers' until the next
   match is on its way even if another window kept the front; the game comes to the front for each match, played or
-  watched. Leaving the lobby closes a game its countdown started (one playing or watching a match closes after it).
+  watched. Leaving the lobby closes its game, a parked one or one its countdown started (one playing or watching a
+  match closes after it).
   A dropped connection keeps the place 60 s: the next login takes it back, and a spectator's game watches on
   meanwhile. *Watch selected* / *Watch* make you a spectator: each of the lobby's matches plays in a game booted for
   it when it comes (`spectate`), from both players' feeds buffered meanwhile (`FeedLink`, a TCP port of the launcher
@@ -140,10 +149,11 @@ holding `cmd.txt`, `status.txt`, `game.log`, the netplay logs and, for an online
   `controls.toml` in the format `mk9/src/mk9/controls.cpp` reads (`[keyboard] enabled`, `[keys]` with the game's
   key names, `[buttons]`); every game started gets its path in `MK9_CONTROLS`. Online matches run on a fresh save,
   so they play with the game's default button layout: remap here.
-- **Settings**: server address and pinned fingerprint, region, max ping, **input delay** (Auto, the default: from
-  the ping measured when the match connects, with rollback the one-way trip in frames with half a frame to spare,
-  2 to 8; or 0-6
-  frames; 0.5.9 put everyone's back on Auto once, `online/delay_auto_059`), **netcode** (Rollback,
+- **Settings**: server address and pinned fingerprint, region, max ping, **input delay** (2 frames, the default; or
+  0-6 frames; or Auto: from the ping measured when the match connects, with rollback the one-way trip in frames with
+  half a frame to spare, 2 to 8. A match takes the larger of the two players' delays. 0.5.9 put everyone's back on
+  Auto once, `online/delay_auto_059`, and made it the default; 0.5.11 made 2 the default again, which everyone who
+  has not chosen since gets, while a delay chosen since, Auto too, stays), **netcode** (Rollback,
   the default, or Lockstep: a match plays rollback only when both players chose it), game UDP port,
   *Play a sound when a match is found* (on), UPnP, *Hide my IP address from opponents* (off: every match of the
   player's goes through the server, `relay` in `queue_join` / `lobby_ready`, at the cost of ping for players far
@@ -253,11 +263,13 @@ launcher reports `result`, `desync`, `disconnected` and `error` to the server, a
 `left`. After the server's `match_result`:
 
 - a queue or series match with an agreed result: the game stays at its CONTINUE? menu; the series' next match is
-  `rematch` there when both launchers said so (`series_ready` with `continue`), else it is parked (`park`, back to
-  `ready`) for a new start;
-- a lobby match, or one without an agreed result at CONTINUE?: `park` (30 s to come back to `ready`);
-- a match that ended anywhere else (left in the middle, the games lost each other): the game is started again (a
-  new session, a fresh save), since a park from there cannot bring it back.
+  `rematch` there when both launchers said so (`series_ready` with `continue`); with no series' next match it closes
+  (8 s after the result, or when the series is over);
+- a lobby match with an agreed result (0.5.11, a server that says `lobby_reuse`): `park` (back to `ready` within
+  30 s, else the game closes); the game then waits at the hold point for the lobby's next match against the same
+  opponent, or closes (see the lobby above);
+- a match that ended anywhere else (a lobby match without a result, left in the middle, the games lost each other):
+  the game closes, since a park from there cannot bring it back; the next match boots a new session, a fresh save.
 
 A start the game turns down (`error ...`, then `ready` again) is noticed within 5 s; a watched match whose game
 turns it down or never connects to its feed within 10 s is dropped with a notice, and the game is started again.
@@ -315,6 +327,29 @@ And for the fixes and features from MK3D Online (2026-10-29), with the stand-in 
 - These launchers against the deployed 0.2.0 server's code (the host's START, no connection, desync reports not
   sent), and the 0.4.0 launcher against the new server (Kasual, and the lobby: its host's START came first).
 - `python -m pytest server\tests`: 113 passed.
+
+And for the lobby's games that stay open (2026-11-12), `python -I tools\lobby-e2e.py <dir> same|pair|spectator` (a local
+server and launchers with the stand-in, Qt offscreen, UPnP off, throw-away accounts and database; it checks and says OK):
+
+- `same`: Alpha hosts, Bravo joins, two matches. Each launcher booted one game; after match 1 each parked it (`park`, back
+  to `ready` after the stand-in's 1 s), both readied again and the server started match 2 "in the games parked after the
+  last match" 3 s later, with no boot; leaving the lobby closed the parked games.
+- `pair`: Alpha leaves after match 1 and Delta joins Bravo. Alpha's parked game closed as it left, Bravo's the moment the
+  lobby showed no opponent ("No opponent to play again"), and the match against Delta booted new games on both PCs (the
+  server did not say `reuse`).
+- `spectator`: as `same` with Charlie watching: his game booted for each match and closed after it.
+- `same --real`: two real launchers and two real games on this PC (windowed; `--character cursor` has the games pick the
+  fighter under the cursor by themselves, Alpha's game jabs through the fights): two matches, both agreed 2-0, one game
+  boot per player; the second match was found 3.6 s after the first one's result, in the games parked after it, whose
+  start line waited 2.5 s for the park to finish; leaving closed the parked games.
+- Real games on this PC (`Start-LinkLocal -Netcode rollback -Attack -Again -IdleS 100`, tools\link-local.ps1): boot to the
+  hold point 9.5 s; the start line to the select screen 10.3 s; after the match (an agreed 2-0) `park` was back at `ready` in
+  6 s; both games stood at the hold point for 100 s (the autopilot's trigger taps hold it) and still took a new start line,
+  played a whole second match to the same result (2-0) with the same next object id at each barrier on both PCs and no
+  desync. (A game's next object id at the barrier grows with what it has played, 10000105 fresh and 10001C8A at the
+  third start; a game that has played and one that has not would start from different ids. Nothing tested such a pair,
+  so the games of a changed pair all start new.)
+- `python -m pytest server`: 154 passed.
 
 Command-line options (development and automation) are MK3D's (`--config`, `--server`, `--fingerprint`, `--user`
 with `MK9_DEV_PASSWORD`, `--register`, `--queue casual|ranked`, `--mode versus|tag|tyl`, `--auto-accept N`,

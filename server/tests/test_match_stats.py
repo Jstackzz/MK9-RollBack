@@ -31,6 +31,41 @@ def stats_msg(match, **over):
     return {"type": "match_stats", "game": "mk9", "match": match, "stats": game_stats(**over)}
 
 
+def test_the_screens_gaps_count_when_a_game_sends_them():
+    # 90 late frame tops, but a PC that made up a late frame shows the screen only 2 gaps over 25 ms
+    st, _ = matchstats.clean(game_stats(late=90, stalls=6, shown_late=2, shown_stalls=0))
+    r = matchstats.rates(st)
+    assert r["late_pm"] == pytest.approx(1.0) and r["stalls_pm"] == 0
+    assert matchstats.verdict(st) == "smooth"
+    assert "the screen: 2 gaps over 25 ms, 0 over 50" in matchstats.summary(st)
+    old, _ = matchstats.clean(game_stats(late=90, stalls=6))
+    assert matchstats.verdict(old) == "stutter"  # a game before 0.5.11: the tops' own count
+    with pytest.raises(ValueError):
+        matchstats.clean(game_stats(shown_late=-1))
+
+
+def test_where_the_main_thread_stood_is_kept_as_text():
+    where = ["41% rexruntime.dll+0x247060 < mk9game.dll sub_8237C530+0x19f | main 8237C584<82DE8D78 | render 82741064",
+             "12% ntdll.dll+0x1623d4"]
+    st, _ = matchstats.clean(game_stats(stall_where=where))
+    assert st["stall_where"] == where
+    for bad in ("x", [1], ["x"] * 9):
+        with pytest.raises(ValueError):
+            matchstats.clean(game_stats(stall_where=bad))
+    kept, _ = matchstats.clean(game_stats(stall_where=["a\u00e9\n" + "b" * 400]))
+    assert len(kept["stall_where"][0]) <= 260 and kept["stall_where"][0].startswith("a?")
+
+
+def test_late_frames_by_cause_are_kept_and_said():
+    st, _ = matchstats.clean(game_stats(late=30, late_why=[12, 0, 3, 5, 10]))
+    assert st["late_why"] == [12, 0, 3, 5, 10]
+    assert "late frames: 12 held, 3 rollback, 5 own work, 10 blocked" in matchstats.summary(st)
+    assert "late frames:" not in matchstats.summary(matchstats.clean(game_stats())[0])
+    for bad in ([1, 2, 3], [1, 2, 3, 4, "x"], [1, 2, 3, 4, -5], "held"):
+        with pytest.raises(ValueError):
+            matchstats.clean(game_stats(late_why=bad))
+
+
 async def test_both_players_stats_are_kept_and_logged(server, connect, udp_peers, caplog):
     sides, match = await setup_match(server, connect, udp_peers, ["Sonya", "Kano"], ranked=False)
     (c1, go), (c2, _) = sides[1], sides[2]

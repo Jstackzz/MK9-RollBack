@@ -17,12 +17,15 @@
 #     [-Select]       the -Rematch through SELECT A NEW FIGHTER (select=1, as a Kasual series' "both pick again"):
 #                     both games back to the select screen, where the autopilots pick (-Picks) again
 #     [-AttackB]      as -Attack, but player 2 jabs: player 1 loses and steers the CONTINUE? menu
+#     [-Again [-IdleS n]]  a lobby's next match in the same games (the launcher parks them after a lobby match and starts
+#                     them again): after the match (and the rematch) park both, wait n s at the hold point, send a new
+#                     start line (new match id and seed) and check the second result
 function Start-LinkLocal {
     param([Parameter(Mandatory = $true)][string]$Out, [string]$Mode = "versus", [string]$Netcode = "lockstep",
           [int]$Delay = 2, [string]$Picks = "cursor", [string]$Snaps = "2:300", [int]$TimeoutS = 240,
           [switch]$Spectator, [switch]$Attack, [switch]$AttackB, [switch]$Rematch, [switch]$Select, [switch]$Park, [switch]$TraceRand, [int]$DelayB = -1,
           [string]$Names = "", [string]$Extra = "", [string]$ExtraB = "", [switch]$TraceScript, [string]$Bin = "", [string]$BinB = "",
-          [int]$StaggerS = 0)
+          [int]$StaggerS = 0, [switch]$Again, [int]$IdleS = 0)
     $root = Split-Path $PSScriptRoot -Parent
     if (-not $root) { $root = "C:\Users\Owner\source\repos\mk9-rollback" }
     $bin = if ($Bin) { $Bin } else { Join-Path $root "mk9\out\build\win-amd64-release" }
@@ -79,17 +82,20 @@ function Start-LinkLocal {
     $match = "link-" + (Get-Date -Format "HHmmss")
     $players = $inst | Where-Object { $_.slot -ge 0 }
     $n = if ($Names) { $two = $Names -split "\|"; "p1_name=$($two[0]) p2_name=$($two[1])" } else { "" }
-    foreach ($i in $inst) {
-        $p = if ($Picks -and $i.slot -ge 0) { "p1=$Picks p2=$Picks" } else { "" }
-        if ($i.slot -ge 0) {
-            $f = if ($Spectator) { "feed=$($i.feed)" } else { "" }
-            $dl = if ($i.slot -eq 1 -and $DelayB -ge 0) { $DelayB } else { $Delay }
-            $line = "start mode=$Mode slot=$($i.slot) players=2 local_port=$($i.port) peers=$($i.peer) delay=$dl netcode=$Netcode seed=12345 match=$match $p $f $n"
-        } else {
-            $line = "start mode=$Mode watch=1 feed=$($i.feed) players=2 seed=12345 match=$match $n"
+    function SendStart($matchId, $seed) {
+        foreach ($i in $inst) {
+            $p = if ($Picks -and $i.slot -ge 0) { "p1=$Picks p2=$Picks" } else { "" }
+            if ($i.slot -ge 0) {
+                $f = if ($Spectator) { "feed=$($i.feed)" } else { "" }
+                $dl = if ($i.slot -eq 1 -and $DelayB -ge 0) { $DelayB } else { $Delay }
+                $line = "start mode=$Mode slot=$($i.slot) players=2 local_port=$($i.port) peers=$($i.peer) delay=$dl netcode=$Netcode seed=$seed match=$matchId $p $f $n"
+            } else {
+                $line = "start mode=$Mode watch=1 feed=$($i.feed) players=2 seed=$seed match=$matchId $n"
+            }
+            Send $i $line
         }
-        Send $i $line
     }
+    SendStart $match 12345
     "sent start ($match)"
     if (-not $Attack -and -not $AttackB) { return }
     if (-not (WaitAll "^result" $players 600)) { return }
@@ -103,10 +109,24 @@ function Start-LinkLocal {
         if (-not (WaitAll "^result.*$match2" $players 600)) { return }
         foreach ($i in $inst) { "$($i.dir): $(Status $i)" }
     }
-    if ($Park) {
+    if ($Park -or $Again) {
         foreach ($i in $inst) { Send $i "park" }
         "sent park"
+        $parked = Get-Date
         if (-not (WaitAll "^ready$" $inst 120)) { return }
-        "all back at the hold point"
+        "all back at the hold point after $([int]((Get-Date) - $parked).TotalSeconds) s"
+    }
+    if ($Again) {
+        # a lobby's next match in the same games: parked after the last one (docs/LAUNCHER.md), a new start line
+        if ($IdleS -gt 0) {
+            "waiting $IdleS s at the hold point"
+            Start-Sleep -Seconds $IdleS
+            foreach ($i in $inst) { "$($i.dir): $(Status $i)" }
+        }
+        $match3 = "$match-3"
+        SendStart $match3 54321
+        "sent a second start ($match3)"
+        if (-not (WaitAll "^result.*$match3" $players 600)) { return }
+        foreach ($i in $inst) { "$($i.dir): $(Status $i)" }
     }
 }

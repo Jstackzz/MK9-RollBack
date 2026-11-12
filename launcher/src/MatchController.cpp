@@ -70,6 +70,8 @@ QString netcodeOf(const QJsonObject& o) {
 }
 
 constexpr int kWatchFeedCheckMs = 10000;  // a spectator's game connects to its feed within this once it plays
+constexpr int kParkBackMs = 30000;        // a lobby match's game parked: back at its hold point within this, or it closes
+constexpr int kParkedIdleMinutes = 10;    // and a game parked for the lobby's next match waits this long at most
 
 // How a game that ended during a match ended, for the server's log (result "exit", printable, 40 characters at most):
 // "crash C0000005" (an exception: the game wrote crash.txt in its session, mk9/src/mk9/crash.h, and ended with its
@@ -300,6 +302,17 @@ MatchController::MatchController(ServerClient* server, QObject* parent)
         atContinue_ = false;
         maybeCloseIdleGame();
     });
+    // a lobby match's game parked for the lobby's next match: back at its hold point soon, and not for ever (a game at
+    // its main menu keeps a core and a half busy)
+    parkedBack_.setSingleShot(true);
+    connect(&parkedBack_, &QTimer::timeout, this, [this] {
+        if (hasParkedGame() && !game_->isReady())
+            dropParkedGame(tr("The lobby's game did not get back to its main menu: it closed"));
+    });
+    parkedIdle_.setSingleShot(true);
+    connect(&parkedIdle_, &QTimer::timeout, this, [this] {
+        dropParkedGame(tr("No lobby match for %1 minutes: the parked game closed").arg(kParkedIdleMinutes));
+    });
     startTimeout_.setSingleShot(true);
     connect(&startTimeout_, &QTimer::timeout, this, [this] {
         if (phase_ == Phase::Starting) {
@@ -322,7 +335,10 @@ void MatchController::setPhase(Phase p, const QString& text) {
     phase_ = p;
     phaseText_ = text;
     if (p != Phase::Searching) keepaliveTimer_.stop();
-    if (p != Phase::Idle && p != Phase::Solo) lobbyComing_ = false;  // the lobby's match is on its way: its phase has it
+    if (p != Phase::Idle && p != Phase::Solo) {
+        lobbyComing_ = false;  // the lobby's match is on its way: its phase has it
+        clearParked();         // and the game, parked or not, is that match's
+    }
     log(text);
     emit phaseChanged(p, text);
     if (p == Phase::Idle) sendSeriesReady();
@@ -549,7 +565,39 @@ void MatchController::bootPending() {
 bool MatchController::wantsGame() const {
     return (phase_ != Phase::Idle && phase_ != Phase::Searching && phase_ != Phase::Solo && phase_ != Phase::Found &&
             phase_ != Phase::LocalTest) ||
-           atContinue_ || lobbyComing_ || !pendingStart_.isEmpty() || !watch_.isEmpty();
+           atContinue_ || lobbyComing_ || !pendingStart_.isEmpty() || !watch_.isEmpty() || hasParkedGame();
+}
+
+// A lobby match that ended with a result keeps its game: it is parked, back to its main menu (the hold point, where it
+// takes its start line again), and waits for the lobby's next match against the same opponent. Both launchers do the
+// same, and the server says in the lobby's state (`reuse`) whether both kept theirs: any other next match gets new games
+// on both PCs, so that a game that has played a match never meets one that has not.
+bool MatchController::hasParkedGame() const { return !parkedMatch_.isEmpty() && game_ && game_->isRunning(); }
+
+void MatchController::parkForLobby(const QString& lobby, const QString& match, const QString& opponent) {
+    parkedLobby_ = lobby;
+    parkedMatch_ = match;
+    parkedOpponent_ = opponent;
+    game_->command(QStringLiteral("park"));
+    parkedBack_.start(kParkBackMs);
+    parkedIdle_.start(kParkedIdleMinutes * 60 * 1000);
+    log(tr("The lobby's game goes back to its main menu and waits there for the next match against %1").arg(opponent));
+}
+
+void MatchController::clearParked() {
+    parkedLobby_.clear();
+    parkedMatch_.clear();
+    parkedOpponent_.clear();
+    parkedBack_.stop();
+    parkedIdle_.stop();
+}
+
+// the parked game is not wanted any more (the lobby left, the opponent gone, another pair, any other match): it closes
+void MatchController::dropParkedGame(const QString& why) {
+    if (parkedMatch_.isEmpty()) return;
+    clearParked();  // a match that claims the game clears it first (setPhase): what is parked here is wanted by no match
+    if (game_ && game_->isRunning()) closeGame(why);
+    else log(why);
 }
 
 // A lobby's Ready or a search: no game starts for it (the game boots when the match is on its way), only whether this
@@ -580,8 +628,18 @@ bool MatchController::prepareGame(const QString& gameId, QString* error) {
     return true;
 }
 
-void MatchController::lobbyMatchComing(const QString& gameId) {
-    if (lobbyComing_ || wantsGame()) return;  // booting already, or a match on its way
+void MatchController::lobbyMatchComing(const QString& gameId, bool reuse) {
+    if (lobbyComing_) return;  // booting already
+    if (hasParkedGame()) {
+        if (!reuse) {  // not against the same opponent in games both kept: new games on both PCs
+            dropParkedGame(tr("The lobby's next match is not in the parked games: this game closes, a new one starts"));
+        } else {
+            lobbyComing_ = true;
+            log(tr("The lobby's countdown: the parked game takes the match"));
+            return;
+        }
+    }
+    if (wantsGame()) return;  // a match on its way
     lobbyComing_ = true;
     log(tr("The lobby's countdown: the game starts for the match"));
     QString err;
@@ -770,6 +828,11 @@ void MatchController::onServerMessage(const QJsonObject& msg) {
         closeBridge();
         tunnel_ = false;
         udpAcked_ = false;
+        // a lobby's match against the opponent of the last one, in the games both kept parked (the server's `reuse`),
+        // takes this game; any other match gets a new one
+        if (hasParkedGame() && !(msg.value(QStringLiteral("reuse")).toBool() && str(msg, "lobby") == parkedLobby_ &&
+                                 opponentName() == parkedOpponent_))
+            dropParkedGame(tr("The lobby's next match is not in the parked games: this game closes, a new one starts"));
         QString err;
         // A queue match: its game boots once it is accepted, single player (standby) paused at once under MATCH FOUND.
         // A lobby's or a series' match (nothing to accept): its game now, if the lobby's countdown has not started it
@@ -1039,6 +1102,7 @@ QString MatchController::watchStartLine(const QJsonObject& info) const {
 // its game boots for it (bootGame) and plays it from the feed buffered meanwhile
 void MatchController::startWatch() {
     if (!watch_.isEmpty() || watchQueue_.isEmpty() || phase_ != Phase::Idle) return;
+    dropParkedGame(tr("Watching a lobby match: the parked game closes, a new one starts for it"));
     const QJsonObject info = watchQueue_.takeFirst();
     const QString match = str(info, "match");
     const QByteArray data = watchData_.take(match);
@@ -1311,6 +1375,10 @@ void MatchController::onGameStatus(const QString& line) {
 }
 
 void MatchController::onGameExited() {
+    if (!parkedMatch_.isEmpty()) {  // the lobby's parked game ended by itself (closed by the player, or crashed)
+        log(tr("The lobby's parked game ended: the next match starts a new one"));
+        clearParked();
+    }
     switch (phase_) {
     case Phase::Searching:
         log(tr("The game closed; leaving the queue."));
@@ -1428,8 +1496,15 @@ void MatchController::finishMatch(const QString& status) {
         });
     }
     const bool fromLobby = go_.value(QStringLiteral("lobby")).isString();
-    const bool keep = !fromLobby && status == QLatin1String("agreed") && game_ && game_->isRunning() &&
-                      game_->state() == QLatin1String("result");
+    const bool atResult = status == QLatin1String("agreed") && game_ && game_->isRunning() &&
+                          game_->state() == QLatin1String("result");
+    const bool keep = !fromLobby && atResult;
+    // A lobby match with a result keeps its game too, parked (back to its main menu) for the lobby's next match against
+    // this opponent; a server that does not know the lobby's `reuse` never starts one in it, so the game closes then
+    const bool park = fromLobby && atResult && server_->welcome().value(QStringLiteral("lobby_reuse")).toBool();
+    const QString lobbyId = fromLobby ? str(go_, "lobby") : QString();
+    const QString matchId = str(go_, "match");
+    const QString opponent = opponentName();
     go_ = {};
     found_ = {};
     pendingStart_.clear();
@@ -1441,7 +1516,13 @@ void MatchController::finishMatch(const QString& status) {
         setPhase(Phase::Idle, tr("Match over: the game waits at its CONTINUE? menu for the next match"));
         return;
     }
-    // no game waits for a next match: a lobby's next one, or a series' one set up anew, boots its own when it comes
+    if (park) {
+        parkForLobby(lobbyId, matchId, opponent);
+        setPhase(Phase::Idle, tr("Match over: the lobby's game waits at its main menu for the next match"));
+        return;
+    }
+    // no game waits for a next match: a series' one set up anew boots its own when it comes (so does a lobby's, when
+    // the match had no result or the server does not say its games can stay)
     if (game_ && game_->isRunning())
         closeGame(fromLobby ? tr("Match over: the lobby's game closed") : tr("Match over: the game closed"));
     setPhase(Phase::Idle, tr("Match over"));
@@ -1469,6 +1550,7 @@ bool MatchController::startSolo(const QString& gameId, QString* error, bool whil
         game_ = nullptr;
         atContinue_ = false;
         continueTimer_.stop();
+        clearParked();
         disconnect(waiting, nullptr, this, nullptr);
         waiting->quit();
         QElapsedTimer t;
@@ -1534,6 +1616,7 @@ void MatchController::closeGame(const QString& why) {
     game_ = nullptr;
     atContinue_ = false;
     continueTimer_.stop();
+    clearParked();
     showWhenReady_ = false;
     disconnect(g, nullptr, this, nullptr);  // its exit is no match's business
     g->quit();
@@ -1545,6 +1628,7 @@ void MatchController::closeGame(const QString& why) {
 
 void MatchController::closeGameWhenIdle() {
     lobbyComing_ = false;
+    dropParkedGame(tr("The lobby is left: its parked game closed"));
     maybeCloseIdleGame();
 }
 

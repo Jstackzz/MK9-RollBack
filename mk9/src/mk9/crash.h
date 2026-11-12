@@ -25,6 +25,9 @@
 // which the SDK then reports as a lost card.
 
 #include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace mk9::crash {
 
@@ -39,5 +42,14 @@ void SetNote(Note which, const char* text);
 
 // the top of every frame (the watch; tests: MK9_CRASH_TEST)
 void OnFrame(uint64_t frame);
+
+// Where the main thread stood in late frames. While sampling is on (netplay: in a fight), a thread looks at the main
+// thread every few milliseconds once a frame is 22 ms old and not asleep in the frame cap by design, and keeps what it
+// saw: the host code it was in and its callers (a wait in the kernel shows as ntdll under rexruntime.dll's wait,
+// under the guest function that called it), and the guest return addresses of the main thread and the rendering thread.
+// Take: the most common ones with their counts, `total` samples since the last take.
+using StallSample = std::pair<uint32_t, std::string>;
+void StallSampling(bool on);
+std::vector<StallSample> TakeStallSamples(int top, uint32_t* total);
 
 }  // namespace mk9::crash

@@ -19,6 +19,7 @@ uint64_t Switches();
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <thread>
@@ -61,6 +62,8 @@ std::atomic<uint32_t> g_main_tid{0};
 Hook g_top = nullptr;
 Hook g_end = nullptr;
 std::atomic<bool> g_replaying{false};
+std::atomic<int64_t> g_top_ns{0};  // when the last frame started (steady clock, ns): the stall sampler reads it
+std::atomic<bool> g_in_cap_wait{false};
 
 uint32_t CurrentTid() {
 #if defined(_WIN32)
@@ -70,12 +73,26 @@ uint32_t CurrentTid() {
 #endif
 }
 
-// The cap (frame.h): a frame starts at least a period after the one before. One up to kCapSlack
-// late lets the next make that up; one later than that starts the count again from itself, so no
-// frames run back to back after a stall (netplay holds frames back on purpose to keep the sides
-// even, and a frame waiting for the other PC's inputs must not be made up for either).
+// The cap (frame.h): a frame starts at least a period after the one before, counted from when that one was due. A frame
+// that comes late by up to kCapSlack lets the next ones make that up: they start as soon as the game is done with the
+// one before, close together, until the cap has caught up with the clock (the frames wait for the GPU's blank anyway,
+// but the rendering thread and the GPU are a frame or two behind the main thread, which can run ahead into that room).
+// Until 0.5.10 the slack was 2 ms: a PC that lost 20 ms to a rollback or a stall lost them for good, was a frame or two
+// behind from then on, and the other PC held frames back to wait for it (more than half of the late frames in the
+// server's match log of 0.5.10's first day were those holds, on the PC that had no hiccup). The price is that the
+// screen shows the frames of a PC that came late up to the slack later than it did, for as long as nothing empties that
+// room (test fights, one PC stalling 40 ms every 4 s: +0.5 frames with 12 ms, +0.8 with 17, +1.3 with 25; 17 is a frame
+// that missed a whole blank, 16.7 ms, the usual late frame). A frame later than the
+// slack starts the count again from itself, so no frames run back to back after a long stall. Netplay holds frames
+// back on purpose (a hold counts from now) and a frame that waited for the other PC's inputs, or was not a fight's, is
+// not made up for either (DropCatchUp).
 using Steady = std::chrono::steady_clock;
-constexpr auto kCapSlack = std::chrono::milliseconds(2);
+constexpr auto kCapLate = std::chrono::milliseconds(2);   // late by less than this: the cap of 0.5.10 and before did not mind
+constexpr auto kCapSlack = std::chrono::milliseconds(17);
+Steady::duration g_cap_slack = kCapSlack;  // MK9_CAP_SLACK_MS=<ms>; 2 is the cap of 0.5.10 and before
+// for the frame rate line: frames that came late by more than kCapLate, and by how much the cap trailed the clock at most
+uint32_t g_late_frames = 0;
+double g_trail_max_ms = 0;
 Steady::duration g_cap_period{};
 Steady::time_point g_cap_next{};
 #if defined(_WIN32)
@@ -95,6 +112,9 @@ void InitCap() {
   // screens and menus ran at up to 69 a second)
   g_cap_period = std::chrono::duration_cast<Steady::duration>(std::chrono::duration<double>(1.0 / fps)) -
                  std::chrono::microseconds(3);
+  if (const char* v = std::getenv("MK9_CAP_SLACK_MS"); v && *v)
+    g_cap_slack = std::chrono::duration_cast<Steady::duration>(
+        std::chrono::duration<double, std::milli>(std::clamp(std::atof(v), 0.0, 100.0)));
 #if defined(_WIN32)
   // Windows' sleeps in 1 ms steps rather than 15.6 ms ones: the SDK's vertical blank thread sleeps
   // 1 ms at a time between blanks, which the default turned into uneven bursts
@@ -132,23 +152,83 @@ void WaitUntil(Steady::time_point t) {
 // the cap starts a late frame's next one as if it had been on time, so a sleep only took away what the frame waited
 // here anyway (a frame of 6 ms of work slept 16.7 and lost 5: a game held back every other frame still ran 52 a second)
 int g_hold = 0;
+bool g_drop_catch_up = false;
+CapInfo g_cap_last;
 
 void Cap() {
   if (g_cap_period == Steady::duration::zero()) {
-    if (g_hold) std::this_thread::sleep_for(std::chrono::microseconds(16667) * g_hold);
+    g_cap_last = {};
+    g_cap_last.hold = g_hold;
+    if (g_hold) {
+      g_in_cap_wait.store(true, std::memory_order_relaxed);
+      std::this_thread::sleep_for(std::chrono::microseconds(16667) * g_hold);
+      g_in_cap_wait.store(false, std::memory_order_relaxed);
+    }
     g_hold = 0;
     return;
   }
   auto now = Steady::now();
+  g_cap_last = {};
+  g_cap_last.hold = g_hold;
+  if (g_drop_catch_up) {
+    g_cap_next = std::max(g_cap_next, now);  // what the cap trails the clock by is forgotten
+    g_drop_catch_up = false;
+  }
   if (g_hold) {
-    g_cap_next = std::max(g_cap_next, now - kCapSlack) + g_cap_period * g_hold;
+    // a hold counts from now (the cap may trail the clock by the slack)
+    g_cap_next = std::max(g_cap_next, now - kCapLate) + g_cap_period * g_hold;
     g_hold = 0;
   }
   if (now < g_cap_next) {
+    g_in_cap_wait.store(true, std::memory_order_relaxed);
     WaitUntil(g_cap_next);
-    now = Steady::now();
+    g_in_cap_wait.store(false, std::memory_order_relaxed);
+    const auto after = Steady::now();
+    g_cap_last.slept_ms = std::chrono::duration<double, std::milli>(after - now).count();
+    now = after;
   }
-  g_cap_next = std::max(g_cap_next, now - kCapSlack) + g_cap_period;
+  if (g_cap_next.time_since_epoch().count() != 0 && now - g_cap_next > kCapLate) {  // not the first frame's
+    g_late_frames++;
+    g_trail_max_ms = std::max(g_trail_max_ms, std::chrono::duration<double, std::milli>(now - g_cap_next).count());
+  }
+  g_cap_next = std::max(g_cap_next, now - g_cap_slack) + g_cap_period;
+}
+
+// tests: MK9_TEST_HICCUP=<every ms>:<busy ms>[:<from frame>] keeps this game's main thread busy that long now and
+// then in a fight (every time a random 0.7-1.3 of the interval after the one before), as a PC that stalls
+void Hiccup() {
+  struct Config {
+    double every_ms = 0, busy_ms = 0;
+    uint64_t from = 0;
+  };
+  static const Config cfg = [] {
+    Config c;
+    if (const char* v = std::getenv("MK9_TEST_HICCUP"); v && *v) {
+      double e = 0, b = 0;
+      unsigned long long f = 0;
+      if (std::sscanf(v, "%lf:%lf:%llu", &e, &b, &f) >= 2) {
+        c.every_ms = e;
+        c.busy_ms = b;
+        c.from = f;
+      }
+    }
+    return c;
+  }();
+  if (cfg.every_ms <= 0 || game::Phase() != game::kPhaseFight || g_frames.load() < cfg.from) return;
+  static Steady::time_point next{};
+  static uint32_t rng = 12345;
+  const auto now = Steady::now();
+  if (next == Steady::time_point{}) {
+    next = now + std::chrono::milliseconds(3000);
+    return;
+  }
+  if (now < next) return;
+  rng = rng * 1664525u + 1013904223u;
+  const double k = 0.7 + 0.6 * double(rng >> 8) / double(1u << 24);
+  next = now + std::chrono::duration_cast<Steady::duration>(std::chrono::duration<double, std::milli>(cfg.every_ms * k));
+  const auto until = now + std::chrono::duration_cast<Steady::duration>(std::chrono::duration<double, std::milli>(cfg.busy_ms));
+  while (Steady::now() < until) {
+  }
 }
 
 // how evenly the frames came, for the frame rate line: frames that started under 15 ms or over
@@ -181,6 +261,10 @@ void SetTopHook(Hook hook) { g_top = hook; }
 void SetEndHook(Hook hook) { g_end = hook; }
 bool Replaying() { return g_replaying.load(std::memory_order_relaxed); }
 void HoldNext(int periods) { g_hold = std::max(g_hold, periods); }
+CapInfo LastCap() { return g_cap_last; }
+void DropCatchUp() { g_drop_catch_up = true; }
+int64_t LastTopNs() { return g_top_ns.load(std::memory_order_relaxed); }
+bool InCapWait() { return g_in_cap_wait.load(std::memory_order_relaxed); }
 
 namespace {
 
@@ -262,6 +346,8 @@ void Top(PPCContext& ctx, uint8_t* base) {
   crash::OnFrame(g_frames.load(std::memory_order_relaxed) + 1);
   // the cap first: netplay then reads the pads and the network as late as it can before the frame
   Cap();
+  Hiccup();
+  g_top_ns.store(Steady::now().time_since_epoch().count(), std::memory_order_relaxed);
   g_pacing.Top();
   gmalloc::OnFrameTop(ctx, base);
   sound::OnFrameTop(ctx, base);
@@ -317,13 +403,29 @@ REX_HOOK_RAW(sub_823621F8) {
     uint64_t shown = 0;
     double waited_ms = 0, longest_wait_ms = 0;
     rex::ui::Presenter::TakePresentWaits(shown, waited_ms, longest_wait_ms);
+    // and what the screen got meanwhile: the gaps between successive guest frames' presents
+    static uint64_t gaps_before = 0, over25_before = 0, over50_before = 0;
+    uint64_t gaps = 0, over25 = 0, over50 = 0;
+    double longest_gap_ms = 0;
+    rex::ui::Presenter::ShownGaps(gaps, over25, over50, longest_gap_ms);
     REXLOG_INFO("mk9: frame {}: {:.1f} frames/s ({} under 15 ms, {} over 20 ms, longest {:.1f} ms), {:.1f} presents/s "
-                "(a frame shown {:.2f} ms after it was ready, at most {:.1f}), timer {}, {} fiber switches, {} effects "
+                "(a frame shown {:.2f} ms after it was ready, at most {:.1f}), screen: {} gaps between frames over 25 "
+                "ms, {} over 50 (longest so far {:.0f} ms), timer {}, {} fiber switches, {} effects "
                 "taken ({} with every one in use, {} made room)",
                 n, double(n - since_frames) / s, g_pacing.early, g_pacing.late,
                 std::chrono::duration<double, std::milli>(g_pacing.longest).count(),
                 double(presents - since_presents) / s, shown ? waited_ms / double(shown) : 0.0, longest_wait_ms,
+                over25 - over25_before, over50 - over50_before, longest_gap_ms,
                 mk9::game::RoundTimer(), mk9::fibers::Switches(), fx.taken, fx.empty, fx.reclaimed);
+    gaps_before = gaps;
+    over25_before = over25;
+    over50_before = over50;
+    if (g_late_frames)
+      REXLOG_INFO("mk9: the frame cap: {} frames came more than 2 ms late (the cap trailed the clock by {:.0f} ms at most, "
+                  "of the {:.0f} ms it makes up)",
+                  g_late_frames, g_trail_max_ms, std::chrono::duration<double, std::milli>(g_cap_slack).count());
+    g_late_frames = 0;
+    g_trail_max_ms = 0;
     since = now;
     since_frames = n;
     since_presents = presents;

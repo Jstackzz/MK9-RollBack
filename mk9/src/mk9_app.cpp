@@ -51,6 +51,19 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 
 namespace {
 
+// Windows 11 can run a process in its efficiency mode (its threads on the efficiency cores at low clocks) and hand it
+// a coarse timer (15.6 ms steps, whatever it asked of timeBeginPeriod) when its window is not the one in front, behind
+// OBS or a remote-play window, or the PC saves battery: the game's frame timers and its blank thread then come in
+// bursts. This process asks for neither; nothing happens on a Windows without them.
+void OptOutOfPowerThrottling() {
+  PROCESS_POWER_THROTTLING_STATE state{};
+  state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+  state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+  state.StateMask = 0;  // in the control mask and off in the state mask: not throttled, the timer resolution kept
+  if (!SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof state))
+    REXLOG_INFO("mk9: power throttling could not be turned off (error {})", GetLastError());
+}
+
 // Window::presenter() is protected; a member pointer taken through a derived class reaches it
 struct WindowPresenter : rex::ui::Window {
   static rex::ui::Presenter* Of(rex::ui::Window* window) {
@@ -128,6 +141,7 @@ void Mk9App::OnConfigurePaths(rex::PathConfig& paths) {
 }
 
 void Mk9App::OnPreSetup(rex::RuntimeConfig& config) {
+  OptOutOfPowerThrottling();
   // The game draws through the Xenos GPU emulation; the SDK leaves it off unless asked.
   if (config.gpu_plugin.empty()) {
     config.gpu_plugin = "xenos";

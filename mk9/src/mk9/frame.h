@@ -9,7 +9,8 @@
 //
 // No more than 60 frames a second start there (MK9_FRAME_CAP=<n> caps at n instead, 0 not at all):
 // the frames the game draws wait for the GPU's 60 Hz vertical blank anyway, the cap holds back the
-// ones that do not (loading screens, some menus), and frames a rollback runs again are not capped.
+// ones that do not (loading screens, some menus), and frames a rollback runs again are not capped. A fight frame that
+// came late (a rollback, a stall) is made up for, up to 17 ms of it, by starting the next ones close together.
 #include <cstdint>
 
 struct PPCContext;
@@ -41,5 +42,21 @@ bool Replaying();
 // Netplay keeping the sides even: the next frame starts `periods` whole frames later than the cap would start it (the
 // screen shows this frame that many times more). From the main thread
 void HoldNext(int periods = 1);
+
+// The cap's last wait, which Top made first thing: how long it slept and the periods a hold added to it (what made a
+// frame long, for netplay's stats). From the main thread
+struct CapInfo {
+  double slept_ms = 0;
+  int hold = 0;
+};
+CapInfo LastCap();
+// The frame that just ran was late because it waited for the others (their inputs at the prediction limit), or the
+// frames are not a fight's (loading, menus): the cap does not make up for it (see the cap's comment in frame.cpp).
+// From the main thread
+void DropCatchUp();
+// when the last frame started, in steady clock nanoseconds (0 before the first): the stall sampler reads it
+int64_t LastTopNs();
+// true while the main thread sleeps in the frame cap or a hold (idle by design)
+bool InCapWait();
 
 }  // namespace mk9::frame

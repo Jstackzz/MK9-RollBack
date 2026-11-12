@@ -53,12 +53,17 @@
 #include <rex/ppc/context.h>
 
 #include "mk9/autopilot.h"
+#include "mk9/crash.h"
 #include "mk9/engine.h"
 #include "mk9/frame.h"
 #include "mk9/game.h"
 #include "mk9/net/rollback.h"
 #include "mk9/snap.h"
 #include "mk9/testinput.h"
+
+#include <realtimeapiset.h>
+
+#include <rex/ui/presenter.h>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -169,6 +174,7 @@ std::map<uint32_t, Wire> g_mine;
 Wire g_now[kMaxSlots];
 std::map<uint32_t, game::StateCheck> g_my_checks;
 std::deque<Outgoing> g_outbox;
+std::mutex g_outbox_mutex;  // the simulated network's queue: the game's threads and its pump thread
 std::mt19937 g_rng{12345};
 Stats g_stats;
 FILE* g_log = nullptr;
@@ -201,6 +207,9 @@ struct Pacing {
   std::deque<Top> tops;
   double paused = 0, their_rate = 1.0, my_rate = 1.0, owed = 0;
   bool keeping = false;  // holding back to the other's pace, until no longer ahead
+  uint32_t streak = 0;   // the frames in a row this PC has been ahead by the hold's threshold or more
+  uint32_t last_hold = 0;  // the frame of the last lead hold (holds is emptied sooner), when had_hold
+  bool had_hold = false;
   // for the log every 10 s: frames held back, the sum and count of the averages, the frames that waited at the
   // prediction limit (kMaxPredict) and how long
   uint32_t held = 0, ahead_n = 0, limit_waits = 0;
@@ -223,6 +232,23 @@ struct MatchStats {
   double rollback_ms = 0, rollback_longest_ms = 0;
   uint32_t limit_waits = 0, held = 0;
   double limit_ms = 0;
+  // the late frames by what made them long (StatTop): a hold the cap slept for, a wait at the prediction limit, a
+  // rollback, the main thread's own work (its CPU cycles well over a normal frame's), and the rest: the main thread
+  // blocked on something (the rendering thread, the GPU, a lock, a file, another process taking its core)
+  uint32_t late_why[5] = {};
+  // the gaps between successive frames' presents over 25 ms and over 50 ms, in fight frames: what the screen got
+  // (the SDK's Presenter::ShownGaps), whatever the frames' own tops did
+  uint32_t shown_late = 0, shown_stalls = 0;
+  // where the main thread stood in late frames (crash::TakeStallSamples), summed over the match: the host code and the
+  // guest return addresses, with their counts
+  std::map<std::string, uint32_t> stall_where;
+  uint32_t stall_samples = 0;
+  // how many frames the game's frame tops are ahead of the frames the screen got, from the first fight frame's: a PC that
+  // makes up a late frame by running the next ones close together fills its frame pipeline, and the screen shows each
+  // frame that much later. Sum over `lag_n` fight frames (tests: MK9_TRACE_LAG)
+  double lag_sum = 0;
+  uint32_t lag_n = 0;
+  int64_t lag_base = INT64_MIN;
   double their_rate = 0, my_rate = 0, round_trip = 0;  // sums of Pace's, over rates_n and trips_n frames
   uint32_t rates_n = 0, trips_n = 0;
   // every second from the start: fight frames, the late ones among them, frames run again, the deepest rollback, ms
@@ -233,6 +259,15 @@ struct MatchStats {
   std::vector<Second> seconds;
 };
 MatchStats g_ms;
+
+// what the frame that runs now has spent on things that make a frame long, read and cleared at the next top (StatTop)
+struct FrameParts {
+  uint64_t shown_over_25 = 0, shown_over_50 = 0;  // the presenter's counts at the last top
+  double rollback_ms = 0, wait_ms = 0;
+  uint64_t cycles = 0;      // the main thread's cycle count at the last top
+  double cycle_ema = 0;     // the cycles a normal frame takes it, slowly smoothed
+};
+FrameParts g_fp;
 
 void Add(uint16_t& to, uint32_t n) { to = uint16_t(std::min<uint32_t>(0xFFFF, to + n)); }
 
@@ -285,10 +320,14 @@ void SendNow(const sockaddr_in& to, const uint8_t* b, int n) {
   sendto(g_sock, reinterpret_cast<const char*>(b), n, 0, reinterpret_cast<const sockaddr*>(&to), sizeof to);
 }
 
+void StartPumpThread();
+
 void Send(const PeerState& p, const Writer& w) {
   if (g_cfg.loss_percent && int(g_rng() % 100) < g_cfg.loss_percent) return;
   if (!g_cfg.lag_ms && !g_cfg.jitter_ms) return SendNow(p.addr, w.b, w.n);
   int extra = g_cfg.jitter_ms ? int(g_rng() % uint32_t(g_cfg.jitter_ms + 1)) : 0;
+  StartPumpThread();
+  std::lock_guard<std::mutex> lock(g_outbox_mutex);
   g_outbox.push_back({Clock::now() + std::chrono::milliseconds(g_cfg.lag_ms + extra), p.addr,
                       std::vector<uint8_t>(w.b, w.b + w.n)});
 }
@@ -299,12 +338,29 @@ void SendAll(const Writer& w) {
 
 void Pump() {
   const auto now = Clock::now();
+  std::lock_guard<std::mutex> lock(g_outbox_mutex);
   // the simulated network delivers in send order per destination once due
   while (!g_outbox.empty() && g_outbox.front().when <= now) {
     const Outgoing& o = g_outbox.front();
     SendNow(o.to, o.data.data(), int(o.data.size()));
     g_outbox.pop_front();
   }
+}
+
+// A real network delivers a packet when it is due, not when its sender next looks at a clock: a thread of the simulated
+// one (tests) pumps every millisecond. Until 2026-11-12 only the sender's frame tops did, which added up to a frame to
+// the lag, and more after frames that came close together.
+void StartPumpThread() {
+  static const bool started = [] {
+    std::thread([] {
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        Pump();
+      }
+    }).detach();
+    return true;
+  }();
+  (void)started;
 }
 
 PeerState* PeerBySlot(int slot) {
@@ -845,11 +901,37 @@ void SkipDraws(bool skip) {
 
 double Ms(Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); }
 
+// What the stall sampler saw since the last look (crash::TakeStallSamples): into the match's totals and the log, every
+// 10 s of a match and when the stats are made
+void CollectStalls(bool now) {
+  static Clock::time_point since{};
+  const auto t = Clock::now();
+  if (since == Clock::time_point{}) since = t;
+  if (!now && t - since < std::chrono::seconds(10)) return;
+  since = t;
+  uint32_t total = 0;
+  const auto seen = crash::TakeStallSamples(40, &total);
+  if (!total) return;
+  g_ms.stall_samples += total;
+  for (const auto& [n, text] : seen)
+    if (g_ms.stall_where.size() < 120 || g_ms.stall_where.count(text)) g_ms.stall_where[text] += n;
+  std::string where;
+  for (size_t i = 0; i < seen.size() && i < 3; i++)
+    where += fmt::format("{}{} % {}", i ? "; " : "", 100 * seen[i].first / total, seen[i].second);
+  REXLOG_INFO("mk9 net: where the main thread stood in late frames ({} looks): {}", total, where);
+}
+
+constexpr uint32_t kCatchUpFrom = 180;  // the fight's frame the cap starts making up late frames from (frame.cpp)
+
 // the top of a frame in a match in sync: the frame before it counts if it was a fight frame (MatchStats)
 void StatTop() {
   const auto t = Clock::now();
   if (g_ms.start == Clock::time_point{}) g_ms.start = t;
   const bool fight = g_rolling || (!g_cfg.rollback && game::Phase() == game::kPhaseFight);
+  crash::StallSampling(fight);
+  // loading, menus and a fight's first seconds (both PCs come late alike) are not made up for
+  if (!fight || g_frame < kCatchUpFrom) frame::DropCatchUp();
+  if (fight) CollectStalls(false);
   if (fight && g_ms.last_top != Clock::time_point{}) {
     const double ms = Ms(t - g_ms.last_top);
     g_ms.frames++;
@@ -861,7 +943,39 @@ void StatTop() {
       Add(s->frames, 1);
       if (ms > kLateMs) Add(s->late, 1);
     }
+    // what a late frame was spent on: the cycles this thread ran in it against a normal frame's
+    ULONG64 cycles = 0;
+    QueryThreadCycleTime(GetCurrentThread(), &cycles);
+    const double ran = g_fp.cycles ? double(cycles - g_fp.cycles) : 0.0;
+    if (ms > kLateMs) {
+      const frame::CapInfo cap = frame::LastCap();
+      const int why = cap.hold > 0                                   ? 0
+                      : g_fp.wait_ms >= 4.0                          ? 1
+                      : g_fp.rollback_ms >= 4.0                      ? 2
+                      : g_fp.cycle_ema > 0 && ran > 1.5 * g_fp.cycle_ema ? 3
+                                                                     : 4;
+      g_ms.late_why[why]++;
+    } else if (ran > 0) {
+      g_fp.cycle_ema = g_fp.cycle_ema > 0 ? g_fp.cycle_ema * 0.97 + ran * 0.03 : ran;
+    }
+    g_fp.cycles = cycles;
   }
+  {
+    uint64_t gaps = 0, over25 = 0, over50 = 0;
+    double longest = 0;
+    rex::ui::Presenter::ShownGaps(gaps, over25, over50, longest);
+    if (fight && g_ms.last_top != Clock::time_point{}) {
+      g_ms.shown_late += uint32_t(over25 - g_fp.shown_over_25);
+      g_ms.shown_stalls += uint32_t(over50 - g_fp.shown_over_50);
+      const int64_t ahead = int64_t(g_ms.frames) - int64_t(gaps);
+      if (g_ms.lag_base == INT64_MIN) g_ms.lag_base = ahead;
+      g_ms.lag_sum += double(ahead - g_ms.lag_base);
+      g_ms.lag_n++;
+    }
+    g_fp.shown_over_25 = over25;
+    g_fp.shown_over_50 = over50;
+  }
+  g_fp.rollback_ms = g_fp.wait_ms = 0;
   g_ms.last_top = t;
 }
 
@@ -1024,6 +1138,7 @@ bool CorrectGuesses(PPCContext& ctx, uint8_t* base) {
   g_ms.rerun += depth;
   g_ms.depth[depth <= 2 ? depth - 1 : depth <= 4 ? 2 : 3]++;
   g_ms.rollback_ms += took;
+  g_fp.rollback_ms += took;
   g_ms.rollback_longest_ms = std::max(g_ms.rollback_longest_ms, took);
   if (MatchStats::Second* s = StatSecond()) {
     Add(s->rerun, depth);
@@ -1058,6 +1173,15 @@ bool CorrectGuesses(PPCContext& ctx, uint8_t* base) {
 constexpr int kPaceWindow = 8;
 constexpr double kPaceAhead = 2.5;
 constexpr uint32_t kPaceGap = 2;
+// A lead holds a frame back only once it has lasted this many frames. What this PC knows of the other's frame is a trip
+// old and averaged over kPaceWindow frames, so a PC that lost a frame or two and made them up at once (the cap lets
+// the frames after a late one start close together, frame.cpp) showed as behind for about 9 frames after it was level
+// again, and the PC ahead held for a lead that was gone: 7 holds in a test fight where the other lost 21 frames, and
+// the PC that made up its frames then guessed the holder's inputs 2.3 times a second. A lead that stays (a PC running
+// a little slower, or one that does not make up what it lost) is held after 14 frames, a quarter of a second, and then,
+// while it lasts (a hold in the last kPaceFollow frames), as quickly as before: a PC that falls behind by a few frames a
+// second needs a hold every few frames, and 14 frames of waiting after each would let it fall further behind.
+constexpr uint32_t kPaceStreak = 14, kPaceFollow = 40;
 // the other's pace: measured over this many of our frames; 54 a second and up is left to the lead alone (which keeps
 // up with 40 and more), and so is a PC that runs no faster itself: two PCs both slowed down (both rolling back a lot,
 // one GPU between two test games) must not take turns holding back, each slowing the other down in turn
@@ -1102,8 +1226,14 @@ void Pace() {
     const char* v = std::getenv("MK9_TEST_PACE_AHEAD");
     return v && *v ? std::atof(v) : kPaceAhead;
   }();
-  const bool hold =
-      at_least > 0 && ahead >= at_least && (s.holds.empty() || g_frame - s.holds.back() >= kPaceGap);
+  static const uint32_t streak_needed = [] {  // tests: MK9_TEST_PACE_STREAK=<frames>
+    const char* v = std::getenv("MK9_TEST_PACE_STREAK");
+    return v && *v ? uint32_t(std::atoi(v)) : kPaceStreak;
+  }();
+  s.streak = at_least > 0 && ahead >= at_least ? s.streak + 1 : 0;
+  const bool following = s.had_hold && g_frame - s.last_hold < kPaceFollow;
+  const bool hold = at_least > 0 && ahead >= at_least && (s.streak >= streak_needed || following) &&
+                    (s.holds.empty() || g_frame - s.holds.back() >= kPaceGap);
   // the other's pace: the frames it ran a 60 Hz period over our last kPaceRateFrames frames, and ours not counting the
   // periods we stood still. Held back to only by a PC that runs clearly faster than the other, which runs clearly slower
   // than 60 a second; when more than half the threshold ahead (the one behind, or both near even, running slower too
@@ -1149,7 +1279,11 @@ void Pace() {
     std::fflush(trace);
   }
   // the lead's own correction shows in the average (unseen above); what keeps pace with the other does not move it
-  if (hold) s.holds.push_back(g_frame);
+  if (hold) {
+    s.holds.push_back(g_frame);
+    s.last_hold = g_frame;
+    s.had_hold = true;
+  }
   if (periods) {
     s.held += uint32_t(periods);
     s.paused += periods;
@@ -1265,6 +1399,8 @@ void OnTop(PPCContext& ctx, uint8_t* base) {
         g_pace.limit_waits++;
         g_pace.limit_ms += ms;
         g_pace.paused += ms * 60.0 / 1000.0;  // standing still, as a frame held back (Pace)
+        g_fp.wait_ms += ms;
+        frame::DropCatchUp();  // waiting for the others is not time to make up
         g_ms.limit_waits++;
         g_ms.limit_ms += ms;
         if (MatchStats::Second* s = StatSecond()) Add(s->wait_ms, uint32_t(ms + 0.5));
@@ -1572,7 +1708,11 @@ void Check(uint32_t frame, uint32_t fight, uint32_t draws) {
 
 Stats GetStats() { return g_stats; }
 
-void ResetMatchStats() { g_ms = {}; }
+void ResetMatchStats() {
+  g_ms = {};
+  g_fp.rollback_ms = g_fp.wait_ms = 0;
+  g_fp.cycles = 0;
+}
 
 std::string MatchStatsJson(const std::string& match, const char* end) {
   const MatchStats& m = g_ms;
@@ -1583,17 +1723,34 @@ std::string MatchStatsJson(const std::string& match, const char* end) {
   std::string out = fmt::format(
       "{{\"v\":1,\"match\":\"{}\",\"end\":\"{}\",\"netcode\":\"{}\",\"delay\":{},\"secs\":{:.1f},\"fight_secs\":{:.1f},"
       "\"frames\":{},\"late\":{},\"stalls\":{},\"longest_ms\":{:.1f},\"rollbacks\":{},\"rerun\":{},\"depth\":[{},{},{},{}],"
-      "\"rollback_ms\":{:.1f},\"rollback_longest_ms\":{:.1f},\"waits\":{},\"wait_ms\":{:.0f},\"held\":{},"
+      "\"rollback_ms\":{:.1f},\"rollback_longest_ms\":{:.1f},\"waits\":{},\"wait_ms\":{:.0f},\"held\":{},\"late_why\":[{},{},{},{},{}],\"shown_late\":{},\"shown_stalls\":{},\"screen_lag\":{:.2f},"
       "\"their_fps\":{:.1f},\"my_fps\":{:.1f},\"round_trip\":{:.1f},\"per_second\":[",
       id, end, g_cfg.rollback ? "rollback" : "lockstep", Delay(), secs, m.fight_ms / 1000.0, m.frames, m.late,
       m.stalls, m.longest_ms, m.rollbacks, m.rerun, m.depth[0], m.depth[1], m.depth[2], m.depth[3], m.rollback_ms,
-      m.rollback_longest_ms, m.limit_waits, m.limit_ms, m.held, avg(m.their_rate, m.rates_n, 60.0),
+      m.rollback_longest_ms, m.limit_waits, m.limit_ms, m.held, m.late_why[0], m.late_why[1], m.late_why[2],
+      m.late_why[3], m.late_why[4], m.shown_late, m.shown_stalls, avg(m.lag_sum, m.lag_n, 1.0), avg(m.their_rate, m.rates_n, 60.0),
       avg(m.my_rate, m.rates_n, 60.0), avg(m.round_trip, m.trips_n, 1.0));
   for (size_t i = 0; i < m.seconds.size(); i++) {
     const MatchStats::Second& s = m.seconds[i];
     out += fmt::format("{}[{},{},{},{},{},{}]", i ? "," : "", s.frames, s.late, s.rerun, s.deepest, s.wait_ms, s.held);
   }
-  out += "]}";
+  out += "]";
+  // where the main thread stood in the late frames: the most common ones, as "41% rexruntime.dll+0x247060 < ..."
+  CollectStalls(true);
+  std::vector<std::pair<uint32_t, std::string>> where;
+  for (const auto& [text, n] : g_ms.stall_where) where.emplace_back(n, text);
+  std::sort(where.begin(), where.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+  if (!where.empty() && g_ms.stall_samples) {
+    out += ",\"stall_where\":[";
+    for (size_t i = 0; i < where.size() && i < 6; i++) {
+      std::string text = where[i].second.substr(0, 230);
+      for (char& c : text)
+        if (c == '"' || c == '\\' || c < ' ') c = '/';
+      out += fmt::format("{}\"{}% {}\"", i ? "," : "", 100 * where[i].first / g_ms.stall_samples, text);
+    }
+    out += "]";
+  }
+  out += "}";
   return out;
 }
 

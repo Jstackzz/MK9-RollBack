@@ -113,11 +113,32 @@ the game's log (no IP addresses, no folder names), as long as you are signed in.
   at 193 ms of ping, 2 at 82), so nearly every input of the other player came a frame late and every change of it
   was a rollback, each of which holds the game up a frame or more: the server's match log rated every 0.5.9 match
   "stutter" on both PCs. Since 0.5.10 the delay covers the trip with half a frame to spare (3 from 51 ms of ping, 4
-  from 84, 7 at 193, 8 at most): more frames between a press and the move, far fewer frames shown twice. Settings
-  can still set it lower by hand (docs/PROTOCOL.md, "Input delay").
+  from 84, 7 at 193, 8 at most): more frames between a press and the move, far fewer frames shown twice. Since 0.5.11
+  the setting is back at 2 frames by default, as before 0.5.9; Auto stays one choice away in Settings for a longer
+  ping, where 2 means a rollback for every input of the other player that comes late (docs/PROTOCOL.md, "Input delay").
+- Until 0.5.11 a lobby's game closed after every match and the next match booted a new one on both PCs: 9.5 seconds to
+  the main menu and 10 more for the game to walk its menus to the select screen. Since 0.5.11 (with the 0.3.6 server)
+  a lobby match with a result leaves both games open, back at their main menus, and when the same two ready up again
+  the next match starts in them: the select screen comes about 10 seconds after the countdown, not 20. If one of them
+  leaves, goes to watch or is replaced, their games close and the next match starts new ones on both PCs (docs/LAUNCHER.md,
+  "Lobby").
 - Until 0.5.9 a rollback could crash the game in its HUD a few minutes into a fight (the UI library's heap lost the
   page table of memory the rollback brought back). Fixed in 0.5.10 (docs/GAME.md, "Known gaps"). A game that stands
   still in a match now reports every thread, for the select-screen freeze two players met.
+- Until 0.5.10 one PC's hiccup made the other stutter: a frame that came late (a rollback that overran, a stall) was
+  never made up, so that PC was a frame or two behind for the rest of the match and the other held frames back to wait
+  for it. More than half of the frames shown twice in 0.5.10's first day of matches were those holds, on the PC that
+  had no hiccup. Since 0.5.11 a PC that came late makes up to a frame of it by starting its next frames close
+  together (its own picture then runs up to a frame behind), and a PC ahead holds for a lead only once it has lasted
+  a quarter of a second. In test fights on one PC, the other PC's screen showed 21 gaps over 25 ms instead of 37 when
+  one PC stalled 40 ms every 4 s, 2 instead of 31 for stalls of 22 ms every 1.5 s, and 7 instead of 45 in a match with
+  40 ms of jitter. The server's match log counts what the screen got, not the frames' own starts (docs/PROTOCOL.md,
+  "Match stats"), and says what made late frames late.
+- Until 0.5.10 the game wrote two log lines per GPU interrupt (75 a second, under the lock every kernel call of the
+  game's threads takes) and a few a frame in some fights, each a flushed write to disk: a PC with a slow disk or a busy
+  virus scanner could stall on them (not measured on such a PC). Repeated warnings are now written 8 times and then rarely. The game also asks Windows
+  not to throttle it or its timers when its window is behind another (OBS, remote play) or the PC saves battery, and
+  its pipeline threads yield to the game's own (docs/GAME.md, "Frame rate").
 
 ## Building from source
 

@@ -49,9 +49,12 @@ bool soloWhileWaiting();
 // once a Ranked set or a Kasual series is over (not left by this player), the same search starts again by itself
 // (MatchController::maybeSearchAfterSeries; on by default)
 bool searchAgain();
-// the input delay in frames, 0-6, or kAutoDelay (the default): from the match's measured ping, the server's
-// match_go delay (autoDelay); as the protocol writes it: "auto" or the number
+// the input delay in frames, 0-6 (kDefaultDelay, 2, until a player chooses), or kAutoDelay: from the match's measured
+// ping, the server's match_go delay (autoDelay); as the protocol writes it: "auto" or the number. 0.5.9 made Auto the
+// default and put everyone's setting on it once; 0.5.11 made 2 the default again (a player who chose since keeps
+// their choice)
 constexpr int kAutoDelay = -1;
+constexpr int kDefaultDelay = 2;
 int inputDelay();
 QJsonValue inputDelayValue(int delay);
 QString inputDelayText(int delay);

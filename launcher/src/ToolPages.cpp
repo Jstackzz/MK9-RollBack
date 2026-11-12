@@ -548,10 +548,12 @@ SettingsPage::SettingsPage(ServerClient* server, QWidget* parent) : Page(parent)
     auto* maxPing = new QComboBox;
     ui::fillMaxPing(maxPing, cfg::maxPing());
     auto* delay = new QComboBox;
-    delay->addItem(tr("Auto (from the ping, default)"), QStringLiteral("auto"));
-    for (int f = 0; f <= 6; ++f) delay->addItem(tr("%n frame(s)", nullptr, f), f);
+    delay->addItem(tr("Auto (from the ping)"), QStringLiteral("auto"));
+    for (int f = 0; f <= 6; ++f)
+        delay->addItem(f == cfg::kDefaultDelay ? tr("%n frame(s) (default)", nullptr, f) : tr("%n frame(s)", nullptr, f), f);
     delay->setCurrentIndex(cfg::inputDelay() < 0 ? 0 : qMax(0, delay->findData(cfg::inputDelay())));
-    delay->setToolTip(tr("Frames between a press and the game using it. Auto takes it from the ping measured when the "
+    delay->setToolTip(tr("Frames between a press and the game using it. 2 is the default; a longer ping needs more "
+                         "(each frame the other player's input is late is a rollback). Auto takes it from the ping measured when the "
                          "match connects: with rollback the one-way trip in frames with half a frame to spare, 2 to 8 "
                          "(2 up to 50 ms, 4 from 84, 7 at 193), so that the other player's inputs are there before the "
                          "game needs them (each that is not is a rollback, a frame or more of the game's time); lockstep "

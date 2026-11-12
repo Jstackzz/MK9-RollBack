@@ -31,7 +31,7 @@ resolves a DLL's imports from the exe that is already loaded, as long as the exe
 **A hook is only a weak-symbol override**: the translated code defines each game function as a weak alias of the
 original, and a weak name does not pull a member out of a library. `build.ninja` gives the linker `mk9.lib` with
 `/WHOLEARCHIVE`. Without it the DLL still links and runs, with every hook silently left out: after any change here check
-that `mk9game.dll` imports all of them (`llvm-readobj --coff-imports mk9game.dll`: 43 `sub_*` from `mk9.exe` today).
+that `mk9game.dll` imports all of them (`llvm-readobj --coff-imports mk9game.dll`: 43 `sub_*` from `mk9.exe` in 0.5.10, 45 since the two floating point state hooks in `engine.cpp`).
 
 ## Why this is the same game
 

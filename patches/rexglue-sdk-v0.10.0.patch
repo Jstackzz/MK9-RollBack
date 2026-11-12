@@ -165,6 +165,23 @@ index d54df86..e542cb9 100644
    // One-shot convenience for callers that don't care about the split.
    X_STATUS Setup(runtime::FunctionDispatcher* function_dispatcher, KernelState* kernel_state,
                   ui::WindowedAppContext* app_context, bool with_presentation) {
+diff --git a/include/rex/thread.h b/include/rex/thread.h
+index 30b207d..484d82b 100644
+--- a/include/rex/thread.h
++++ b/include/rex/thread.h
+@@ -118,6 +118,12 @@ void Sleep(std::chrono::duration<Rep, Period> duration) {
+   Sleep(std::chrono::duration_cast<std::chrono::microseconds>(duration));
+ }
+ 
++// Sleeps the current thread for about the given duration (a few tenths of a millisecond over at most), whatever
++// resolution Windows gives this process's timers: Sleep(1 ms) wakes 1-2 ms late at the 1 ms resolution a process asks
++// for with timeBeginPeriod, and 15.6 ms late when Windows 11 gives it a coarse one (its window not in front, battery
++// saving). A high resolution timer for all but the last half millisecond, then a yield. For threads that keep time.
++void SleepPrecise(std::chrono::microseconds duration);
++
+ enum class SleepResult {
+   kSuccess,
+   kAlerted,
 diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
 index a7ab6b3..c120291 100644
 --- a/include/rex/ui/imgui_dialog.h
@@ -196,7 +213,7 @@ index 7642601..d841f5f 100644
    void OnDraw(ImGuiIO& io) override;
  
 diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
-index afb4a30..5676f49 100644
+index afb4a30..09fab46 100644
 --- a/include/rex/ui/presenter.h
 +++ b/include/rex/ui/presenter.h
 @@ -13,6 +13,7 @@
@@ -207,7 +224,7 @@ index afb4a30..5676f49 100644
  #include <climits>
  #include <cmath>
  #include <condition_variable>
-@@ -188,6 +189,13 @@ class Presenter {
+@@ -188,6 +189,17 @@ class Presenter {
        std::function<void(bool is_responsible, bool statically_from_ui_thread)>;
    static void FatalErrorHostGpuLossCallback(bool is_responsible, bool statically_from_ui_thread);
  
@@ -217,11 +234,15 @@ index afb4a30..5676f49 100644
 +  // Since the last call: how many guest frames reached a present, how long they waited for it after the
 +  // guest output refresh made them ready, in all and at most (milliseconds).
 +  static void TakePresentWaits(uint64_t& frames, double& total_ms, double& longest_ms);
++  // What the player's screen got, whatever the game's frame tops did: the gaps between the first presents of
++  // successive guest frames, so far (never reset; take differences). `frames`: gaps counted, `over_25`: those
++  // over 25 ms (a 60 Hz screen showed a frame again), `over_50`: over 50 ms, `longest_ms`: the longest.
++  static void ShownGaps(uint64_t& frames, uint64_t& over_25, uint64_t& over_50, double& longest_ms);
 +
    class GuestOutputRefreshContext {
     public:
      GuestOutputRefreshContext(const GuestOutputRefreshContext& context) = delete;
-@@ -971,6 +979,10 @@ class Presenter {
+@@ -971,6 +983,10 @@ class Presenter {
    // with paint_mode_mutex_ held in this case, and guest output consumption
    // happens as part of painting.
    std::mutex guest_output_mailbox_consumer_mutex_;
@@ -283,6 +304,168 @@ index c5a2c5d..854cb82 100644
        return false;
      }
    }
+diff --git a/src/core/logging.cpp b/src/core/logging.cpp
+index 1645848..36a3f27 100644
+--- a/src/core/logging.cpp
++++ b/src/core/logging.cpp
+@@ -44,6 +44,11 @@ REXCVAR_DEFINE_BOOL(log_verbose, false, "Log", "Enable verbose logging (sets lev
+ 
+ REXCVAR_DEFINE_BOOL(log_noisy, false, "Log", "Enable noisy/high-frequency log macros");
+ 
++REXCVAR_DEFINE_BOOL(log_throttle_repeats, true, "Log",
++                    "Write a repeated warning or error (the same text but for its numbers) the first "
++                    "8 times, then at the 16th, 32nd, 64th ... time with the count: every line is a "
++                    "flushed write, and some are logged by threads that hold locks the game waits on");
++
+ REXCVAR_DEFINE_INT32(log_flush_interval, 0, "Log", "Periodic flush interval in seconds (0 = off)")
+     .range(0, 60)
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+@@ -131,10 +136,89 @@ spdlog::level::level_enum ResolveCategoryLevel(const std::string& name) {
+   return g_config.default_level;
+ }
+ 
++// A logger that lets a repeated warning or error through the first 8 times and then at the 16th, 32nd,
++// 64th ... (with the count), and everything below warnings as ever. The logger's sinks flush every line
++// (flush_level), so a message logged per frame or per interrupt was a file write each time, 75 a second
++// from the GPU interrupt alone (a stub's warning, under the global lock that every kernel call of the
++// game's threads takes) and a few a frame from the GPU thread in some scenes. Two lines are the same
++// when they come from the same category and read the same but for their numbers (decimal digits, and hex
++// words of 6 or more digits: addresses, register dumps).
++class ThrottledLogger final : public spdlog::logger {
++ public:
++  ThrottledLogger(std::string name, std::vector<spdlog::sink_ptr>::iterator begin,
++                  std::vector<spdlog::sink_ptr>::iterator end)
++      : spdlog::logger(std::move(name), begin, end), enabled_(REXCVAR_GET(log_throttle_repeats)) {}
++
++ protected:
++  void sink_it_(const spdlog::details::log_msg& msg) override {
++    if (!enabled_ || msg.level < spdlog::level::warn || msg.level >= spdlog::level::off) {
++      spdlog::logger::sink_it_(msg);
++      return;
++    }
++    const std::string_view text(msg.payload.data(), msg.payload.size());
++    uint64_t key = 14695981039346656037ull;  // FNV-1a
++    auto mix = [&key](unsigned char c) { key = (key ^ c) * 1099511628211ull; };
++    for (char c : std::string_view(msg.logger_name.data(), msg.logger_name.size()))
++      mix(static_cast<unsigned char>(c));
++    // the text without its numbers: decimal digits, and the hex words of an address (0x82E80968) or a register dump
++    // ("880000FC 18E3B052": 6 or more hex digits, at least one of them a number)
++    for (size_t i = 0; i < text.size();) {
++      const auto is_hex = [&text](size_t at) {
++        return at < text.size() && std::isxdigit(static_cast<unsigned char>(text[at]));
++      };
++      if (is_hex(i)) {
++        size_t end = i;
++        bool number = false;
++        while (is_hex(end)) {
++          number |= text[end] >= '0' && text[end] <= '9';
++          ++end;
++        }
++        if (end - i >= 6 && number) {
++          mix('#');
++        } else {
++          for (size_t k = i; k < end; ++k) {
++            if (text[k] < '0' || text[k] > '9') mix(static_cast<unsigned char>(text[k]));
++          }
++        }
++        i = end;
++      } else {
++        mix(static_cast<unsigned char>(text[i]));
++        ++i;
++      }
++    }
++    uint32_t count;
++    {
++      std::lock_guard lock(g_repeat_mutex);
++      auto it = g_repeat_counts.find(key);
++      if (it == g_repeat_counts.end()) {
++        if (g_repeat_counts.size() >= 4096) {  // a flood of different lines: nothing to throttle by
++          spdlog::logger::sink_it_(msg);
++          return;
++        }
++        it = g_repeat_counts.emplace(key, 0).first;
++      }
++      count = ++it->second;
++    }
++    if (count <= 8) {
++      spdlog::logger::sink_it_(msg);
++    } else if ((count & (count - 1)) == 0) {
++      const std::string again_text = fmt::format("{} [the same line {} times so far]", text, count);
++      spdlog::details::log_msg again(msg.time, msg.source, msg.logger_name, msg.level, again_text);
++      again.thread_id = msg.thread_id;
++      spdlog::logger::sink_it_(again);
++    }
++  }
++
++ private:
++  bool enabled_;
++  static inline std::mutex g_repeat_mutex;
++  static inline std::unordered_map<uint64_t, uint32_t> g_repeat_counts;
++};
++
+ // Create a logger and register it
+ std::shared_ptr<spdlog::logger> CreateCategoryLogger(const std::string& name) {
+   auto sinks = BuildCategorySinks(name);
+-  auto logger = std::make_shared<spdlog::logger>(name, sinks.begin(), sinks.end());
++  auto logger = std::make_shared<ThrottledLogger>(name, sinks.begin(), sinks.end());
+   logger->set_level(ResolveCategoryLevel(name));
+   logger->flush_on(g_config.flush_level);
+   spdlog::register_logger(logger);
+diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
+index 9ac8d15..609cc88 100644
+--- a/src/core/threading_posix.cpp
++++ b/src/core/threading_posix.cpp
+@@ -192,6 +192,10 @@ void SyncMemory() {
+   __sync_synchronize();
+ }
+ 
++void SleepPrecise(std::chrono::microseconds duration) {
++  Sleep(duration);
++}
++
+ void Sleep(std::chrono::microseconds duration) {
+   timespec rqtp = DurationToTimeSpec(duration);
+   timespec rmtp = {};
+diff --git a/src/core/threading_win.cpp b/src/core/threading_win.cpp
+index 896dfec..df62205 100644
+--- a/src/core/threading_win.cpp
++++ b/src/core/threading_win.cpp
+@@ -101,6 +101,35 @@ void Sleep(std::chrono::microseconds duration) {
+   }
+ }
+ 
++namespace {
++// one high resolution timer for each thread that keeps time with SleepPrecise
++struct PreciseTimer {
++  HANDLE handle = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
++  ~PreciseTimer() {
++    if (handle)
++      CloseHandle(handle);
++  }
++};
++}  // namespace
++
++void SleepPrecise(std::chrono::microseconds duration) {
++  using Clock = std::chrono::steady_clock;
++  const auto end = Clock::now() + duration;
++  thread_local PreciseTimer timer;
++  if (duration.count() > 800) {
++    const auto nap = duration - std::chrono::microseconds(500);
++    LARGE_INTEGER due;
++    due.QuadPart = -static_cast<LONGLONG>(nap.count()) * 10;  // 100 ns units, relative
++    if (timer.handle && SetWaitableTimerEx(timer.handle, &due, 0, nullptr, nullptr, nullptr, 0)) {
++      WaitForSingleObject(timer.handle, INFINITE);
++    } else {
++      ::Sleep(static_cast<DWORD>(nap.count() / 1000));
++    }
++  }
++  while (Clock::now() < end)
++    SwitchToThread();
++}
++
+ SleepResult AlertableSleep(std::chrono::microseconds duration) {
+   if (SleepEx(static_cast<DWORD>(duration.count() / 1000), TRUE) == WAIT_IO_COMPLETION) {
+     return SleepResult::kAlerted;
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
 index a744375..6eb72c3 100644
 --- a/src/graphics/command_processor.cpp
@@ -619,6 +802,25 @@ index 19874a5..5d48b23 100644
        }
        readback.buffers[i] = nullptr;
        readback.mapped_data[i] = nullptr;
+diff --git a/src/graphics/d3d12/pipeline_cache.cpp b/src/graphics/d3d12/pipeline_cache.cpp
+index 8e6b854..af0bd11 100644
+--- a/src/graphics/d3d12/pipeline_cache.cpp
++++ b/src/graphics/d3d12/pipeline_cache.cpp
+@@ -3197,6 +3197,14 @@ bool PipelineCache::PrepareRuntimeDescriptionForQueuedCreation(
+ }
+ 
+ void PipelineCache::CreationThread(size_t thread_index) {
++#ifdef _WIN32
++  // Behind the game's own threads: 3/4 of the PC's logical processors build pipelines at once, and the driver's
++  // compile of one takes tens of milliseconds. At the game's priority they can take the cores of a PC with six or
++  // eight from the game's threads for as long as a burst of new pipelines lasts (a fighter's first move, on a PC whose
++  // shader cache is cold), and the frames in it run long; a pipeline that is a moment later only leaves its draw out
++  // for a frame or two longer. (Not measured on a PC that small: a precaution.)
++  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
++#endif
+   while (true) {
+     Pipeline* pipeline_to_create = nullptr;
+ 
 diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
 index dd321a5..57d0078 100644
 --- a/src/graphics/d3d12/render_target_cache.cpp
@@ -678,10 +880,41 @@ index 2be0e8e..0e6b4b2 100644
  }
  
 diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
-index 8f2fcb0..3c50529 100644
+index 8f2fcb0..3ceaac7 100644
 --- a/src/graphics/graphics_system.cpp
 +++ b/src/graphics/graphics_system.cpp
-@@ -288,6 +288,12 @@ void GraphicsSystem::EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_siz
+@@ -158,6 +158,11 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
+         uint64_t no_vsync_interval_ticks = std::max(uint64_t(1), guest_tick_frequency / 1000);
+         uint64_t last_frame_time = chrono::Clock::QueryGuestTickCount();
++#if REX_PLATFORM_WIN32
++        // This thread only keeps time (a blank is a short interrupt for the guest): a PC busy with other work must
++        // not make it late, and a blank that comes late is a frame the game misses
++        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
++#endif
+         while (vsync_worker_running_) {
+           uint64_t current_time = chrono::Clock::QueryGuestTickCount();
+           uint64_t interval_ticks =
+@@ -166,7 +171,17 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+             MarkVblank();
+             last_frame_time += interval_ticks;
+           }
+-          rex::thread::Sleep(std::chrono::milliseconds(1));
++          if (REXCVAR_GET(vsync)) {
++            // until the next blank is due, on a timer that keeps time (Sleep(1 ms) comes 1-2 ms late, and much later
++            // when Windows gives the process a coarse timer: the blanks then came in bursts, a frame in two, and
++            // the game missed them)
++            const uint64_t since = chrono::Clock::QueryGuestTickCount() - last_frame_time;
++            const uint64_t left = since < interval_ticks ? interval_ticks - since : 0;
++            const uint64_t left_us = left * 1000000 / guest_tick_frequency;
++            rex::thread::SleepPrecise(std::chrono::microseconds(std::clamp<uint64_t>(left_us, 50, 4000)));
++          } else {
++            rex::thread::Sleep(std::chrono::milliseconds(1));
++          }
+         }
+         return 0;
+       }));
+@@ -288,6 +303,12 @@ void GraphicsSystem::EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_siz
    command_processor_->EnableReadPointerWriteBack(ptr, block_size_log2);
  }
  
@@ -931,7 +1164,7 @@ index f270f3c..5661df9 100644
  }
  
 diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
-index 7360ed9..a12338e 100644
+index 7360ed9..a63a163 100644
 --- a/src/ui/presenter.cpp
 +++ b/src/ui/presenter.cpp
 @@ -584,6 +584,8 @@ bool Presenter::RefreshGuestOutput(
@@ -954,7 +1187,7 @@ index 7360ed9..a12338e 100644
    // Give the current acquired image to the caller, or UINT32_MAX if it's
    // inactive.
    const GuestOutputProperties& properties = guest_output_properties_[mailbox_index];
-@@ -1494,10 +1500,39 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
+@@ -1494,10 +1500,63 @@ bool Presenter::InSurfaceOnMonitorFromUIThread() const {
  #endif  // XE_PLATFORM
  }
  
@@ -965,6 +1198,18 @@ index 7360ed9..a12338e 100644
 +}  // namespace
 +
 +uint64_t Presenter::PresentCount() { return g_present_count.load(std::memory_order_relaxed); }
++
++namespace {
++std::atomic<int64_t> g_last_shown_ns{0};
++std::atomic<uint64_t> g_shown_gaps{0}, g_shown_over_25{0}, g_shown_over_50{0}, g_shown_longest_us{0};
++}  // namespace
++
++void Presenter::ShownGaps(uint64_t& frames, uint64_t& over_25, uint64_t& over_50, double& longest_ms) {
++  frames = g_shown_gaps.load(std::memory_order_relaxed);
++  over_25 = g_shown_over_25.load(std::memory_order_relaxed);
++  over_50 = g_shown_over_50.load(std::memory_order_relaxed);
++  longest_ms = double(g_shown_longest_us.load(std::memory_order_relaxed)) / 1000.0;
++}
 +
 +void Presenter::TakePresentWaits(uint64_t& frames, double& total_ms, double& longest_ms) {
 +  frames = g_waited_frames.exchange(0, std::memory_order_relaxed);
@@ -984,6 +1229,18 @@ index 7360ed9..a12338e 100644
 +                              std::chrono::steady_clock::now() - new_guest_output_ready_time_)
 +                              .count();
 +      new_guest_output_ready_time_ = {};
++      // the gap since the guest frame before this one reached a present
++      const int64_t now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
++      const int64_t before_ns = g_last_shown_ns.exchange(now_ns, std::memory_order_relaxed);
++      if (before_ns) {
++        const uint64_t gap_us = uint64_t(std::max<int64_t>(0, now_ns - before_ns) / 1000);
++        g_shown_gaps.fetch_add(1, std::memory_order_relaxed);
++        if (gap_us > 25000) g_shown_over_25.fetch_add(1, std::memory_order_relaxed);
++        if (gap_us > 50000) g_shown_over_50.fetch_add(1, std::memory_order_relaxed);
++        uint64_t longest_gap = g_shown_longest_us.load(std::memory_order_relaxed);
++        while (gap_us > longest_gap &&
++               !g_shown_longest_us.compare_exchange_weak(longest_gap, gap_us, std::memory_order_relaxed)) {}
++      }
 +      const uint64_t us = uint64_t(std::max<int64_t>(0, waited));
 +      g_waited_frames.fetch_add(1, std::memory_order_relaxed);
 +      g_waited_us.fetch_add(us, std::memory_order_relaxed);

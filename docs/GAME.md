@@ -22,7 +22,9 @@ dropped while their pipelines are created left out: see "Blood and damage textur
 ask for no continuous repaint: see "Names over the fight"; the frames a rollback runs again drawn only
 into small targets and waiting for no vertical blank: see "What a rollback costs"; relative constant reads out of
 range reading zeros, readback buffers kept until the GPU is done with them and names on textures: see "Known gaps",
-lost graphics cards). On a fresh
+lost graphics cards; the logging layer letting a repeated warning or error through 8 times and then at the 16th, 32nd,
+64th, the GPU's blank thread keeping time on a high resolution timer, the pipeline creation threads below the game's
+threads and `Presenter::ShownGaps`: see "Frame rate"). On a fresh
 checkout of the SDK: `git -C external\rexglue-sdk apply ..\..\patches\rexglue-sdk-v0.10.0.patch`; the
 patch is `git -C external\rexglue-sdk diff --ignore-submodules`. A change to the SDK's GPU code alone
 does not link `mk9.exe` again, and the GPU plugin is copied beside it only when it does: after such a
@@ -85,6 +87,41 @@ open Xenia's ImGui drawer asked for the next paint at the end of each one, so th
 could. The toast and the names overlay now ask for no continuous repaint (`ImGuiDialog::RepaintsContinuously`, an
 SDK addition; the guest's frames repaint the UI): 60.0 presents a second through the menus, the select screen and a
 fight with names, with the game at 60.0.
+
+Since 0.5.11 nothing in the game's timing depends on the PC's timer resolution or its power plan. The process asks
+Windows not to throttle it (`SetProcessInformation`, `PROCESS_POWER_THROTTLING_EXECUTION_SPEED` and
+`IGNORE_TIMER_RESOLUTION` off, `OptOutOfPowerThrottling` in `mk9_app.cpp`): Windows 11 can run a process on the efficiency
+cores at low clocks and give it 15.6 ms timers whatever it asked of `timeBeginPeriod` when its window is not the one in
+front (behind OBS or a remote-play window), when the PC saves battery, or when the window is covered. The SDK's blank
+thread (`GPU VSync`) slept with `Sleep(1 ms)`, which wakes 1-2 ms late at best and in bursts at 15.6 ms; it now keeps
+time with `rex::thread::SleepPrecise` (a high resolution waitable timer, then a yield), so the blanks come within a
+tenth of a millisecond of the 60 Hz grid.
+
+**Log lines.** The logger flushes every line (`flush_level` info), so a warning logged per frame is a write per frame,
+and the GPU interrupt that logged two (the stubs of `KeSaveFloatingPointState` and `KeRestoreFloatingPointState`) runs
+75 times a second under the runtime's global lock, which every kernel call of every game thread takes: each of those
+calls could wait behind a write to the PC's disk (and its virus scanner). The last 200 lines of every crash report so far are
+about 100 of those lines. The two calls are
+no-op hooks now (`engine.cpp`, `sub_82BDC0E8` / `sub_82BDC0F0`) and the SDK's logging layer lets a warning or error that
+repeats (same category, same text but for its numbers and addresses) through 8 times and then at the 16th, 32nd, 64th
+with `[the same line N times so far]` (`ThrottledLogger`, `log_throttle_repeats`): the GPU's "Tried to resolve to
+format k_1_REVERSE" and "Texture fetch constant ... has invalid type" lines, a few a frame in some fights and 150 in
+every report's last 200 lines, the audio's `ffmpeg:` decode errors. Each module of the SDK (the executable,
+`rexruntime.dll`, `rexgpu-xenos.dll`) carries its own copy of the logging code and its own counts.
+
+**Pipelines.** The "D3D12 Pipelines" threads (3/4 of the PC's logical processors) run below the game's threads
+(`THREAD_PRIORITY_BELOW_NORMAL`): the driver's compile of a pipeline takes tens of milliseconds, and a burst of new
+ones (a fighter's first move, on a PC whose shader cache is cold) could take the cores of a six or eight thread PC from the
+game. A pipeline that is a moment later only leaves its draw out a frame or two longer (see "Blood and damage textures").
+
+**What the screen got.** The game's frame tops are not what a player sees: a PC that makes up a late frame runs the next
+ones close together and then waits for the GPU, long frames the screen never shows, and a frame held back is a long one
+by design. `rex::ui::Presenter::ShownGaps` (an SDK addition) counts the gaps between the first presents of successive
+guest frames, over 25 ms and over 50 ms; the frame rate line every 600 frames has them (`screen: n gaps between frames
+over 25 ms, m over 50`), a match's stats keep them for its fight frames (`shown_late`, `shown_stalls`), and the server
+rates a match by them (PROTOCOL.md, "Match stats"). `late_why` splits the late frame tops by cause: a hold, a wait at the
+prediction limit, a rollback, the main thread's own work (`QueryThreadCycleTime` against a normal frame's) and the rest
+(blocked on the rendering thread, the GPU, a lock, a file or another process).
 
 The SDK draws on Windows' first graphics adapter, and its Optimus/PowerXpress exports sit in `rexgpu-xenos.dll`,
 where the drivers do not look: on a laptop with two the game ran on the slow one in the processor. `mk9.exe` exports
@@ -332,9 +369,10 @@ of one game's file loader requests back that long while a match is in sync befor
   the real inputs (see "Rollback" below). Menus, loading and the match's end run in lockstep, and
   a fight's first 30 frames take no input on any PC, so no rollback goes back into them ("Known gaps").
 
-The server picks a match's input delay from the round trip it measured as the match connected
-(`protocol.auto_delay`, docs/PROTOCOL.md "Input delay"; a player's own choice in Settings counts when it is larger).
-With rollback it is the one-way trip in frames with half a frame to spare since 0.5.10, `ceil(rtt_ms / 33.33 + 0.5)`, 2
+A match plays at the larger of its two players' input delays (docs/PROTOCOL.md "Input delay"). The launcher's default
+is 2 frames (since 0.5.11; 0.5.9 and 0.5.10 had Auto), and a player on Auto gets the server's pick from the round trip
+it measured as the match connected (`protocol.auto_delay`). With rollback that pick is the one-way trip in frames with
+half a frame to spare since 0.5.10, `ceil(rtt_ms / 33.33 + 0.5)`, 2
 to 8 (3 from 51 ms, 4 from 84, 7 at 193). From 0.5.4 to 0.5.9 it was the trip but a frame, MK3D Online's rule
 (`round(rtt_ms / 33.33) - 1`, 2 to 6, 5 at 193 ms), meant to keep the guesses a frame long. But the trip as the game
 sees it runs about half a frame over the ping (`Pace`'s round trip: 12.0 to 12.3 frames at 193 ms, 5.8 at 82), so
@@ -446,9 +484,13 @@ the park).
 ```
 . tools\netplay-local.ps1; Start-NetplayLocal -Out <dir>        # two games, scripted menus and fight
 . tools\link-local.ps1;    Start-LinkLocal -Out <dir> -Spectator -Attack -Rematch -Park
+. tools\link-local.ps1;    Start-LinkLocal -Out <dir> -Netcode rollback -Attack -Again -IdleS 100   # a lobby's next match in the same games: park, wait at the hold point, start again
+python -I tools\lobby-e2e.py <dir> same|pair|spectator          # the launcher's side of that, with the stand-in game and a local server
 . tools\link-local.ps1;    Start-LinkLocal -Out <dir> -Netcode rollback -Delay 1 -Attack -Rematch -TraceScript -Extra "MK9_NET_LAG=50;MK9_NET_JITTER=30"
 . tools\synctest.ps1;      Start-Synctest -Out <dir> -Depth 4 -From 5400   # rollback restore test
 . tools\netplay-local.ps1; Start-NetplayLocal -Out <dir> -Mode rollback -Delay 1 -Lag 50 -Jitter 30 -AttackB -Sites
+. tools\pace-local.ps1;    Start-PaceRun -Name hic -Extra "MK9_NET_LAG=45;MK9_NET_JITTER=15" -ExtraB "MK9_TEST_HICCUP=4000:40"
+python -I tools\statsum.py <results folder> hic                # that match's stats: what the screen got, late frames by cause
 python -I tools\netcmp.py a\net.log b\net.log                  # frame logs of two games side by side
 python -I tools\randcmp.py a\rand.txt b\rand.txt               # MK9_TRACE_RAND random draw traces
 python -I tools\scriptcmp.py a\script.txt b\script.txt         # -TraceScript: scripts and pads read, frame by frame
@@ -457,6 +499,16 @@ python -I tools\soundcount.py a\sound.txt --names              # -TraceSound: a 
 python -I tools\feedreplay.py --seed <start line's seed> <session>\net-<match>.log   # a real match played again:
                                      # a linked game given the spectator's start line with feed=127.0.0.1:7302
 ```
+
+Test variables for the pacing (`Start-LinkLocal -Extra` for both games, `-ExtraB` for the second): `MK9_NET_LAG` and
+`MK9_NET_JITTER` (the simulated network, one way, in milliseconds; a thread delivers each packet when it is due since
+2026-11-12, before only the sender's frame tops did, which added up to a frame to the lag and more after frames that came
+close together), `MK9_TEST_HICCUP=<every ms>:<busy ms>[:<from frame>]` (the game's main thread stalls that long, a random
+0.7-1.3 of that interval apart, in a fight), `MK9_FRAME_CAP=<n>` (a slower PC), `MK9_CAP_SLACK_MS=2` and
+`MK9_TEST_PACE_STREAK=0` (the frame cap and the lead hold of 0.5.10 and before: the other build to compare with),
+`MK9_TEST_PACE_AHEAD=<twice the frames>` (0 never holds). The match stats each game writes tell what the screen got
+(`python -I tools\statsum.py`). Two games on one PC take the PC's GPU between them; a series of runs on one build
+compares well, a run against another PC's does not.
 
 ## The player package (each PC builds its own game)
 
@@ -652,6 +704,33 @@ rollbacks every 10 s of the fight's busiest stretch):
   average`, the others' frames a second and this PC's, the frames held back and the frames that waited
   at the 8-frame limit); `MK9_TRACE_PACE=<file>` writes every frame's numbers (the others' pace, this
   PC's and the frames held back in its last three columns).
+- **Making up a late frame, and holding only for a lead that lasts** (0.5.11). The server's match log of 0.5.10's first
+  day (130 players' sides): 71 % of the late frames were holds, and 65 % of the holds came while the other PC was having
+  a hard time: a frame that came late on one PC (a rollback that overran, a stall) was never made up (the frame cap
+  started the next frame a period after the late one, with 2 ms of slack), so that PC stayed a frame or two behind
+  and the other held frames back for it, a visible repeated frame on the PC that had no problem. Two changes:
+  - **The cap makes up lateness** (`frame.cpp`, `MK9_CAP_SLACK_MS`, 17 ms): a fight frame that comes late by up to
+    17 ms lets the next ones start close together until the cap has caught up with the clock, if the pipeline has room
+    (the main thread can run a frame or two ahead of the rendering thread and the GPU). A fight's first 180 frames,
+    loading, menus and a frame that waited at the prediction limit are not made up for (`DropCatchUp`: both PCs come
+    late alike there). The price is display latency: the frames of a PC that has had a late frame reach the screen up to the
+    slack later, for as long as nothing empties the room (measured by the stats' `screen_lag`, frames the tops are ahead
+    of what the screen got since the fight began: +0.5 frames with 12 ms, +0.8 with 17, +1.3 with 25 against the cap of
+    0.5.10, on the PC that stalled; the PC that did not stall, 0). 17 ms is a frame that missed a whole blank (16.7 ms),
+    the usual late frame; with 12 and 25 the other PC's gaps came down 41 % and 68 % where 17 took 43 % off a stall of
+    40 ms, and a stall of 22 ms (every 1.5 s) 94 %.
+  - **A lead holds a frame back only after 14 frames** (`kPaceStreak`; then as before for 40 frames, so that a PC that
+    falls behind steadily is still followed at once): what the PC ahead knows of the other's frame is a trip old and
+    averaged over 8 frames, so a PC that made up its lateness in a burst still looked behind for about 9 frames, and the
+    PC ahead held for a lead that was gone.
+  Two-game tests on this PC (a launcher-style rollback match, 45 ms of lag each way with 15 of jitter, input delay 4,
+  `tools\pace-local.ps1`; one PC stalls 40 ms about every 4 s, 18 times in the fight; gaps between frames' presents over
+  25 ms on the screens, those over 50 ms in brackets; the frame cap of 0.5.10 against this): the other PC's screen 37
+  (1) against 21 (2) and 21 (1), the stalling PC's own 21 (14) against 20 (3) and 21 (2) (the room absorbs its stalls);
+  both PCs stalling: 34 (16) and 37 (9) against 19 (2) and 21 (3), frame for frame the same fight on both games
+  (`scriptcmp.py`: 0 of 5,999 frames differ); no stalls at all: nothing changes (0 rollbacks, 9 and 5 gaps against 9
+  and 9); 40 ms of jitter, 4.5 rollbacks a second on the PC that guesses: 45 and 48 against 7 and 10. Not changed: a PC
+  that runs slower all the time (a game held to 40 a second: the other still holds to 40).
 
 Diagnostics: `MK9_RB_TRACE_FOREIGN=1` (who writes which pages first, stacks of foreign writers,
 each page a simulation thread writes after another thread wrote it first), `MK9_RB_TRACE_SHARED=1`

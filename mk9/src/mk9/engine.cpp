@@ -527,6 +527,13 @@ void Release() {
 
 }  // namespace mk9::engine
 
+// The D3D interrupt callback (sub_826B5750, ~75 a second, on the GPU Commands thread under the runtime's global lock)
+// saves and restores the floating point state around itself; the SDK has no kernel call for either and logged a warning
+// for each, two flushed writes to game.log per interrupt, on every player's PC (the end of every crash report is those
+// lines). Nothing to do for either on a host thread, so they now do nothing and say nothing.
+REX_HOOK_RAW(sub_82BDC0E8) { (void)ctx; (void)base; }  // KeSaveFloatingPointState
+REX_HOOK_RAW(sub_82BDC0F0) { (void)ctx; (void)base; }  // KeRestoreFloatingPointState
+
 REX_HOOK_RAW(sub_825617A8) {
   g_workers.Add();
   if (const int i = g_worker_slots.fetch_add(1); i < kMaxWorkers) {

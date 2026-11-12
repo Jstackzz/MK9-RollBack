@@ -75,6 +75,13 @@ def ending(m: dict[str, Any]) -> str:
     return st.replace("_", " ")
 
 
+def why(st: dict[str, Any]) -> str:
+    """What made the late frames late (game 0.5.11 and up): "  late: 12 held, 3 blocked"."""
+    if not st.get("late_why") or not st.get("late"):
+        return ""
+    return "  late: " + ", ".join(f"{n} {w}" for w, n in zip(matchstats.LATE_WHY, st["late_why"]) if n)
+
+
 def side_line(name: str, side: dict[str, Any] | None) -> str:
     if side is None:
         return f"   {name:<16} no stats (a launcher before 0.5.9, or none sent)"
@@ -86,7 +93,7 @@ def side_line(name: str, side: dict[str, Any] | None) -> str:
     other = f"   other {st['their_fps']:.0f} fps" if st.get("their_fps") else ""
     return (f"   {name:<16} {v:<13} {r['fps']:5.1f} fps  {r['late_pm']:5.1f} late/min ({st.get('longest_ms', 0):.0f} ms)"
             f"  {r['rollbacks_ps']:4.1f} rb/s, {r['deep_pm']:4.1f} deep/min  waits {st.get('waits', 0)}"
-            f" ({st.get('wait_ms', 0):.0f} ms)  held {st.get('held', 0)}{other}")
+            f" ({st.get('wait_ms', 0):.0f} ms)  held {st.get('held', 0)}{other}{why(st)}")
 
 
 def match_lines(m: dict[str, Any]) -> list[str]:
@@ -177,6 +184,8 @@ def main(argv: list[str] | None = None) -> int:
                     st = m["sides"][side]["stats"]
                     print(f"   {name}: {matchstats.summary(st)}"
                           + (f"; {st['cpu']}" if st.get("cpu") else "") + (f"; {st['gpu']}" if st.get("gpu") else ""))
+                    for line in st.get("stall_where", [])[:4]:
+                        print(f"      late frames, the main thread at {line}")
             print()
             print("\n".join(seconds_table(m)))
         print()

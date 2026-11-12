@@ -99,9 +99,20 @@ public:
     // Build game extracts or builds: no match's game starts meanwhile (prepareGame)
     void setBuilding(bool building) { building_ = building; }
     // the lobby's countdown for this player's match began: its game boots now, on both PCs at once; called off (a
-    // player no longer ready), a game started for it closes
-    void lobbyMatchComing(const QString& gameId);
+    // player no longer ready), a game started for it closes. `reuse` (the lobby state's): the same two fight again and
+    // both kept their game from the last match, parked at its hold point, which takes this match (no new boot)
+    void lobbyMatchComing(const QString& gameId, bool reuse = false);
     void lobbyMatchCalledOff();
+    // A lobby match that ended with a result does not close its game: the game is parked (back to its main menu, the
+    // hold point) and waits there for the lobby's next match against the same opponent. The lobby's ready says which
+    // match it was parked from (parkedMatch, "" when no game waits), the server's `reuse` that both kept theirs; a
+    // pair that changed, an opponent or this player who left or went to watch, a lobby match without this player, any
+    // other match or search, or 10 minutes without a match close it (dropParkedGame)
+    bool hasParkedGame() const;
+    QString parkedMatch() const { return hasParkedGame() ? parkedMatch_ : QString(); }
+    QString parkedLobby() const { return hasParkedGame() ? parkedLobby_ : QString(); }
+    QString parkedOpponent() const { return hasParkedGame() ? parkedOpponent_ : QString(); }
+    void dropParkedGame(const QString& why);
     // the whole game with its own menus and the player's saves, no match. One game runs at a time, and a search waits
     // in it (standby): a match found pauses it under MATCH FOUND (winutil::freezeProcess); accepting closes it and
     // starts the match's game, a match not accepted lets it run on where it stood; CANCEL SEARCH closes it.
@@ -183,6 +194,8 @@ private:
     // a set or series over: the same search again once this launcher is idle (cfg::searchAgain), single player while it
     // waits as any search
     void maybeSearchAfterSeries();
+    void parkForLobby(const QString& lobby, const QString& match, const QString& opponent);
+    void clearParked();                  // the game is no longer a lobby's parked one (it closes, or a match has it)
     void closeGame(const QString& why);  // the match's game, once nothing wants it
     void closeSolo(const QString& why);  // single player: a match on its way, the search it waited in cancelled
     void maybeCloseIdleGame();           // the match's game once nothing wants it (wantsGame)
@@ -238,6 +251,11 @@ private:
     // the series' next match can start there (the server's "rematch"); closed once nothing more comes
     bool atContinue_ = false;
     bool pendingRematch_ = false;  // pendingStart_ is a rematch command, for a game at CONTINUE? (not at the hold point)
+    // after a lobby match with a result, game_ is parked for the lobby's next match (hasParkedGame): the lobby, the
+    // match it played and its opponent; parkedBack_ closes it when it does not get back to its hold point, parkedIdle_
+    // when no match comes for a long while
+    QString parkedLobby_, parkedMatch_, parkedOpponent_;
+    QTimer parkedBack_, parkedIdle_;
     QString localStartA_, localStartB_, localResultA_, localResultB_;
     FeedLink* feed_ = nullptr;       // this player's lobby match's feed
     FeedLink* watchFeed_ = nullptr;  // the watched match's, to the game, until it has played the match's end

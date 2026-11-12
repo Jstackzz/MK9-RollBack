@@ -22,8 +22,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <chrono>
 #include <exception>
+#include <map>
+#include <mutex>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <rex/logging.h>
@@ -593,6 +597,83 @@ DWORD WINAPI Watch(void*) {
   }
 }
 
+// --- where the main thread stood in late frames (crash.h, StallSampling) ---
+
+std::atomic<bool> g_stall_on{false};
+std::mutex g_stall_mutex;
+std::map<std::string, uint32_t> g_stall_hits;
+uint32_t g_stall_total = 0;
+
+// The guest return addresses of a thread's context, read from another thread: a context in the middle of a change can
+// send the walk to an address that is not there, and the access violation ends here, not the game (in a function of its
+// own: __try wants no C++ objects that need unwinding in the function it is in)
+int GuestReturns(const PPCContext* ctx, uint32_t* out, int max) {
+  int n = 0;
+  __try {
+    n = game::StackReturns(*ctx, out, max);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    n = 0;
+  }
+  return n;
+}
+
+// One look at the main thread: the registers of a moment (it is suspended no longer than that, and nothing is
+// allocated or logged while it is: it may hold the heap's or the logger's lock), where its host code is, and where its
+// guest code is and the rendering thread's (the guest side tells what a wait in the kernel is for). The host stack is
+// not walked: the thread runs on, its stack changes under a walk, and the unwinder follows garbage into faults (the
+// first version of this crashed games that way). The hang report, which walks a thread that stands still, does.
+void SampleStall() {
+  CONTEXT c{};
+  c.ContextFlags = CONTEXT_CONTROL;
+  bool got = false;
+  if (g_main_thread && SuspendThread(g_main_thread) != DWORD(-1)) {
+    got = GetThreadContext(g_main_thread, &c) != 0;
+    ResumeThread(g_main_thread);
+  }
+  if (!got || !c.Rip) return;
+  std::string key;
+  {
+    char where[MAX_PATH + 96];
+    Where(uintptr_t(c.Rip), where, sizeof where);
+    key += where;
+  }
+  const auto guest = [&key](const char* who, const PPCContext* ctx, int n) {
+    if (!ctx || !Readable(ctx, sizeof *ctx)) return;  // the rendering thread's may be gone with its stack
+    uint32_t returns[4];
+    n = GuestReturns(ctx, returns, std::min(n, 4));
+    char b[16];
+    key += " | ";
+    key += who;
+    std::snprintf(b, sizeof b, " %08X", uint32_t(ctx->lr));
+    key += b;
+    for (int i = 0; i < n; i++) {
+      std::snprintf(b, sizeof b, "<%08X", returns[i]);
+      key += b;
+    }
+  };
+  guest("main", g_main_guest, 3);
+  guest("render", engine::RenderContext(), 2);
+  std::lock_guard<std::mutex> lock(g_stall_mutex);
+  if (g_stall_hits.size() < 400 || g_stall_hits.count(key)) ++g_stall_hits[key];
+  ++g_stall_total;
+}
+
+DWORD WINAPI StallWatch(void*) {
+  for (;;) {
+    Sleep(2);
+    if (!g_stall_on.load(std::memory_order_relaxed)) {
+      Sleep(30);
+      continue;
+    }
+    const int64_t top = frame::LastTopNs();
+    if (!top) continue;
+    const double since_ms = double(std::chrono::steady_clock::now().time_since_epoch().count() - top) / 1e6;
+    if (since_ms < 22.0 || since_ms > 1000.0 || frame::InCapWait()) continue;
+    SampleStall();
+    Sleep(2);
+  }
+}
+
 // the main thread's first frame: who it is, for the watch, which starts then
 void StartWatch() {
   g_main_tid = GetCurrentThreadId();
@@ -602,6 +683,8 @@ void StartWatch() {
   const auto* ts = rex::runtime::ThreadState::Get();
   g_main_guest = ts ? ts->context() : nullptr;
   if (HANDLE t = CreateThread(nullptr, 256 * 1024, Watch, nullptr, 0, nullptr)) CloseHandle(t);
+  if (!std::getenv("MK9_NO_STALL_SAMPLER"))  // tests
+    if (HANDLE t = CreateThread(nullptr, 256 * 1024, StallWatch, nullptr, 0, nullptr)) CloseHandle(t);
 }
 
 // the crashed thread: hands its crash over and waits for the report, then the process ends (with as little
@@ -756,6 +839,25 @@ void OnFrame(uint64_t frame) {
   if (std::strcmp(g_test_kind, "overflow") == 0) Deeper(0);
   if (std::strcmp(g_test_kind, "throw") == 0) throw std::runtime_error("MK9_CRASH_TEST");
   *g_nowhere = 1;
+}
+
+void StallSampling(bool on) { g_stall_on.store(on, std::memory_order_relaxed); }
+
+std::vector<StallSample> TakeStallSamples(int top, uint32_t* total) {
+  std::map<std::string, uint32_t> hits;
+  uint32_t n;
+  {
+    std::lock_guard<std::mutex> lock(g_stall_mutex);
+    hits.swap(g_stall_hits);
+    n = g_stall_total;
+    g_stall_total = 0;
+  }
+  if (total) *total = n;
+  std::vector<StallSample> out;
+  for (const auto& [text, count] : hits) out.emplace_back(count, text);
+  std::sort(out.begin(), out.end(), [](const StallSample& a, const StallSample& b) { return a.first > b.first; });
+  if (int(out.size()) > top) out.resize(size_t(top));
+  return out;
 }
 
 }  // namespace mk9::crash

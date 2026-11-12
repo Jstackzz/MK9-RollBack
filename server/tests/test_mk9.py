@@ -344,3 +344,95 @@ async def test_auto_delay_in_a_lobby(server, connect, udp_peers):
     await host.request({"type": "lobby_start"})
     gos = await run_to_go(server, [(host, await udp_peers()), (guest, await udp_peers())])
     assert [(g["delay"], g["delay_auto"]) for g in gos] == [(2, True), (2, True)]
+
+
+async def lobby_after_a_match(server, connect, udp_peers, names=("Raiden", "Kenshi"), *, agreed=True):
+    """Two players ready up in a lobby, the countdown starts their match, which ends (agreed: with a result, else both
+    games desync). Returns the connections, the lobby's code and the match's id."""
+    server.cfg.lobby_countdown = 0.2
+    conns = [await connect(n) for n in names]
+    udps = [await udp_peers() for _ in names]
+    code = (await conns[0].request(lobby_msg()))["lobby"]["id"]
+    await conns[1].request({"type": "lobby_join", "lobby": code})
+    for conn in conns:
+        state = await conn.request({"type": "lobby_ready", "ready": True})
+        assert state["lobby"]["reuse"] is False  # nothing was played in this lobby yet
+    gos = await run_to_go(server, list(zip(conns, udps)))
+    match = gos[0]["match"]
+    assert [go["lobby"] for go in gos] == [code, code]
+    if agreed:
+        await report_win({go["side"]: (conn, go) for conn, go in zip(conns, gos)}, 1)
+    else:
+        for conn in conns:
+            await conn.request({"type": "result", "match": match, "outcome": "desync", "frame": 5})
+    for conn in conns:
+        await lobby_state(conn, pred=lambda m: m["lobby"]["state"] != "in_match")
+    return conns, code, match
+
+
+@pytest.mark.parametrize("kept,expected", [
+    (("match", "match"), True),    # both kept their game from the match that ended with a result
+    (("match", ""), False),        # one's game was closed or started again meanwhile
+    (("", ""), False),
+    (("match", "0123456789ab"), False),  # a game parked after another match
+])
+async def test_a_lobby_match_with_a_result_leaves_the_games_for_the_same_two(server, connect, udp_peers, kept, expected):
+    """Both launchers keep their game parked after a lobby match with a result and say so with their ready (`parked`:
+    that match's id): the same two playing again start in those games (`reuse` in the lobby state and match_found),
+    and in new ones on both PCs when either game is gone."""
+    conns, code, match = await lobby_after_a_match(server, connect, udp_peers)
+    for conn in conns:
+        conn.take_all("lobby")
+    ids = [match if k == "match" else k for k in kept]
+    reply = None
+    for conn, parked in zip(conns, ids):
+        reply = await conn.request({"type": "lobby_ready", "ready": True, "parked": parked})
+    assert reply["lobby"]["starts_in"] is not None and reply["lobby"]["reuse"] is expected
+    founds = [await conn.expect("match_found") for conn in conns]
+    assert [f["reuse"] for f in founds] == [expected, expected] and founds[0]["match"] != match
+    # once the match runs, the state no longer says the games are for reuse
+    state = await lobby_state(conns[0], pred=lambda m: m["lobby"]["state"] == "in_match")
+    assert state["reuse"] is False
+
+
+async def test_the_welcome_says_lobbies_keep_their_games(server, connect):
+    conn = await connect("Probe")
+    assert conn.welcome["lobby_reuse"] is True
+
+
+async def test_a_lobby_match_without_a_result_leaves_no_games(server, connect, udp_peers):
+    conns, _, match = await lobby_after_a_match(server, connect, udp_peers, agreed=False)
+    for conn in conns:
+        conn.take_all("lobby")
+    for conn in conns:
+        reply = await conn.request({"type": "lobby_ready", "ready": True, "parked": match})
+    assert reply["lobby"]["reuse"] is False  # the games were closed (the launcher parks only after a result)
+    assert [(await conn.expect("match_found"))["reuse"] for conn in conns] == [False, False]
+
+
+async def test_another_pair_gets_new_games(server, connect, udp_peers):
+    """The opponent left and someone else took the place: the games parked after the last match are for a rematch of
+    the same two only, whatever the new pair says it kept."""
+    conns, code, match = await lobby_after_a_match(server, connect, udp_peers)
+    host, guest = conns
+    await host.request({"type": "lobby_leave"})
+    third = await connect("Sektor")
+    await third.request({"type": "lobby_join", "lobby": code})
+    for conn in (guest, third):
+        conn.take_all("lobby")
+    for conn in (guest, third):
+        reply = await conn.request({"type": "lobby_ready", "ready": True, "parked": match})
+    assert reply["lobby"]["starts_in"] is not None and reply["lobby"]["reuse"] is False
+    assert [(await conn.expect("match_found"))["reuse"] for conn in (guest, third)] == [False, False]
+
+
+async def test_unreadying_forgets_the_parked_game(server, connect, udp_peers):
+    """`parked` rides with each ready: a ready sent without it (the game was closed since) takes the claim back."""
+    conns, _, match = await lobby_after_a_match(server, connect, udp_peers)
+    host, guest = conns
+    server.cfg.lobby_countdown = 30  # no start while this test looks at the states
+    await host.request({"type": "lobby_ready", "ready": True, "parked": match})
+    first = await guest.request({"type": "lobby_ready", "ready": True, "parked": match})
+    assert first["lobby"]["reuse"] is True
+    again = await guest.request({"type": "lobby_ready", "ready": True, "parked": ""})
+    assert again["lobby"]["reuse"] is False

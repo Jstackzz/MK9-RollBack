@@ -193,7 +193,10 @@ LobbyPage::LobbyPage(ServerClient* server, MatchController* controller, QWidget*
                           {QStringLiteral("delay"), cfg::inputDelayValue(cfg::inputDelay())},
                           {QStringLiteral("netcode"), cfg::netcode()}, {QStringLiteral("relay"), cfg::hideIp()},
                           {QStringLiteral("hide_always"), cfg::hideIpAlways()},
-                          {QStringLiteral("link"), server_->linkType()}};
+                          {QStringLiteral("link"), server_->linkType()},
+                          // the match this PC's game stayed parked after ("" none): the server starts the next match
+                          // in the parked games when both kept theirs
+                          {QStringLiteral("parked"), on ? controller_->parkedMatch() : QString()}};
         if (controller_->serverRttMs() >= 0) ready.insert(QStringLiteral("server_rtt"), controller_->serverRttMs());
         server_->send(ready);
     });
@@ -490,9 +493,25 @@ void LobbyPage::showLobby(const QJsonObject& lobby) {
     startsAtMs_ = countsDown && !inMatch && startsIn >= 0
                       ? QDateTime::currentMSecsSinceEpoch() + qint64(startsIn * 1000.0) : 0;
     // Ready starts no game: this player's boots once the countdown for their match begins, on both PCs at once (at its
-    // hold point by the time the match is set up); a countdown called off closes it again, nothing waits in a lobby
+    // hold point by the time the match is set up), unless the game parked after the last match takes it; a countdown
+    // called off closes a game started for it again
     const bool myMatch = !meWatching && meReady && myPlace >= 0 && (!koth || myPlace < 2);
-    if (startsAtMs_ && myMatch) controller_->lobbyMatchComing(s(lobby, "game"));
+    // A game parked from this lobby's last match waits only for a rematch against the same opponent: another pair
+    // coming up (an opponent who left, went to watch or is no longer next in a King of the Hill line), this player
+    // watching, or another lobby, close it now. With the same pair the server's `reuse` has the next match start in it
+    // (both kept theirs), else both PCs start new games
+    if (controller_->hasParkedGame()) {
+        QString nextOpponent;
+        if (!meWatching && myPlace >= 0 && myPlace < 2 && playersIn >= 2)
+            nextOpponent = s(members.at(myPlace == 0 ? 1 : 0).toObject(), "name");
+        if (s(lobby, "id") != controller_->parkedLobby() || nextOpponent != controller_->parkedOpponent())
+            controller_->dropParkedGame(meWatching ? tr("Watching this lobby now: its parked game closed")
+                                        : nextOpponent.isEmpty()
+                                            ? tr("No opponent to play again in this lobby: its parked game closed")
+                                            : tr("The lobby's next match is against %1, not the last opponent: the parked "
+                                                 "game closed").arg(nextOpponent));
+    }
+    if (startsAtMs_ && myMatch) controller_->lobbyMatchComing(s(lobby, "game"), lobby.value(QStringLiteral("reuse")).toBool());
     else if (!inMatch) controller_->lobbyMatchCalledOff();
     start_->setVisible(host && !countsDown);
     start_->setEnabled(host && allReady && !inMatch);

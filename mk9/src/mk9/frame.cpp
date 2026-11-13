@@ -152,6 +152,7 @@ void WaitUntil(Steady::time_point t) {
 // the cap starts a late frame's next one as if it had been on time, so a sleep only took away what the frame waited
 // here anyway (a frame of 6 ms of work slept 16.7 and lost 5: a game held back every other frame still ran 52 a second)
 int g_hold = 0;
+double g_stretch_ms = 0;
 bool g_drop_catch_up = false;
 CapInfo g_cap_last;
 
@@ -159,25 +160,31 @@ void Cap() {
   if (g_cap_period == Steady::duration::zero()) {
     g_cap_last = {};
     g_cap_last.hold = g_hold;
-    if (g_hold) {
+    g_cap_last.stretch_ms = g_stretch_ms;
+    if (g_hold || g_stretch_ms > 0) {
       g_in_cap_wait.store(true, std::memory_order_relaxed);
-      std::this_thread::sleep_for(std::chrono::microseconds(16667) * g_hold);
+      std::this_thread::sleep_for(std::chrono::microseconds(16667) * g_hold +
+                                  std::chrono::microseconds(int64_t(g_stretch_ms * 1000.0)));
       g_in_cap_wait.store(false, std::memory_order_relaxed);
     }
     g_hold = 0;
+    g_stretch_ms = 0;
     return;
   }
   auto now = Steady::now();
   g_cap_last = {};
   g_cap_last.hold = g_hold;
+  g_cap_last.stretch_ms = g_stretch_ms;
   if (g_drop_catch_up) {
     g_cap_next = std::max(g_cap_next, now);  // what the cap trails the clock by is forgotten
     g_drop_catch_up = false;
   }
-  if (g_hold) {
+  if (g_hold || g_stretch_ms > 0) {
     // a hold counts from now (the cap may trail the clock by the slack)
-    g_cap_next = std::max(g_cap_next, now - kCapLate) + g_cap_period * g_hold;
+    g_cap_next = std::max(g_cap_next, now - kCapLate) + g_cap_period * g_hold +
+                 std::chrono::duration_cast<Steady::duration>(std::chrono::duration<double, std::milli>(g_stretch_ms));
     g_hold = 0;
+    g_stretch_ms = 0;
   }
   if (now < g_cap_next) {
     g_in_cap_wait.store(true, std::memory_order_relaxed);
@@ -261,6 +268,7 @@ void SetTopHook(Hook hook) { g_top = hook; }
 void SetEndHook(Hook hook) { g_end = hook; }
 bool Replaying() { return g_replaying.load(std::memory_order_relaxed); }
 void HoldNext(int periods) { g_hold = std::max(g_hold, periods); }
+void StretchNext(double ms) { g_stretch_ms = std::min(g_stretch_ms + std::max(ms, 0.0), 100.0); }
 CapInfo LastCap() { return g_cap_last; }
 void DropCatchUp() { g_drop_catch_up = true; }
 int64_t LastTopNs() { return g_top_ns.load(std::memory_order_relaxed); }

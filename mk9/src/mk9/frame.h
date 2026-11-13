@@ -42,12 +42,17 @@ bool Replaying();
 // Netplay keeping the sides even: the next frame starts `periods` whole frames later than the cap would start it (the
 // screen shows this frame that many times more). From the main thread
 void HoldNext(int periods = 1);
+// The same smoothly: the next frame starts `ms` later than the cap would start it. The lead over the others is taken
+// off over many frames, a few ms each (a tenth of a frame, a slowdown nobody sees), where whole frames held back were
+// frames shown twice. Calls add up. From the main thread
+void StretchNext(double ms);
 
 // The cap's last wait, which Top made first thing: how long it slept and the periods a hold added to it (what made a
 // frame long, for netplay's stats). From the main thread
 struct CapInfo {
   double slept_ms = 0;
   int hold = 0;
+  double stretch_ms = 0;
 };
 CapInfo LastCap();
 // The frame that just ran was late because it waited for the others (their inputs at the prediction limit), or the

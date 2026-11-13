@@ -134,6 +134,7 @@ the game's log (no IP addresses, no folder names), as long as you are signed in.
   one PC stalled 40 ms every 4 s, 2 instead of 31 for stalls of 22 ms every 1.5 s, and 7 instead of 45 in a match with
   40 ms of jitter. The server's match log counts what the screen got, not the frames' own starts (docs/PROTOCOL.md,
   "Match stats"), and says what made late frames late.
+- Until 0.5.12 the PC ahead of a slower or stalling one held whole frames back to wait for it, each a frame shown twice: in a player's fight 23 of the 29 late frames on the stronger PC were such holds, and against a PC held to 50 a second 912 gaps in 92 s. Since 0.5.12 the lead is taken off by starting every frame a few milliseconds later (a slowdown of a tenth of a frame, not a hitch): in test fights on one PC the stronger PC's screen showed 10 gaps over 25 ms instead of 912 (a peer at 50 a second), 11 instead of 695 (52), 29 instead of 114 (a peer stalling 130 ms), 2 instead of 15 (40 ms). Two PCs must play the same number of frames, so a PC that cannot keep 60 still sets the pace for both (docs/GAME.md, "A lead is taken off smoothly").
 - Until 0.5.10 the game wrote two log lines per GPU interrupt (75 a second, under the lock every kernel call of the
   game's threads takes) and a few a frame in some fights, each a flushed write to disk: a PC with a slow disk or a busy
   virus scanner could stall on them (not measured on such a PC). Repeated warnings are now written 8 times and then rarely. The game also asks Windows

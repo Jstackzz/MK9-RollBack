@@ -731,6 +731,23 @@ rollbacks every 10 s of the fight's busiest stretch):
   (`scriptcmp.py`: 0 of 5,999 frames differ); no stalls at all: nothing changes (0 rollbacks, 9 and 5 gaps against 9
   and 9); 40 ms of jitter, 4.5 rollbacks a second on the PC that guesses: 45 and 48 against 7 and 10. Not changed: a PC
   that runs slower all the time (a game held to 40 a second: the other still holds to 40).
+- **A lead is taken off smoothly, not with frames shown twice** (0.5.12, `frame::StretchNext`, `Pace()`;
+  `MK9_TEST_PACE_SMOOTH=0` is the whole-frame holds of 0.5.11 and before). A player's 0.5.11 fight (13 ms of ping, both
+  PCs at 60 a second on average): 23 of the 29 late frames on the stronger PC were holds, 8 of them in one second after
+  the other PC lost 130 ms, a burst at half speed, and the log said the other PC ran 52-54 a second at the fight's start
+  (its own late frames: the PC that did not stall is the one that paid). Two PCs have to play the same number of
+  frames, so the one that cannot keep 60 sets the pace; what can be chosen is how the other follows: whole frames
+  held back (a frame shown twice, 33 ms), a deeper guess and rollbacks of that depth (7-10 ms a frame run again here),
+  or starting each frame a little later. A PC with a lead of 0.75 frames or more now starts every frame 0.8 ms later,
+  up to 3.3 ms (a fifth of a frame) for a lead of 2.5 or more, and a PC that follows a slower one stretches every frame
+  to its pace (a frame in two against 30 a second: 8 ms more at 40 a second); the stretched time counts in the lead's
+  average like the holds did (`unseen`). `tools\pace-local.ps1` runs on one PC, 45 ms of lag each way with 15 of
+  jitter, the other PC's screen gaps over 25 ms (the stats' `scr25`), 0.5.11's holds against this, one binary: a peer
+  held to 52 a second 695 against 11, to 50 a second 912 against 10, a peer stalling 130 ms every 6 s 114 against 29
+  (the stalling PC's own 39 against 18, its rollbacks 30 against 12), a peer stalling 40 ms every 4 s 15 against 2,
+  two even games and a peer stalling 22 ms every 1.5 s no change; a peer held to 40 a second (25 ms a frame whatever
+  is done) still 2,280 against 2,222. Every match of the 16 runs ended with the same result on both PCs, no crash or
+  stand-still report.
 
 Diagnostics: `MK9_RB_TRACE_FOREIGN=1` (who writes which pages first, stacks of foreign writers,
 each page a simulation thread writes after another thread wrote it first), `MK9_RB_TRACE_SHARED=1`

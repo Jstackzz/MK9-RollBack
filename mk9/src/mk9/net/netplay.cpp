@@ -195,7 +195,8 @@ std::map<uint32_t, CheckDetail> g_check_detail;
 struct Pacing {
   std::deque<int> samples;     // the last frames' mine - theirs (Pace), twice the frames ahead
   double round_trip = -1;      // mine + theirs, slowly smoothed: the round trip in this PC's frames
-  std::deque<uint32_t> holds;  // the frames held back lately, for as long as they have not all shown
+  std::deque<std::pair<uint32_t, double>> holds;  // the frames held back lately (the frame, the part of a frame held), for as long as they have not all shown
+  double held_acc = 0;  // smooth pacing: the stretched time not yet counted as a frame held back (the stats)
   // at our last frame tops: when, the other's frame as heard and the periods this PC had stood still so far (held
   // back or waiting at the prediction limit); from them the frames the other ran a 60 Hz period lately and the frames
   // this PC ran a period it did not stand still (Pace), and the part of a frame still to hold back for the other
@@ -949,7 +950,7 @@ void StatTop() {
     const double ran = g_fp.cycles ? double(cycles - g_fp.cycles) : 0.0;
     if (ms > kLateMs) {
       const frame::CapInfo cap = frame::LastCap();
-      const int why = cap.hold > 0                                   ? 0
+      const int why = cap.hold > 0 || cap.stretch_ms >= 8.0          ? 0
                       : g_fp.wait_ms >= 4.0                          ? 1
                       : g_fp.rollback_ms >= 4.0                      ? 2
                       : g_fp.cycle_ema > 0 && ran > 1.5 * g_fp.cycle_ema ? 3
@@ -1210,14 +1211,14 @@ void Pace() {
   for (int v : s.samples) average += v;
   average /= double(s.samples.size());
   // what the frames held back lately have not taken off the average yet
-  while (!s.holds.empty() && double(g_frame - s.holds.front()) >= s.round_trip + kPaceWindow) s.holds.pop_front();
+  while (!s.holds.empty() && double(g_frame - s.holds.front().first) >= s.round_trip + kPaceWindow) s.holds.pop_front();
   double unseen = 0;
-  for (uint32_t h : s.holds) {
+  for (const auto& [h, amount] : s.holds) {
     // the samples since it that show it: mine's half from the frame after it on, theirs' from the frame the
     // round trip after it on (they heard of the frame after it then)
     const double k = double(g_frame - h);
-    unseen += double(kPaceWindow - std::clamp(k, 0.0, double(kPaceWindow))) / kPaceWindow;
-    unseen += double(kPaceWindow - std::clamp(k - s.round_trip, 0.0, double(kPaceWindow))) / kPaceWindow;
+    unseen += amount * double(kPaceWindow - std::clamp(k, 0.0, double(kPaceWindow))) / kPaceWindow;
+    unseen += amount * double(kPaceWindow - std::clamp(k - s.round_trip, 0.0, double(kPaceWindow))) / kPaceWindow;
   }
   const double ahead = average - unseen;
   s.ahead_sum += ahead;
@@ -1232,8 +1233,18 @@ void Pace() {
   }();
   s.streak = at_least > 0 && ahead >= at_least ? s.streak + 1 : 0;
   const bool following = s.had_hold && g_frame - s.last_hold < kPaceFollow;
-  const bool hold = at_least > 0 && ahead >= at_least && (s.streak >= streak_needed || following) &&
-                    (s.holds.empty() || g_frame - s.holds.back() >= kPaceGap);
+  // Smooth pacing (0.5.12, MK9_TEST_PACE_SMOOTH=0 for the whole frames of 0.5.11 and before): a lead is taken off by
+  // starting each frame a few ms later (below), not by frames held back, which the screen showed twice. The healthy PC
+  // of a pair paid for the other's every stall with a run of such holds: in a player's 0.5.11 fight 23 of its 29 late
+  // frames were holds, 8 of them in one second after the other PC lost 130 ms, a half-speed burst. A PC with a lead of
+  // kSmoothFrom frames or more stretches its frames by kSmoothBase ms, and more the further ahead it is (to kSmoothMax,
+  // 20 % of a frame): a lead of 1 frame is gone in about 20 frames, one of 4 in about 40
+  static const bool smooth = [] {
+    const char* v = std::getenv("MK9_TEST_PACE_SMOOTH");
+    return !(v && *v && std::atoi(v) == 0);
+  }();
+  const bool hold = !smooth && at_least > 0 && ahead >= at_least && (s.streak >= streak_needed || following) &&
+                    (s.holds.empty() || g_frame - s.holds.back().first >= kPaceGap);
   // the other's pace: the frames it ran a 60 Hz period over our last kPaceRateFrames frames, and ours not counting the
   // periods we stood still. Held back to only by a PC that runs clearly faster than the other, which runs clearly slower
   // than 60 a second; when more than half the threshold ahead (the one behind, or both near even, running slower too
@@ -1261,11 +1272,23 @@ void Pace() {
   s.my_rate = mine;
   s.keeping = at_least > 0 && rate < kPaceRateFull && rate < mine - kPaceRateMargin &&
               (ahead >= at_least / 2 || (s.keeping && ahead >= 0));
-  if (s.keeping) s.owed += 1.0 / rate - 1.0;
-  else s.owed = 0;
-  const int keep_pace = int(s.owed);
-  s.owed -= keep_pace;
-  const int periods = std::min(3, keep_pace + (hold ? 1 : 0));
+  constexpr double kSmoothFrom = 0.75, kSmoothBase = 0.8, kSmoothGain = 1.4, kSmoothMax = 3.3;
+  double keep_ms = 0, lead_ms = 0;  // smooth: what keeping pace with a slower PC and taking off a lead stretch this frame by
+  int periods = 0;
+  if (smooth) {
+    // a slower PC is followed by stretching every frame to its pace (a frame in two against 30 a second: 16.7 ms more)
+    if (s.keeping) keep_ms = std::min((1.0 / rate - 1.0) * 1000.0 / 60.0, 33.0);
+    const double lead = ahead / 2.0;
+    if (at_least > 0 && lead >= kSmoothFrom)
+      lead_ms = std::clamp(kSmoothBase + kSmoothGain * (lead - kSmoothFrom), kSmoothBase, kSmoothMax);
+    s.owed = 0;
+  } else {
+    if (s.keeping) s.owed += 1.0 / rate - 1.0;
+    else s.owed = 0;
+    const int keep_pace = int(s.owed);
+    s.owed -= keep_pace;
+    periods = std::min(3, keep_pace + (hold ? 1 : 0));
+  }
   // MK9_TRACE_PACE=<file> (diagnostics): every frame's sample, round trip, average, unseen part, hold, the time, the
   // other's pace, this PC's and the frames held back
   static FILE* trace = [] {
@@ -1280,9 +1303,27 @@ void Pace() {
   }
   // the lead's own correction shows in the average (unseen above); what keeps pace with the other does not move it
   if (hold) {
-    s.holds.push_back(g_frame);
+    s.holds.push_back({g_frame, 1.0});
     s.last_hold = g_frame;
     s.had_hold = true;
+  }
+  if (lead_ms > 0) {  // the lead's own correction: the part of a frame it takes off shows in the average later (unseen)
+    s.holds.push_back({g_frame, lead_ms * 60.0 / 1000.0});
+    s.last_hold = g_frame;
+    s.had_hold = true;
+  }
+  if (lead_ms + keep_ms > 0) {
+    const double ms = std::min(lead_ms + keep_ms, 50.0);
+    frame::StretchNext(ms);
+    const double frames = ms * 60.0 / 1000.0;
+    s.paused += frames;
+    s.held_acc += frames;
+    while (s.held_acc >= 1.0) {  // the stats count whole frames' worth
+      s.held_acc -= 1.0;
+      s.held++;
+      g_ms.held++;
+      if (MatchStats::Second* sec = StatSecond()) Add(sec->held, 1u);
+    }
   }
   if (periods) {
     s.held += uint32_t(periods);
